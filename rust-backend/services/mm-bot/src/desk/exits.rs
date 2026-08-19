@@ -52,7 +52,7 @@ use crate::pricing::{compute_spot_from_cache, Staleness};
 
 use super::book::{self, Book, CoinPosition, Holding, Written};
 use super::model::MarketModel;
-use super::CuratorRefs;
+use super::{CuratorRefs, DeskShared};
 
 const ALERT_ID: &str = "tx-failed-mm-bot-desk";
 
@@ -156,6 +156,8 @@ pub struct ExitsParams {
     pub cfg: ExitsConfig,
     pub secrets: runtime_config::Secrets,
     pub network: Network,
+    /// Shared desk state — the SO-418 risk gate lives here.
+    pub shared: Arc<DeskShared>,
     pub book: Arc<RwLock<Book>>,
     pub models: Arc<Vec<MarketModel>>,
     pub market_feeds: Vec<(PriceFeedId, u8)>,
@@ -318,6 +320,20 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             );
             continue;
         };
+        // SO-418 risk gate: `exercise_call_coin` spends vault FREE
+        // settlement to pay the strike — in risk-off nothing leaves free
+        // balances except withdrawal fulfillment, so the session aborts
+        // on-chain. Hold instead of burning gas. (Offset closes above
+        // keep running: netting is unwinding, and frees collateral INTO
+        // the vault.)
+        if p.shared.risk_off.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!(
+                bucket = %h.bucket_id.to_hex(),
+                ?action,
+                "vault-custody exercise wanted but the vault is risk-off; holding"
+            );
+            continue;
+        }
         let res = vault_exercise(p, wrap, refs, &h).await;
         if let Err(e) = res {
             tracing::error!(

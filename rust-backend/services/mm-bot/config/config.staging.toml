@@ -80,8 +80,15 @@ mm_release_enabled = true
 # TSUI = "0x..."
 
 # Self-provisioning: create a vault when there is none of ours to adopt.
+# v2 (SO-418): defaults create an UNTRANCHED vault (structure_code 0,
+# terms_version 1) and fund the escrowed curator commitment with
+# commitment_deposit ($100k TUSDC default) via deposit_into_commitment —
+# the boot fails if the commitment can't be funded on a fresh vault, and
+# the desk idles (healthy-but-idle, no rollback) if an adopted vault is
+# risk-off. See config.toml for the tranched knobs.
 [desk.provision]
 enabled = true
+commitment_deposit = 100_000_000_000 # $100k at TUSDC's 6 decimals
 
 # Exchange resting-ask exits (SO-416): list option inventory as asks on
 # the in-house exchange; the matching engine executes the resales.

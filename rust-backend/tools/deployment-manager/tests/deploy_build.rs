@@ -45,7 +45,10 @@ const PUBLISHABLE: &[&str] = &[
     // against it.
     "whitelist",
     "core",
-    "trading-vault",
+    // v2 (SO-418): the published trading-vault package is `vault_v2`;
+    // contracts/trading-vault remains in-tree as read-only reference and
+    // is no longer published.
+    "trading-vault-v2",
     "oracle-pyth",
     "oracle-switchboard",
     "deepbook-adapter",

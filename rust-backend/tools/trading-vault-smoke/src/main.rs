@@ -1,10 +1,36 @@
-//! End-to-end smoke of the curated trading vault on a live network
-//! (SO-292): create a vault → deposit → DeepBook custody → resting order
-//! through the wrapped BalanceManager → appraised deposit with the
-//! custody live → cancel/sweep/withdraw → queue + fulfill → assert the
-//! depositor got every unit back. Exercises vault core, the DeepBook
-//! adapter, the appraisal composer, and the withdrawal queue against
-//! REAL deployed contracts.
+//! End-to-end acceptance smoke of the curated trading vault **v2**
+//! (`vault_v2`, SO-418) on a live network — the release gate's "SDK
+//! behavior checked against the state-transition matrix" artifact
+//! (overhaul plan §9.5.3). Exercises vault core (position NFTs, tranches,
+//! lanes, settlement pool), the DeepBook adapter, the appraisal composer,
+//! and the withdrawal queue against REAL deployed contracts.
+//!
+//! Default scenario plan:
+//!   A. untranched vault: create → deposit (VaultPosition NFT lands in the
+//!      wallet) → risk-off read-back (commitment unfunded → risk-off;
+//!      funded → risk-on) → curator commitment funding → crank_capital →
+//!      split → merge → DeepBook custody leg → request_withdraw
+//!      (position-consuming) → fulfill → payout/fee asserts → multi-asset
+//!      leg (attested TBTC deposit, global-seq amend, mixed fulfillment)
+//!   B. tranched vault (unless --skip-tranched): create senior/junior →
+//!      junior seed (commitment + junior deposit) → senior deposit under
+//!      the target gate → over-target senior deposit ABORTS 123 →
+//!      risk-state read-back → senior withdraw request (lane 0) →
+//!      initiate/finalize close → snapshot_settlement →
+//!      settle_queued_request + redeem_settled_position +
+//!      withdraw_commitment_settled → drained-pool asserts
+//!
+//! Explicitly NOT smoked here (and why):
+//!   - coverage breach / impairment / junior reset / burn_wiped_position:
+//!     need real NAV losses and the 7-day reset seasoning — impossible on
+//!     a live network without price manipulation. Anchored by the Move
+//!     tests named in docs/trading-vault-v2/spec.md §9.
+//!   - begin_quote_session's on-chain risk-off abort (124): needs an
+//!     adapter witness, i.e. the full exchange stack. Covered INDIRECTLY
+//!     by the `vault::is_risk_off` read-back asserts in scenario A (the
+//!     same predicate gates the session).
+//!   - secondary position transfer: a plain Sui `TransferObjects` on a
+//!     `key + store` object — nothing protocol-specific to smoke.
 //!
 //!   cargo run -p trading-vault-smoke -- \
 //!     --address 0xab8d… [--rpc …] [--env staging] [--indexer-graphql …]
@@ -31,6 +57,7 @@ use sui_tx::tx::appraisal::{
 };
 use sui_tx::tx::pyth_update::PythHandles;
 use sui_tx::tx::deepbook::derived_pool_params;
+use sui_tx::tx::trading_vault as tv;
 use sui_tx::tx::{clock_arg, shared_object_arg, submit_ptb};
 
 #[derive(Parser)]
@@ -57,6 +84,11 @@ struct Cli {
     /// deposit + amended payout + fulfillment potato).
     #[arg(long, default_value_t = false)]
     skip_multi_asset: bool,
+    /// Skip the tranched-vault + terminal-settlement scenarios (v2
+    /// acceptance section B). Both are cash-only and need no extra
+    /// services; skip only for a quick core-loop iteration.
+    #[arg(long, default_value_t = false)]
+    skip_tranched: bool,
     /// Stop after create/deposit/custody-fund and leave the vault live
     /// (for pointing a vault-mode mm-bot at it). Prints the ids to keep.
     #[arg(long, default_value_t = false)]
@@ -88,6 +120,53 @@ struct Cli {
 struct LiveOracle {
     client: oracle_client::OracleClient,
     descriptor: oracle_client::OracleDescriptor,
+}
+
+// ═══════════════════ v2 terms provenance (spec.md §preamble) ═══════════════════
+
+/// The spec version every smoke vault binds its terms to.
+const TERMS_VERSION: u64 = 1;
+
+/// The exact spec document, embedded at compile time — the smoke runs
+/// from the repo checkout, so this always matches what the deployment
+/// ceremony recorded (deployment-manager embeds the same file).
+const SPEC_MD: &[u8] = include_bytes!("../../../../docs/trading-vault-v2/spec.md");
+
+fn spec_hash() -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(SPEC_MD).to_vec()
+}
+
+/// An untranched `CreateVaultSpec`: structure 0, all six tranche params 0
+/// (the contract aborts otherwise).
+fn untranched_spec() -> tv::CreateVaultSpec {
+    tv::CreateVaultSpec {
+        lockup_ms: 0,
+        curator_fee_bps: 1_000,
+        unwind_grace_ms: 3_600_000,
+        structure_code: 0,
+        senior_hurdle_bps_annual: 0,
+        target_junior_bps: 0,
+        maintenance_junior_bps: 0,
+        upside_code: 0,
+        residual_participation_bps: 0,
+        total_return_cap_bps: 0,
+        terms_version: TERMS_VERSION,
+        spec_hash: spec_hash(),
+    }
+}
+
+/// Senior/junior spec inside the protocol bounds (hurdle ≤ 2000, target ≥
+/// 1000, maintenance in [500, target]); PreferredOnly upside.
+fn tranched_spec() -> tv::CreateVaultSpec {
+    tv::CreateVaultSpec {
+        structure_code: 1,
+        senior_hurdle_bps_annual: 1_000, // 10% annual
+        target_junior_bps: 2_000,        // 20%
+        maintenance_junior_bps: 1_000,   // 10%
+        upside_code: 0,                  // PreferredOnly (participation/cap must be 0)
+        ..untranched_spec()
+    }
 }
 
 fn load_signer(address: &str) -> Result<Signer> {
@@ -134,12 +213,39 @@ struct Ids {
     deposit_faucet: ObjectID,
 }
 
+impl Ids {
+    fn appraisal_refs(&self, vault_id: ObjectID) -> AppraisalRefs {
+        AppraisalRefs {
+            trading_vault_pkg: self.trading_vault_pkg,
+            deepbook_adapter_pkg: Some(self.deepbook_adapter_pkg),
+            options_adapter_pkg: Some(self.options_adapter_pkg),
+            exchange_adapter_pkg: self.exchange_adapter_pkg,
+            vault_id,
+            protocol_config_id: self.protocol_config_id,
+            oracle_registry_id: self.oracle_registry_id,
+            // SO-299: smoke vaults have no external account.
+            equity_oracle_pkg: None,
+            equity_book_id: None,
+            vol_book_id: self.vol_book_id,
+        }
+    }
+
+    fn tv_refs<'a>(&'a self, vault_id: ObjectID) -> tv::TradingVaultRefs<'a> {
+        tv::TradingVaultRefs {
+            package: self.trading_vault_pkg,
+            vault_id,
+            protocol_config_id: self.protocol_config_id,
+            deposit_type: &self.deposit_coin_type,
+        }
+    }
+}
+
 async fn resolve_ids(client: &ChainClient, cli: &Cli) -> Result<Ids> {
     let deps = deployments::Deployments::load(&cli.deployments)
         .context("loading deployments.json")?;
     let net = deps.for_env(&cli.env)?;
     let pi = &net.package_info;
-    let tv = pi.trading_vault.as_ref().ok_or_else(|| anyhow!("no tradingVault record"))?;
+    let tv_rec = pi.trading_vault.as_ref().ok_or_else(|| anyhow!("no tradingVault record"))?;
     let op = pi.oracle_pyth.as_ref().ok_or_else(|| anyhow!("no oraclePyth record"))?;
     let dba = pi
         .deepbook_adapter
@@ -165,7 +271,7 @@ async fn resolve_ids(client: &ChainClient, cli: &Cli) -> Result<Ids> {
             objs.pool_allowlist()?,
         )
     } else {
-        let tv_created = created_map(client, &tv.publish_digest).await?;
+        let tv_created = created_map(client, &tv_rec.publish_digest).await?;
         let op_created = created_map(client, &op.publish_digest).await?;
         let dba_created = created_map(client, &dba.publish_digest).await?;
         let pick = |m: &BTreeMap<String, ObjectID>, k: &str| {
@@ -181,7 +287,7 @@ async fn resolve_ids(client: &ChainClient, cli: &Cli) -> Result<Ids> {
     };
 
     Ok(Ids {
-        trading_vault_pkg: tv.package()?,
+        trading_vault_pkg: tv_rec.package()?,
         oracle_pyth_pkg: op.package()?,
         deepbook_adapter_pkg: dba.package()?,
         options_adapter_pkg: oa.package()?,
@@ -312,54 +418,9 @@ async fn main() -> Result<()> {
         }
         None => None,
     };
-    println!("trading-vault smoke — signer {}, env {}", signer.address, cli.env);
+    println!("trading-vault v2 smoke — signer {}, env {}", signer.address, cli.env);
 
-    // ── 1. create vault (deposit asset TUSDC, creator == curator, no lockup)
-    let step = Step("create_vault");
-    let mut pt = ProgrammableTransactionBuilder::new();
-    let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
-    let wl = pt.obj(shared_object_arg(&client, ids.whitelist_id, false).await?)?;
-    let a0 = pt.pure(0u64)?; // lockup
-    let a1 = pt.pure(1_000u64)?; // curator fee bps
-    let a2 = pt.pure(3_600_000u64)?; // unwind grace
-    let deposit_tag = TypeTag::from_str(&ids.deposit_coin_type)?;
-    pt.programmable_move_call(
-        ids.trading_vault_pkg,
-        Identifier::new("vault").unwrap(),
-        Identifier::new("create_vault").unwrap(),
-        vec![deposit_tag.clone()],
-        vec![cfg, wl, a0, a1, a2],
-    );
-    let resp = submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::create_vault").await?;
-    let (mut vault_id, mut cap_id) = (None, None);
-    for c in created_objects(&resp) {
-        let Ok(tag) = sui_types::parse_sui_struct_tag(&c.object_type) else { continue };
-        match tag.name.as_str() {
-            "TradingVault" => vault_id = Some(c.object_id),
-            "CuratorCap" => cap_id = Some(c.object_id),
-            _ => {}
-        }
-    }
-    let vault_id = vault_id.ok_or_else(|| anyhow!("vault not created"))?;
-    let cap_id = cap_id.ok_or_else(|| anyhow!("curator cap not created"))?;
-    step.ok();
-    println!("    vault {vault_id}");
-
-    // ── 2. faucet-mint + deposit
-    let step = Step("deposit (cash-only appraisal)");
-    let refs = AppraisalRefs {
-        trading_vault_pkg: ids.trading_vault_pkg,
-        deepbook_adapter_pkg: Some(ids.deepbook_adapter_pkg),
-        options_adapter_pkg: Some(ids.options_adapter_pkg),
-        exchange_adapter_pkg: ids.exchange_adapter_pkg,
-        vault_id,
-        protocol_config_id: ids.protocol_config_id,
-        oracle_registry_id: ids.oracle_registry_id,
-        // SO-299: the smoke vault has no external account.
-        equity_oracle_pkg: None,
-        equity_book_id: None,
-        vol_book_id: ids.vol_book_id,
-    };
+    // Shared context the appraisal legs need.
     let http = reqwest::Client::new();
     let (pool_buckets, option_map) = match fetch_bucket_catalog(&cli.indexer_graphql).await {
         Ok(m) => m,
@@ -377,32 +438,160 @@ async fn main() -> Result<()> {
                 .insert(protocol_types::asset::canonicalize_move_type(&t.coin_type), f);
         }
     }
+
+    // ── A1. create the untranched vault (accounting asset TUSDC, creator
+    // == curator, no lockup, v2 terms provenance bound to spec.md).
+    let step = Step("create_vault (untranched, terms_version 1)");
+    let creation = tv::create_vault(
+        &client,
+        &signer,
+        ids.trading_vault_pkg,
+        ids.protocol_config_id,
+        ids.whitelist_id,
+        &ids.deposit_coin_type,
+        &untranched_spec(),
+        cli.gas_budget,
+    )
+    .await?;
+    let vault_id = creation.vault_id;
+    let cap_id = creation.curator_cap_id;
+    step.ok();
+    println!("    vault {vault_id}");
+
+    let refs = ids.appraisal_refs(vault_id);
+    let tv_refs = ids.tv_refs(vault_id);
+
+    // ── A2. faucet-mint + deposit (tranche 0) — the minted VaultPosition
+    // NFT must land in this wallet.
+    let step = Step("deposit → VaultPosition NFT in wallet");
     let mut pt = ProgrammableTransactionBuilder::new();
     let holdings = discover_holdings(&client, vault_id).await?;
     let (appraisal, _) =
         compose_appraisal(&client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
-    let faucet = pt.obj(shared_object_arg(&client, ids.deposit_faucet, true).await?)?;
-    let amount = pt.pure(cli.deposit_amount)?;
-    let coin = pt.programmable_move_call(
+    let coin = faucet_mint(
+        &client,
+        &mut pt,
         ids.tokens_pkg,
-        Identifier::new(&*ids.deposit_module).unwrap(),
-        Identifier::new("mint").unwrap(),
-        vec![],
-        vec![faucet, amount],
+        ids.deposit_faucet,
+        &ids.deposit_module,
+        cli.deposit_amount,
+    )
+    .await?;
+    tv::build_deposit_and_transfer(
+        &client,
+        &mut pt,
+        &tv_refs,
+        ids.whitelist_id,
+        appraisal,
+        coin,
+        /* tranche */ 0,
+        signer.address,
+    )
+    .await?;
+    let resp = submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit").await?;
+    let position_1 = created_position(&resp)?;
+    let p1 = position_snapshot(&client, position_1).await?;
+    if p1.vault_id != vault_id {
+        bail!("position {position_1} names vault {} — expected {vault_id}", p1.vault_id);
+    }
+    if p1.shares == 0 {
+        bail!("minted position {position_1} carries zero shares");
+    }
+    step.ok();
+    println!("    position {position_1} ({} shares, basis {})", p1.shares, p1.basis);
+
+    // ── A3. risk-off read-back: with the curator commitment unfunded the
+    // vault is risk-off (commitment breach, §8.6) — the SAME predicate
+    // that makes begin_quote_session abort 124 and forces sessions.
+    let step = Step("risk-off while commitment unfunded (quote-session gate, indirect)");
+    if !vault_is_risk_off(&client, signer.address, &ids, vault_id).await? {
+        bail!("vault with zero curator commitment is not risk-off — §8.6 gate broken?");
+    }
+    step.ok();
+
+    // ── A4. curator commitment funding cures the breach.
+    let step = Step("deposit_into_commitment cures the commitment breach");
+    let commitment_amount = cli.deposit_amount / 10;
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let holdings = discover_holdings(&client, vault_id).await?;
+    let (appraisal, _) =
+        compose_appraisal(&client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
+    let coin = faucet_mint(
+        &client,
+        &mut pt,
+        ids.tokens_pkg,
+        ids.deposit_faucet,
+        &ids.deposit_module,
+        commitment_amount,
+    )
+    .await?;
+    tv::build_deposit_into_commitment(
+        &client,
+        &mut pt,
+        &tv_refs,
+        ids.whitelist_id,
+        cap_id,
+        appraisal,
+        coin,
+    )
+    .await?;
+    submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::fund_commitment").await?;
+    let (exists, commitment_shares) =
+        commitment_of(&client, signer.address, &ids, vault_id, cap_id).await?;
+    if !exists || commitment_shares == 0 {
+        bail!("commitment escrow missing after deposit_into_commitment");
+    }
+    if vault_is_risk_off(&client, signer.address, &ids, vault_id).await? {
+        bail!("vault still risk-off after funding the commitment");
+    }
+    step.ok();
+    println!("    commitment {commitment_shares} shares escrowed");
+
+    // ── A5. permissionless capital crank (the keeper's cadence call).
+    let step = Step("crank_capital");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let holdings = discover_holdings(&client, vault_id).await?;
+    let (appraisal, _) =
+        compose_appraisal(&client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
+    tv::build_crank_capital(&client, &mut pt, &tv_refs, appraisal).await?;
+    submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::crank_capital").await?;
+    step.ok();
+
+    // ── A6. split conserves shares+basis; merge restores them.
+    let step = Step("split + merge conserve shares and basis");
+    let half = p1.shares / 2;
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let child = tv::build_split_position(&client, &mut pt, &tv_refs, position_1, half).await?;
+    pt.transfer_arg(signer.address, child);
+    let resp = submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::split").await?;
+    let child_id = created_position(&resp)?;
+    let (parent_after, child_after) = (
+        position_snapshot(&client, position_1).await?,
+        position_snapshot(&client, child_id).await?,
     );
-    let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
-    let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
-    let wl = pt.obj(shared_object_arg(&client, ids.whitelist_id, false).await?)?;
-    let att = opt_attestation(&mut pt, ids.trading_vault_pkg, None)?;
-    let clock = clock_arg(&mut pt)?;
-    pt.programmable_move_call(
-        ids.trading_vault_pkg,
-        Identifier::new("vault").unwrap(),
-        Identifier::new("deposit").unwrap(),
-        vec![deposit_tag.clone()],
-        vec![vault_arg, cfg, wl, appraisal, coin, att, clock],
-    );
-    submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit").await?;
+    if child_after.shares != half || parent_after.shares != p1.shares - half {
+        bail!(
+            "split shares wrong: parent {} + child {} != {}",
+            parent_after.shares,
+            child_after.shares,
+            p1.shares
+        );
+    }
+    if parent_after.basis + child_after.basis != p1.basis {
+        bail!(
+            "split lost basis: {} + {} != {}",
+            parent_after.basis,
+            child_after.basis,
+            p1.basis
+        );
+    }
+    let mut pt = ProgrammableTransactionBuilder::new();
+    tv::build_merge_positions(&client, &mut pt, &tv_refs, position_1, child_id).await?;
+    submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::merge").await?;
+    let merged = position_snapshot(&client, position_1).await?;
+    if merged.shares != p1.shares || merged.basis != p1.basis {
+        bail!("merge did not restore shares/basis: {} / {}", merged.shares, merged.basis);
+    }
     step.ok();
 
     if cli.direct_escrow {
@@ -412,6 +601,8 @@ async fn main() -> Result<()> {
     }
 
     let mut custody: Option<(ObjectID, ObjectID, String, String)> = None;
+    let mut position_2: Option<ObjectID> = None;
+    let deposit_tag = TypeTag::from_str(&ids.deposit_coin_type)?;
     if !cli.skip_deepbook {
         // ── 3. custody + resting order on an allowlisted pool
         let step = Step("init_custody + fund");
@@ -586,15 +777,9 @@ async fn main() -> Result<()> {
             let u_faucet = u_faucet?;
             let write_amt = qty * 3; // headroom for input-token taker fees
             let mut pt = ProgrammableTransactionBuilder::new();
-            let faucet = pt.obj(shared_object_arg(&client, u_faucet, true).await?)?;
-            let amount = pt.pure(write_amt)?;
-            let minted = pt.programmable_move_call(
-                ids.tokens_pkg,
-                Identifier::new(&*u_module).unwrap(),
-                Identifier::new("mint").unwrap(),
-                vec![],
-                vec![faucet, amount],
-            );
+            let minted =
+                faucet_mint(&client, &mut pt, ids.tokens_pkg, u_faucet, &u_module, write_amt)
+                    .await?;
             let bucket = pt.obj(shared_object_arg(&client, bref.bucket_id, true).await?)?;
             let wl = pt
                 .obj(shared_object_arg(&client, ids.whitelist_id, false).await?)?;
@@ -688,7 +873,8 @@ async fn main() -> Result<()> {
             println!("    custody now holds {call_bal} {}", &base_ty[..14.min(base_ty.len())]);
         }
 
-        // ── 4. deposit again WITH the custody live (appraisal covers it)
+        // ── 4. deposit again WITH the custody live (appraisal covers it);
+        // second VaultPosition NFT to this wallet.
         let step = Step("deposit with live custody (composed appraisal)");
         let holdings = discover_holdings(&client, vault_id).await?;
         let mut pt = ProgrammableTransactionBuilder::new();
@@ -708,53 +894,45 @@ async fn main() -> Result<()> {
             &[],
         )
         .await?;
-        let faucet = pt.obj(shared_object_arg(&client, ids.deposit_faucet, true).await?)?;
-        let amount = pt.pure(cli.deposit_amount)?;
-        let coin = pt.programmable_move_call(
+        let coin = faucet_mint(
+            &client,
+            &mut pt,
             ids.tokens_pkg,
-            Identifier::new(&*ids.deposit_module).unwrap(),
-            Identifier::new("mint").unwrap(),
-            vec![],
-            vec![faucet, amount],
-        );
-        let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
-        let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
-        let att = opt_attestation(&mut pt, ids.trading_vault_pkg, None)?;
-        let clock = clock_arg(&mut pt)?;
-        pt.programmable_move_call(
-            ids.trading_vault_pkg,
-            Identifier::new("vault").unwrap(),
-            Identifier::new("deposit").unwrap(),
-            vec![deposit_tag.clone()],
-            vec![vault_arg, cfg, appraisal, coin, att, clock],
-        );
-        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit_with_custody").await?;
+            ids.deposit_faucet,
+            &ids.deposit_module,
+            cli.deposit_amount,
+        )
+        .await?;
+        tv::build_deposit_and_transfer(
+            &client,
+            &mut pt,
+            &tv_refs,
+            ids.whitelist_id,
+            appraisal,
+            coin,
+            /* tranche */ 0,
+            signer.address,
+        )
+        .await?;
+        let resp =
+            submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit_with_custody").await?;
+        position_2 = Some(created_position(&resp)?);
         step.ok();
     }
 
     if cli.fill_bid {
         // ── 5'. fill-bid mode: crystallize a PARTIAL withdrawal through the
-        // option-coin appraisal, then leave the vault OPEN with its CALL
-        // inventory — the live MM-vault state. Full-drain coverage lives in
-        // the default (no-fill) mode.
+        // option-coin appraisal — v2 partials consume a whole position, so
+        // the first deposit's position exits while the second stays — then
+        // leave the vault OPEN with its CALL inventory (the live MM-vault
+        // state). Full-drain coverage lives in the default (no-fill) mode.
         let step = Step("partial withdraw + fulfill (option-coin appraisal)");
-        let total_shares = read_total_shares(&client, vault_id).await?;
-        let half = total_shares / 2;
-        if half == 0 {
-            bail!("no shares to withdraw");
-        }
+        let before = read_total_shares(&client, vault_id).await?;
+        let exiting = position_snapshot(&client, position_1).await?;
         let mut pt = ProgrammableTransactionBuilder::new();
-        let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
-        let shares = pt.pure(half)?;
-        let clock = clock_arg(&mut pt)?;
-        pt.programmable_move_call(
-            ids.trading_vault_pkg,
-            Identifier::new("vault").unwrap(),
-            Identifier::new("request_withdraw").unwrap(),
-            vec![deposit_tag.clone()],
-            vec![vault_arg, shares, clock],
-        );
-        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::request_withdraw_half").await?;
+        tv::build_request_withdraw(&client, &mut pt, &tv_refs, &ids.deposit_coin_type, position_1)
+            .await?;
+        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::request_withdraw_partial").await?;
 
         let holdings = discover_holdings(&client, vault_id).await?;
         let mut pt = ProgrammableTransactionBuilder::new();
@@ -774,21 +952,23 @@ async fn main() -> Result<()> {
             &[],
         )
         .await?;
-        let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
-        let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
-        let treasury = pt.obj(shared_object_arg(&client, ids.treasury_id, true).await?)?;
-        let clock = clock_arg(&mut pt)?;
-        pt.programmable_move_call(
-            ids.trading_vault_pkg,
-            Identifier::new("vault").unwrap(),
-            Identifier::new("fulfill_withdrawals").unwrap(),
-            vec![deposit_tag.clone()],
-            vec![vault_arg, cfg, treasury, appraisal, clock],
-        );
-        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::fulfill_half").await?;
+        tv::build_fulfill_withdrawals(&client, &mut pt, &tv_refs, ids.treasury_id, appraisal)
+            .await?;
+        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::fulfill_partial").await?;
+        if pending_withdrawals(&client, signer.address, &ids, vault_id).await? != 0 {
+            bail!("partial withdrawal not fulfilled");
+        }
+        // The filled bid usually leaves the exiting lot with a mark
+        // profit, whose performance fee mints shares into the curator
+        // commitment (§5) — so the burn is NET of a small fee mint.
         let after = read_total_shares(&client, vault_id).await?;
-        if after != total_shares - half {
-            bail!("share supply {after} != expected {}", total_shares - half);
+        let net_burn = before.saturating_sub(after);
+        if net_burn < exiting.shares * 9 / 10 {
+            bail!(
+                "share supply only dropped {net_burn} of the {} requested — fulfillment paid \
+                 the wrong lot?",
+                exiting.shares
+            );
         }
         step.ok();
         println!(
@@ -836,22 +1016,23 @@ async fn main() -> Result<()> {
         step.ok();
     }
 
-    // ── 6. request everything back + fulfill; the depositor's stake is
-    // exactly the two deposits (no profit → no fee).
-    let step = Step("request_withdraw + fulfill");
-    let total = if cli.skip_deepbook { cli.deposit_amount } else { cli.deposit_amount * 2 };
+    // ── 6. exit everything: merge the second position into the first,
+    // request-withdraw the merged position (consumed whole), fulfill. The
+    // depositor's claim is exactly the two deposits (no profit → no fee).
+    let step = Step("merge + request_withdraw (position-consuming) + fulfill");
+    if let Some(p2) = position_2 {
+        let mut pt = ProgrammableTransactionBuilder::new();
+        tv::build_merge_positions(&client, &mut pt, &tv_refs, position_1, p2).await?;
+        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::merge_deposits").await?;
+    }
+    let exiting = position_snapshot(&client, position_1).await?;
     let mut pt = ProgrammableTransactionBuilder::new();
-    let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
-    let shares = pt.pure(total as u128)?;
-    let clock = clock_arg(&mut pt)?;
-    pt.programmable_move_call(
-        ids.trading_vault_pkg,
-        Identifier::new("vault").unwrap(),
-        Identifier::new("request_withdraw").unwrap(),
-        vec![deposit_tag.clone()],
-        vec![vault_arg, shares, clock],
-    );
+    tv::build_request_withdraw(&client, &mut pt, &tv_refs, &ids.deposit_coin_type, position_1)
+        .await?;
     submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::request_withdraw").await?;
+    if pending_withdrawals(&client, signer.address, &ids, vault_id).await? != 1 {
+        bail!("queue should hold exactly the one consumed-position request");
+    }
 
     let holdings = discover_holdings(&client, vault_id).await?;
     let mut pt = ProgrammableTransactionBuilder::new();
@@ -871,26 +1052,26 @@ async fn main() -> Result<()> {
         &[],
     )
     .await?;
-    let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
-    let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
-    let treasury = pt.obj(shared_object_arg(&client, ids.treasury_id, true).await?)?;
-    let clock = clock_arg(&mut pt)?;
-    pt.programmable_move_call(
-        ids.trading_vault_pkg,
-        Identifier::new("vault").unwrap(),
-        Identifier::new("fulfill_withdrawals").unwrap(),
-        vec![deposit_tag.clone()],
-        vec![vault_arg, cfg, treasury, appraisal, clock],
-    );
+    tv::build_fulfill_withdrawals(&client, &mut pt, &tv_refs, ids.treasury_id, appraisal).await?;
     submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::fulfill").await?;
     step.ok();
+    println!("    exited {} shares", exiting.shares);
 
-    // ── 7. verify: vault drained, stake gone.
-    let step = Step("verify vault drained");
+    // ── 7. verify payouts/fees: queue drained; the user's shares are gone
+    // (only the escrowed commitment remains — v2 keeps it in the book);
+    // with no profit, no fee — the vault's accounting balance is exactly
+    // the commitment's value (± floor dust).
+    let step = Step("verify payouts (queue drained, only the commitment remains)");
+    if pending_withdrawals(&client, signer.address, &ids, vault_id).await? != 0 {
+        bail!("withdrawal queue not drained");
+    }
+    let (senior, junior) = read_book_shares(&client, vault_id).await?;
+    if senior != 0 || junior != commitment_shares {
+        bail!(
+            "book ({senior} senior / {junior} junior) != commitment-only ({commitment_shares})"
+        );
+    }
     let holdings = discover_holdings(&client, vault_id).await?;
-    // An EMPTY DeepBook custody legitimately remains (durable adapter
-    // infrastructure, appraises at 0; removable via eject_empty_custody
-    // before closure). Anything else is residual value.
     let residual = !holdings.free_assets.is_empty()
         || holdings.positions.iter().any(|p| {
             !matches!(
@@ -900,13 +1081,28 @@ async fn main() -> Result<()> {
             )
         });
     if residual {
-        bail!("vault still holds assets/positions after full exit: {holdings:?}");
+        bail!("vault still holds non-accounting assets/positions after full exit: {holdings:?}");
+    }
+    let vault_bal = vault_free_balance(
+        &client,
+        signer.address,
+        ids.trading_vault_pkg,
+        vault_id,
+        &ids.deposit_coin_type,
+    )
+    .await?;
+    if vault_bal.abs_diff(commitment_amount) > 8 {
+        bail!(
+            "vault accounting balance {vault_bal} != commitment {commitment_amount} — \
+             payout or fee math off"
+        );
     }
     step.ok();
 
     // ── 8. multi-asset leg (SO-370): curator allowlists TBTC, a depositor
-    // deposits it with the attestation-bearing composer, requests payout in
-    // TUSDC then amends to TBTC, and the fulfillment potato pays it out.
+    // deposits it with the attestation-bearing composer (minting a TBTC-lot
+    // position), requests payout in TUSDC then amends (by GLOBAL sequence)
+    // to TBTC, and the fulfillment potato pays it out.
     if !cli.skip_multi_asset {
         let step = Step("multi-asset: allowlist TBTC + attested deposit");
         let tt = net_top
@@ -918,12 +1114,6 @@ async fn main() -> Result<()> {
         let tbtc_type = protocol_types::asset::canonicalize_move_type(&tbtc.coin_type);
         let tbtc_tag = TypeTag::from_str(&tbtc_type)?;
         let tbtc_faucet = tbtc.faucet()?;
-        let tv_refs = sui_tx::tx::trading_vault::TradingVaultRefs {
-            package: ids.trading_vault_pkg,
-            vault_id,
-            protocol_config_id: ids.protocol_config_id,
-            deposit_type: &ids.deposit_coin_type,
-        };
 
         // Curator allowlists TBTC for deposits and payout requests.
         let mut pt = ProgrammableTransactionBuilder::new();
@@ -962,29 +1152,24 @@ async fn main() -> Result<()> {
         let tbtc_att = *attestations
             .get(&tbtc_type)
             .ok_or_else(|| anyhow!("no TBTC attestation composed — feed missing?"))?;
-        let faucet = pt.obj(shared_object_arg(&client, tbtc_faucet, true).await?)?;
-        let amount = pt.pure(cli.deposit_amount)?;
-        let coin = pt.programmable_move_call(
-            ids.tokens_pkg,
-            Identifier::new("tbtc").unwrap(),
-            Identifier::new("mint").unwrap(),
-            vec![],
-            vec![faucet, amount],
-        );
-        let vault_arg = pt.obj(shared_object_arg(&client, vault_id, true).await?)?;
-        let cfg = pt.obj(shared_object_arg(&client, ids.protocol_config_id, false).await?)?;
-        let wl =
-            pt.obj(shared_object_arg(&client, ids.whitelist_id, false).await?)?;
-        let att = opt_attestation(&mut pt, ids.trading_vault_pkg, Some(tbtc_att))?;
-        let clock = clock_arg(&mut pt)?;
-        pt.programmable_move_call(
-            ids.trading_vault_pkg,
-            Identifier::new("vault").unwrap(),
-            Identifier::new("deposit").unwrap(),
-            vec![tbtc_tag.clone()],
-            vec![vault_arg, cfg, wl, appraisal, coin, att, clock],
-        );
-        submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit_tbtc").await?;
+        let coin =
+            faucet_mint(&client, &mut pt, ids.tokens_pkg, tbtc_faucet, "tbtc", cli.deposit_amount)
+                .await?;
+        let minted = tv::build_deposit_asset(
+            &client,
+            &mut pt,
+            &tv_refs,
+            ids.whitelist_id,
+            &tbtc_type,
+            appraisal,
+            coin,
+            tbtc_att,
+            /* tranche */ 0,
+        )
+        .await?;
+        pt.transfer_arg(signer.address, minted);
+        let resp = submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::deposit_tbtc").await?;
+        let tbtc_position = created_position(&resp)?;
         let deposited =
             vault_free_balance(&client, signer.address, ids.trading_vault_pkg, vault_id, &tbtc_type)
                 .await?;
@@ -994,40 +1179,24 @@ async fn main() -> Result<()> {
         step.ok();
 
         // Request payout in the accounting asset, then exercise the
-        // recipient-only amend over to TBTC.
-        let step = Step("multi-asset: request (TUSDC) + amend payout to TBTC");
-        let shares = read_total_shares(&client, vault_id).await?;
-        if shares == 0 {
-            bail!("no shares after the TBTC deposit");
-        }
+        // recipient-only amend (keyed by GLOBAL sequence) over to TBTC.
+        let step = Step("multi-asset: request (TUSDC) + amend payout to TBTC by global_seq");
+        let seq = read_next_global_seq(&client, vault_id).await?;
         let mut pt = ProgrammableTransactionBuilder::new();
-        sui_tx::tx::trading_vault::build_request_withdraw(
+        tv::build_request_withdraw(
             &client,
             &mut pt,
             &tv_refs,
             &ids.deposit_coin_type,
-            shares,
+            tbtc_position,
         )
         .await?;
         submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::request_withdraw_tbtc").await?;
-        let seq = {
-            let (_, json) = client.get_object_json(vault_id).await?;
-            let json = json.ok_or_else(|| anyhow!("vault unreadable"))?;
-            json.pointer("/queue_tail")
-                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()))
-                .ok_or_else(|| anyhow!("vault has no queue_tail field"))?
-                .checked_sub(1)
-                .ok_or_else(|| anyhow!("queue_tail is 0 after a request"))?
-        };
+        if read_next_global_seq(&client, vault_id).await? != seq + 1 {
+            bail!("global sequence did not advance by the request");
+        }
         let mut pt = ProgrammableTransactionBuilder::new();
-        sui_tx::tx::trading_vault::build_amend_payout_asset(
-            &client,
-            &mut pt,
-            &tv_refs,
-            &tbtc_type,
-            seq,
-        )
-        .await?;
+        tv::build_amend_payout_asset(&client, &mut pt, &tv_refs, &tbtc_type, seq).await?;
         submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::amend_payout_asset").await?;
         step.ok();
 
@@ -1055,7 +1224,7 @@ async fn main() -> Result<()> {
         let tbtc_att = *attestations
             .get(&tbtc_type)
             .ok_or_else(|| anyhow!("no TBTC attestation composed for the fulfillment"))?;
-        sui_tx::tx::trading_vault::build_fulfill_mixed(
+        tv::build_fulfill_mixed(
             &client,
             &mut pt,
             &tv_refs,
@@ -1067,16 +1236,10 @@ async fn main() -> Result<()> {
         .await?;
         submit_ptb(&client, &signer, pt, cli.gas_budget, "smoke::fulfill_mixed").await?;
 
-        // Queue drained and (almost) all TBTC paid out: only floor-division
-        // dust — bounded by price drift between deposit and fulfillment —
-        // may remain in the vault's free balance.
-        let (_, json) = client.get_object_json(vault_id).await?;
-        let json = json.ok_or_else(|| anyhow!("vault unreadable"))?;
-        let q = |ptr: &str| {
-            json.pointer(ptr)
-                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| v.as_u64()))
-        };
-        if q("/queue_head") != q("/queue_tail") {
+        // Queue drained and (almost) all TBTC paid out. The escrowed
+        // commitment keeps its pro-rata sliver of the TBTC value; only
+        // that plus floor dust may remain.
+        if pending_withdrawals(&client, signer.address, &ids, vault_id).await? != 0 {
             bail!("withdrawal queue not drained by the fulfillment potato");
         }
         let residual =
@@ -1092,8 +1255,530 @@ async fn main() -> Result<()> {
         println!("    TBTC round-tripped (residual dust {residual})");
     }
 
-    println!("\nSMOKE PASSED — vault {vault_id} exercised end to end");
+    // ── B. tranched vault + terminal settlement acceptance (cash-only —
+    // no extra services needed).
+    if !cli.skip_tranched {
+        run_tranched_and_settlement(&client, &signer, &cli, &ids).await?;
+    }
+
+    println!("\nSMOKE PASSED — vault {vault_id} exercised end to end (v2)");
     Ok(())
+}
+
+// ═══════════════ tranched + settlement scenarios (v2, section B) ═══════════════
+
+/// Senior/junior vault against the state-transition matrix, then the
+/// terminal settlement pool (§8.7): junior must seed before senior; an
+/// over-target senior deposit aborts 123; a queued senior request and the
+/// wallet/escrow positions all settle against the frozen pool.
+async fn run_tranched_and_settlement(
+    client: &ChainClient,
+    signer: &Signer,
+    cli: &Cli,
+    ids: &Ids,
+) -> Result<()> {
+    let junior_seed = cli.deposit_amount; // commitment (junior for tranched)
+    let junior_user = cli.deposit_amount; // wallet junior deposit
+    let senior_ok = cli.deposit_amount * 4; // inside the 20% target gate
+    let senior_over = cli.deposit_amount * 50; // would breach the gate
+
+    // ── B1. create.
+    let step = Step("tranched: create_vault (senior/junior, PreferredOnly)");
+    let creation = tv::create_vault(
+        client,
+        signer,
+        ids.trading_vault_pkg,
+        ids.protocol_config_id,
+        ids.whitelist_id,
+        &ids.deposit_coin_type,
+        &tranched_spec(),
+        cli.gas_budget,
+    )
+    .await?;
+    let vault_id = creation.vault_id;
+    let cap_id = creation.curator_cap_id;
+    let refs = ids.appraisal_refs(vault_id);
+    let tv_refs = ids.tv_refs(vault_id);
+    step.ok();
+    println!("    vault {vault_id}");
+
+    // ── B2. junior seed: curator commitment (junior tranche for a
+    // tranched vault) + a wallet junior deposit.
+    let step = Step("tranched: junior seed (commitment + junior deposit)");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let holdings = discover_holdings(client, vault_id).await?;
+    let (appraisal, _) =
+        compose_appraisal(client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
+    let coin = faucet_mint(
+        client,
+        &mut pt,
+        ids.tokens_pkg,
+        ids.deposit_faucet,
+        &ids.deposit_module,
+        junior_seed,
+    )
+    .await?;
+    tv::build_deposit_into_commitment(
+        client,
+        &mut pt,
+        &tv_refs,
+        ids.whitelist_id,
+        cap_id,
+        appraisal,
+        coin,
+    )
+    .await?;
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::tranched_commitment").await?;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let holdings = discover_holdings(client, vault_id).await?;
+    let (appraisal, _) =
+        compose_appraisal(client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
+    let coin = faucet_mint(
+        client,
+        &mut pt,
+        ids.tokens_pkg,
+        ids.deposit_faucet,
+        &ids.deposit_module,
+        junior_user,
+    )
+    .await?;
+    tv::build_deposit_and_transfer(
+        client,
+        &mut pt,
+        &tv_refs,
+        ids.whitelist_id,
+        appraisal,
+        coin,
+        /* tranche */ 2,
+        signer.address,
+    )
+    .await?;
+    let resp = submit_ptb(client, signer, pt, cli.gas_budget, "smoke::junior_deposit").await?;
+    let junior_position = created_position(&resp)?;
+    let jp = position_snapshot(client, junior_position).await?;
+    if jp.tranche != "Junior" || jp.generation != 0 {
+        bail!("junior position minted as {} gen {}", jp.tranche, jp.generation);
+    }
+    step.ok();
+
+    // ── B3. senior deposit inside the target gate.
+    let step = Step("tranched: senior deposit under the target gate");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let holdings = discover_holdings(client, vault_id).await?;
+    let (appraisal, _) =
+        compose_appraisal(client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
+    let coin = faucet_mint(
+        client,
+        &mut pt,
+        ids.tokens_pkg,
+        ids.deposit_faucet,
+        &ids.deposit_module,
+        senior_ok,
+    )
+    .await?;
+    tv::build_deposit_and_transfer(
+        client,
+        &mut pt,
+        &tv_refs,
+        ids.whitelist_id,
+        appraisal,
+        coin,
+        /* tranche */ 1,
+        signer.address,
+    )
+    .await?;
+    let resp = submit_ptb(client, signer, pt, cli.gas_budget, "smoke::senior_deposit").await?;
+    let senior_position = created_position(&resp)?;
+    let sp = position_snapshot(client, senior_position).await?;
+    if sp.tranche != "Senior" {
+        bail!("senior position minted as {}", sp.tranche);
+    }
+    step.ok();
+
+    // ── B4. an over-target senior deposit must abort 123
+    // (senior_buffer_breached): junior 2e6 of a would-be 56e6 total is
+    // far below the 20% target.
+    let step = Step("tranched: over-target senior deposit aborts 123");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let holdings = discover_holdings(client, vault_id).await?;
+    let (appraisal, _) =
+        compose_appraisal(client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
+    let coin = faucet_mint(
+        client,
+        &mut pt,
+        ids.tokens_pkg,
+        ids.deposit_faucet,
+        &ids.deposit_module,
+        senior_over,
+    )
+    .await?;
+    tv::build_deposit_and_transfer(
+        client,
+        &mut pt,
+        &tv_refs,
+        ids.whitelist_id,
+        appraisal,
+        coin,
+        /* tranche */ 1,
+        signer.address,
+    )
+    .await?;
+    match submit_ptb(client, signer, pt, cli.gas_budget, "smoke::senior_over_target").await {
+        Ok(_) => bail!("over-target senior deposit was ACCEPTED — target gate broken"),
+        Err(e) => assert_move_abort(&e, 123, "over-target senior deposit")?,
+    }
+    step.ok();
+
+    // ── B5. risk-state read-back.
+    let step = Step("tranched: risk-state + book read-back");
+    let (senior_shares, junior_shares) = read_book_shares(client, vault_id).await?;
+    if senior_shares == 0 || junior_shares == 0 {
+        bail!("book missing a tranche: {senior_shares} senior / {junior_shares} junior");
+    }
+    let state = read_risk_state(client, vault_id).await?;
+    if state != "Healthy" {
+        bail!("expected Healthy risk state, read {state}");
+    }
+    let claim = read_book_u128(client, vault_id, "senior_claim").await?;
+    // The claim is the senior principal plus minutes of 10%-annual accrual.
+    if claim < senior_ok as u128 || claim > (senior_ok as u128) * 101 / 100 {
+        bail!("senior claim {claim} not ≈ principal {senior_ok}");
+    }
+    if vault_is_risk_off(client, signer.address, ids, vault_id).await? {
+        bail!("healthy funded tranched vault reads risk-off");
+    }
+    step.ok();
+    println!("    book: {senior_shares}s/{junior_shares}j shares, claim {claim}");
+
+    // ── B6. queue a senior withdrawal (lane 0), then close the vault with
+    // the request still outstanding — it must settle from the pool.
+    let step = Step("settlement: queue senior request, initiate+finalize close");
+    let queued_seq = read_next_global_seq(client, vault_id).await?;
+    let mut pt = ProgrammableTransactionBuilder::new();
+    tv::build_request_withdraw(client, &mut pt, &tv_refs, &ids.deposit_coin_type, senior_position)
+        .await?;
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::senior_request").await?;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault_arg = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
+    let cap = pt.obj(sui_tx::tx::owned_object_arg(client, cap_id).await?)?;
+    pt.programmable_move_call(
+        ids.trading_vault_pkg,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("initiate_close").unwrap(),
+        vec![],
+        vec![vault_arg, cap],
+    );
+    pt.programmable_move_call(
+        ids.trading_vault_pkg,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("finalize_close").unwrap(),
+        vec![],
+        vec![vault_arg],
+    );
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::close").await?;
+    step.ok();
+
+    // ── B7. snapshot freezes entitlements (senior first).
+    let step = Step("settlement: snapshot_settlement");
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let holdings = discover_holdings(client, vault_id).await?;
+    let (appraisal, _) =
+        compose_appraisal(client, &mut pt, &refs, &holdings, None, &BTreeMap::new(), &[]).await?;
+    tv::build_snapshot_settlement(client, &mut pt, &tv_refs, appraisal).await?;
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::snapshot_settlement").await?;
+    step.ok();
+
+    // ── B8. drain the pool: the queued senior request, the wallet junior
+    // position, and the escrowed commitment (withdraw + redeem).
+    let step = Step("settlement: settle queued request + redeem positions");
+    let before = vault_free_balance(
+        client,
+        signer.address,
+        ids.trading_vault_pkg,
+        vault_id,
+        &ids.deposit_coin_type,
+    )
+    .await?;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    tv::build_settle_queued_request(client, &mut pt, &tv_refs, ids.treasury_id, queued_seq).await?;
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::settle_queued").await?;
+    if pending_withdrawals(client, signer.address, ids, vault_id).await? != 0 {
+        bail!("queued request still outstanding after settle_queued_request");
+    }
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    tv::build_redeem_settled_position(client, &mut pt, &tv_refs, ids.treasury_id, junior_position)
+        .await?;
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::redeem_junior").await?;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let commitment_pos =
+        tv::build_withdraw_commitment_settled(client, &mut pt, &tv_refs, cap_id).await?;
+    pt.transfer_arg(signer.address, commitment_pos);
+    let resp =
+        submit_ptb(client, signer, pt, cli.gas_budget, "smoke::withdraw_commitment").await?;
+    let commitment_position = created_position(&resp)?;
+    let mut pt = ProgrammableTransactionBuilder::new();
+    tv::build_redeem_settled_position(
+        client,
+        &mut pt,
+        &tv_refs,
+        ids.treasury_id,
+        commitment_position,
+    )
+    .await?;
+    submit_ptb(client, signer, pt, cli.gas_budget, "smoke::redeem_commitment").await?;
+
+    // Fees crystallize per redemption; with ~zero profit over the smoke's
+    // runtime, the curator's accrued settlement fee is normally 0 — claim
+    // it only when nonzero (claiming zero aborts).
+    let fees_accrued = read_settlement_fees(client, vault_id).await.unwrap_or(0);
+    if fees_accrued > 0 {
+        let mut pt = ProgrammableTransactionBuilder::new();
+        tv::build_claim_settlement_curator_fees(client, &mut pt, &tv_refs, cap_id).await?;
+        submit_ptb(client, signer, pt, cli.gas_budget, "smoke::claim_settlement_fees").await?;
+        println!("    claimed {fees_accrued} settlement curator fees");
+    }
+
+    let after = vault_free_balance(
+        client,
+        signer.address,
+        ids.trading_vault_pkg,
+        vault_id,
+        &ids.deposit_coin_type,
+    )
+    .await?;
+    if after >= before {
+        bail!("settlement paid nothing out ({before} → {after})");
+    }
+    // senior_pool + junior_pool == NAV exactly; the three redemptions
+    // leave only per-redemption floor dust.
+    if after > 1_000 {
+        bail!("vault kept {after} accounting units after full settlement drain");
+    }
+    step.ok();
+    println!(
+        "\nTRANCHED + SETTLEMENT PASSED — vault {vault_id} closed, settled, drained \
+         (residual {after})"
+    );
+    Ok(())
+}
+
+// ═══════════════════════ shared PTB / read helpers ═══════════════════════
+
+/// Faucet-mint `amount` of a test token inside `pt`, returning the Coin
+/// argument.
+async fn faucet_mint(
+    client: &ChainClient,
+    pt: &mut ProgrammableTransactionBuilder,
+    tokens_pkg: ObjectID,
+    faucet_id: ObjectID,
+    module: &str,
+    amount: u64,
+) -> Result<sui_types::transaction::Argument> {
+    let faucet = pt.obj(shared_object_arg(client, faucet_id, true).await?)?;
+    let amount = pt.pure(amount)?;
+    Ok(pt.programmable_move_call(
+        tokens_pkg,
+        Identifier::new(module).context("faucet module name")?,
+        Identifier::new("mint").unwrap(),
+        vec![],
+        vec![faucet, amount],
+    ))
+}
+
+/// The freshly minted `vault_position::VaultPosition` in a tx's created
+/// objects.
+fn created_position(resp: &sui_tx::chain::ExecutedTransaction) -> Result<ObjectID> {
+    created_objects(resp)
+        .into_iter()
+        .find_map(|c| {
+            let tag = sui_types::parse_sui_struct_tag(&c.object_type).ok()?;
+            (tag.module.as_str() == "vault_position" && tag.name.as_str() == "VaultPosition")
+                .then_some(c.object_id)
+        })
+        .ok_or_else(|| anyhow!("no VaultPosition created by the transaction"))
+}
+
+/// gRPC json renders Move enums as `{"@variant": "Healthy"}` (bare string
+/// kept as a fallback) — see the api-service goldens.
+fn enum_variant(v: &serde_json::Value) -> Option<&str> {
+    v.as_str().or_else(|| v.pointer("/@variant").and_then(|x| x.as_str()))
+}
+
+fn json_u64(v: &serde_json::Value) -> Option<u64> {
+    v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64())
+}
+
+fn json_u128(v: &serde_json::Value) -> Option<u128> {
+    v.as_str().and_then(|s| s.parse().ok()).or_else(|| v.as_u64().map(u128::from))
+}
+
+struct PositionSnapshot {
+    vault_id: ObjectID,
+    shares: u128,
+    basis: u64,
+    tranche: String,
+    generation: u64,
+}
+
+async fn position_snapshot(client: &ChainClient, id: ObjectID) -> Result<PositionSnapshot> {
+    let (_, json) = client.get_object_json(id).await?;
+    let json = json.ok_or_else(|| anyhow!("position {id} unreadable"))?;
+    let field = |ptr: &str| {
+        json.pointer(ptr).ok_or_else(|| anyhow!("position {id} has no {ptr}"))
+    };
+    Ok(PositionSnapshot {
+        vault_id: field("/vault_id")?
+            .as_str()
+            .ok_or_else(|| anyhow!("position {id} vault_id not a string"))?
+            .parse()?,
+        shares: json_u128(field("/shares")?)
+            .ok_or_else(|| anyhow!("position {id} shares unparseable"))?,
+        basis: json_u64(field("/cost_basis")?)
+            .ok_or_else(|| anyhow!("position {id} cost_basis unparseable"))?,
+        tranche: enum_variant(field("/tranche")?)
+            .ok_or_else(|| anyhow!("position {id} tranche unreadable"))?
+            .to_string(),
+        generation: json_u64(field("/capital_generation")?)
+            .ok_or_else(|| anyhow!("position {id} capital_generation unparseable"))?,
+    })
+}
+
+async fn vault_json(client: &ChainClient, vault_id: ObjectID) -> Result<serde_json::Value> {
+    let (_, json) = client.get_object_json(vault_id).await?;
+    json.ok_or_else(|| anyhow!("vault {vault_id} unreadable"))
+}
+
+/// The v2 book's per-tranche supplies (an untranched vault keeps its whole
+/// supply in `junior_shares`).
+async fn read_book_shares(client: &ChainClient, vault_id: ObjectID) -> Result<(u128, u128)> {
+    let json = vault_json(client, vault_id).await?;
+    let read = |field: &str| {
+        json.pointer(&format!("/book/{field}"))
+            .and_then(json_u128)
+            .ok_or_else(|| anyhow!("vault has no readable book.{field}"))
+    };
+    Ok((read("senior_shares")?, read("junior_shares")?))
+}
+
+async fn read_book_u128(client: &ChainClient, vault_id: ObjectID, field: &str) -> Result<u128> {
+    let json = vault_json(client, vault_id).await?;
+    json.pointer(&format!("/book/{field}"))
+        .and_then(json_u128)
+        .ok_or_else(|| anyhow!("vault has no readable book.{field}"))
+}
+
+async fn read_risk_state(client: &ChainClient, vault_id: ObjectID) -> Result<String> {
+    let json = vault_json(client, vault_id).await?;
+    json.pointer("/book/risk_state")
+        .and_then(enum_variant)
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("vault has no readable book.risk_state"))
+}
+
+async fn read_next_global_seq(client: &ChainClient, vault_id: ObjectID) -> Result<u64> {
+    let json = vault_json(client, vault_id).await?;
+    json.pointer("/next_global_seq")
+        .and_then(json_u64)
+        .ok_or_else(|| anyhow!("vault has no readable next_global_seq"))
+}
+
+/// `settlement.curator_fees_accrued` once the snapshot exists.
+async fn read_settlement_fees(client: &ChainClient, vault_id: ObjectID) -> Result<u64> {
+    let json = vault_json(client, vault_id).await?;
+    json.pointer("/settlement/curator_fees_accrued")
+        .and_then(json_u64)
+        .ok_or_else(|| anyhow!("vault has no readable settlement.curator_fees_accrued"))
+}
+
+/// The vault's total share supply — v2 has no single field; sum the book.
+async fn read_total_shares(client: &ChainClient, vault_id: ObjectID) -> Result<u128> {
+    let (senior, junior) = read_book_shares(client, vault_id).await?;
+    Ok(senior + junior)
+}
+
+/// Dev-inspect `vault::is_risk_off` — the predicate gating quote sessions
+/// (abort 124), external release, and vault_mm release.
+async fn vault_is_risk_off(
+    client: &ChainClient,
+    sender: SuiAddress,
+    ids: &Ids,
+    vault_id: ObjectID,
+) -> Result<bool> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
+    pt.programmable_move_call(
+        ids.trading_vault_pkg,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("is_risk_off").unwrap(),
+        vec![],
+        vec![vault],
+    );
+    let res = client.dev_inspect_ptb(sender, pt).await.context("dev-inspecting is_risk_off")?;
+    sui_tx::chain::decode_return_value::<bool>(&res, 0).context("decoding is_risk_off")
+}
+
+/// Dev-inspect `vault::pending_withdrawals` — outstanding queued requests.
+async fn pending_withdrawals(
+    client: &ChainClient,
+    sender: SuiAddress,
+    ids: &Ids,
+    vault_id: ObjectID,
+) -> Result<u64> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
+    pt.programmable_move_call(
+        ids.trading_vault_pkg,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("pending_withdrawals").unwrap(),
+        vec![],
+        vec![vault],
+    );
+    let res = client
+        .dev_inspect_ptb(sender, pt)
+        .await
+        .context("dev-inspecting pending_withdrawals")?;
+    sui_tx::chain::decode_return_value::<u64>(&res, 0).context("decoding pending_withdrawals")
+}
+
+/// Dev-inspect `vault::commitment_of(vault, cap_id)` → (exists, shares).
+async fn commitment_of(
+    client: &ChainClient,
+    sender: SuiAddress,
+    ids: &Ids,
+    vault_id: ObjectID,
+    cap_id: ObjectID,
+) -> Result<(bool, u128)> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
+    let cap = pt.pure(cap_id)?;
+    pt.programmable_move_call(
+        ids.trading_vault_pkg,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("commitment_of").unwrap(),
+        vec![],
+        vec![vault, cap],
+    );
+    let res = client.dev_inspect_ptb(sender, pt).await.context("dev-inspecting commitment_of")?;
+    let exists = sui_tx::chain::decode_return_value::<bool>(&res, 0)
+        .context("decoding commitment_of.exists")?;
+    let shares = sui_tx::chain::decode_return_value::<u128>(&res, 1)
+        .context("decoding commitment_of.shares")?;
+    Ok((exists, shares))
+}
+
+/// Assert `err` is the Move abort `code` (v2 wire codes are part of the
+/// frozen interface — see contracts/trading-vault-v2/sources/errors.move).
+fn assert_move_abort(err: &anyhow::Error, code: u64, what: &str) -> Result<()> {
+    let s = format!("{err:#}");
+    if s.contains("MoveAbort") && s.contains(&format!(", {code})")) {
+        return Ok(());
+    }
+    bail!("{what}: expected Move abort {code}, got: {s}")
 }
 
 // ═══════════════════ option-coin appraisal legs (SO-297) ═══════════════════
@@ -1192,29 +1877,6 @@ async fn price_info_object_for(
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("price info field has no value: {fields}"))?;
     id.parse().with_context(|| format!("parsing PriceInfoObject id {id:?}"))
-}
-
-/// `Option<PriceAttestation>` for `vault::deposit`'s att slot: `some`
-/// wrapping a composed attest result (non-accounting deposits, SO-370),
-/// `none` for the accounting asset.
-fn opt_attestation(
-    pt: &mut ProgrammableTransactionBuilder,
-    trading_vault_pkg: ObjectID,
-    att: Option<sui_types::transaction::Argument>,
-) -> Result<sui_types::transaction::Argument> {
-    let attestation_type =
-        TypeTag::from_str(&format!("{trading_vault_pkg}::price::PriceAttestation"))?;
-    let (function, args) = match att {
-        Some(a) => ("some", vec![a]),
-        None => ("none", vec![]),
-    };
-    Ok(pt.programmable_move_call(
-        ObjectID::from_hex_literal("0x1").unwrap(),
-        Identifier::new("option").unwrap(),
-        Identifier::new(function).unwrap(),
-        vec![attestation_type],
-        args,
-    ))
 }
 
 /// Compose the appraisal with real Pyth legs (when any are needed) and the
@@ -1370,17 +2032,6 @@ async fn vault_free_balance(
     sui_tx::chain::decode_return_value::<u64>(&res, 0).context("decoding free_balance_of")
 }
 
-/// The vault's `total_shares` (this smoke's wallet is the sole staker).
-async fn read_total_shares(client: &ChainClient, vault_id: ObjectID) -> Result<u128> {
-    let (_, json) = client.get_object_json(vault_id).await?;
-    let json = json.ok_or_else(|| anyhow!("vault unreadable"))?;
-    let raw = json
-        .pointer("/total_shares")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("vault has no total_shares field"))?;
-    raw.parse().context("parsing total_shares")
-}
-
 // ═══════════════════ direct vault escrow leg (SO-372) ═══════════════════
 
 /// Curator wires the vault for direct quoting (identity BM custody +
@@ -1389,6 +2040,11 @@ async fn read_total_shares(client: &ChainClient, vault_id: ObjectID) -> Result<u
 /// (the vault sells its accounting-asset free balance for a faucet-minted
 /// base). Verifies value moved vault↔taker with the identity BM holding
 /// nothing, and leaves the vault open.
+///
+/// v2 ordering note: this leg runs AFTER the commitment is funded — the
+/// quote path is risk-off-gated (§8.4b), so an unfunded commitment would
+/// abort the fill with 124.
+#[allow(clippy::too_many_arguments)]
 async fn run_direct_escrow_leg(
     client: &ChainClient,
     signer: &Signer,
@@ -1575,15 +2231,9 @@ async fn run_direct_escrow_leg(
     // ── taker fill: mint the base payment and settle through the adapter.
     let step = Step("direct escrow: taker fill via fill_vault_order_reverse");
     let mut pt = ProgrammableTransactionBuilder::new();
-    let faucet = pt.obj(shared_object_arg(client, base_faucet, true).await?)?;
-    let amount = pt.pure(buy_amount)?;
-    let taker_coin = pt.programmable_move_call(
-        ids.tokens_pkg,
-        Identifier::new(&*base_module).unwrap(),
-        Identifier::new("mint").unwrap(),
-        vec![],
-        vec![faucet, amount],
-    );
+    let taker_coin =
+        faucet_mint(client, &mut pt, ids.tokens_pkg, base_faucet, &base_module, buy_amount)
+            .await?;
     let vault_arg = pt.obj(shared_object_arg(client, vault_id, true).await?)?;
     let vreg = pt.obj(shared_object_arg(client, ids.integration_registry_id, false).await?)?;
     let reg = pt.obj(shared_object_arg(client, market.registry()?, true).await?)?;
@@ -1629,8 +2279,9 @@ async fn run_direct_escrow_leg(
     let base_after =
         vault_free_balance(client, signer.address, ids.trading_vault_pkg, vault_id, &base_type)
             .await?;
-    if quote_after >= cli.deposit_amount {
-        bail!("vault quote balance {quote_after} did not decrease from {}", cli.deposit_amount);
+    // The vault holds deposit + commitment in quote before the fill.
+    if quote_after >= cli.deposit_amount + cli.deposit_amount / 10 {
+        bail!("vault quote balance {quote_after} did not decrease");
     }
     if base_after == 0 {
         bail!("vault gained no {base_type} from the fill");
@@ -1642,10 +2293,7 @@ async fn run_direct_escrow_leg(
         }
     }
     step.ok();
-    println!(
-        "    vault sold {} quote units, gained {base_after} base units",
-        cli.deposit_amount - quote_after
-    );
+    println!("    vault sold quote for {base_after} base units");
     println!("\nDIRECT-ESCROW SMOKE PASSED — vault {vault_id} left open with direct quoting on");
     Ok(())
 }

@@ -9,14 +9,23 @@ import { asRecord, canon, idString, structFields, typeNameString, vecSetItems } 
 import {
   fetchTradingVault,
   fetchTradingVaultPpsHistory,
-  fetchTradingVaultStake,
   fetchTradingVaultTrades,
   fetchTradingVaults,
+  fetchVaultPendingRequests,
+  fetchVaultPositionDetail,
+  fetchVaultPositions,
+  fetchVaultSettlement,
+  fetchVaultWaterfall,
+  type LaneLabel,
   type TradingVault,
   type TradingVaultDetail,
   type TradingVaultPpsPoint,
-  type TradingVaultStake,
   type TradingVaultTrade,
+  type VaultPendingRequest,
+  type VaultPosition,
+  type VaultPositionDetail,
+  type VaultSettlement,
+  type VaultWaterfall,
 } from "./tradingVaults";
 
 export function useTradingVaults() {
@@ -38,7 +47,7 @@ export function useTradingVault(vaultId: string | null) {
   });
 }
 
-/** Share-price history for the detail chart (SO-293). */
+/** Per-tranche share-price history for the detail chart (SO-293/SO-418). */
 export function useTradingVaultPpsHistory(vaultId: string | null) {
   return useQuery<TradingVaultPpsPoint[], Error>({
     queryKey: ["trading-vault-pps-history", vaultId],
@@ -58,12 +67,56 @@ export function useTradingVaultTrades(vaultId: string | null) {
   });
 }
 
-/** The connected wallet's stake in one vault (SO-293). */
-export function useTradingVaultStake(vaultId: string | null, address: string | null) {
-  return useQuery<TradingVaultStake, Error>({
-    queryKey: ["trading-vault-stake", vaultId, address],
+/** The connected wallet's `VaultPosition` NFTs in one vault (SO-418 —
+ * replaces the address-keyed stake). */
+export function useVaultPositions(vaultId: string | null, address: string | null) {
+  return useQuery<VaultPosition[], Error>({
+    queryKey: ["trading-vault-positions", vaultId, address],
     enabled: vaultId !== null && address !== null,
-    queryFn: () => fetchTradingVaultStake(vaultId as string, address as string),
+    queryFn: () => fetchVaultPositions(vaultId as string, address as string),
+    refetchInterval: 15_000,
+  });
+}
+
+/** One position by id — works for ANY holder (secondary-buyer due
+ * diligence, SO-418). */
+export function usePositionDetail(positionId: string | null) {
+  return useQuery<VaultPositionDetail, Error>({
+    queryKey: ["trading-vault-position-detail", positionId],
+    enabled: positionId !== null,
+    queryFn: () => fetchVaultPositionDetail(positionId as string),
+    refetchInterval: 15_000,
+  });
+}
+
+/** The §3.4a waterfall decomposition at the latest capital sync (SO-418). */
+export function useWaterfall(vaultId: string | null) {
+  return useQuery<VaultWaterfall, Error>({
+    queryKey: ["trading-vault-waterfall", vaultId],
+    enabled: vaultId !== null,
+    queryFn: () => fetchVaultWaterfall(vaultId as string),
+    refetchInterval: 15_000,
+    retry: 1,
+  });
+}
+
+/** Terminal settlement pool state (SO-418). Only meaningful once closed. */
+export function useSettlement(vaultId: string | null, enabled = true) {
+  return useQuery<VaultSettlement, Error>({
+    queryKey: ["trading-vault-settlement", vaultId],
+    enabled: enabled && vaultId !== null,
+    queryFn: () => fetchVaultSettlement(vaultId as string),
+    refetchInterval: 30_000,
+  });
+}
+
+/** Lane-aware pending withdraw requests with server-computed payability
+ * (SO-418). */
+export function usePendingRequests(vaultId: string | null) {
+  return useQuery<VaultPendingRequest[], Error>({
+    queryKey: ["trading-vault-pending-requests", vaultId],
+    enabled: vaultId !== null,
+    queryFn: () => fetchVaultPendingRequests(vaultId as string),
     refetchInterval: 15_000,
   });
 }
@@ -160,9 +213,10 @@ export function useAllowlistedPools(enabled: boolean) {
  * Pre-flight the SO-289 appraisal composer for a vault: discover holdings and
  * resolve every Pyth leg. `data` feeds `buildAppraisedDepositTx`; an error's
  * message is the human-readable reason deposits are blocked (e.g. a held
- * asset with no Pyth feed). Re-plans when the vault's holdings move, or when
+ * asset with no Pyth feed). Re-plans when the vault's holdings move, when
  * the chosen deposit asset changes (SO-370 — a non-accounting deposit adds
- * its own attest leg).
+ * its own attest leg), or when the capital state / junior generation moves
+ * (SO-418 — a consumed appraisal snapshots `capital_seq`).
  */
 export function useAppraisalPlan(vault: TradingVaultDetail | null, depositAsset?: string) {
   const client = useSuiGrpcClient();
@@ -175,6 +229,10 @@ export function useAppraisalPlan(vault: TradingVaultDetail | null, depositAsset?
       // The external-equity leg composes only above zero exposure (SO-310),
       // so the first release changes the plan's shape.
       vault?.externalExposure ?? "0",
+      // SO-418: capital-state transitions and generation rollovers move the
+      // vault's capital_seq — a stale plan would compose a doomed appraisal.
+      vault?.riskStateCode ?? 0,
+      vault?.activeJuniorGeneration ?? 0,
       depositAsset ?? null,
     ],
     enabled: vault !== null,
@@ -253,10 +311,12 @@ export function useExchangeBm(bmId: string | null, assets: string[]) {
   });
 }
 
-/** One pending withdrawal-queue entry, read from the vault object (SO-370). */
+/** One pending withdrawal-queue entry, read from the vault object (v2:
+ * lane-aware, keyed by the GLOBAL sequence). */
 export type PendingWithdrawRequest = {
-  /** Queue sequence number — `amend_payout_asset`'s handle. */
+  /** Global sequence number — `amend_payout_asset`'s handle. */
   seq: bigint;
+  lane: LaneLabel;
   recipient: string;
   /** u128 decimal string, atomic share units (virtual-offset scale). */
   shares: string;
@@ -266,29 +326,98 @@ export type PendingWithdrawRequest = {
 };
 
 /** The vault object's SO-370 multi-asset config + pending withdrawal queue,
- * read straight from chain (no service serves either yet). */
+ * read straight from chain. */
 export type TradingVaultOnchain = {
   /** Canonical deposit/payout allowlist (`config.deposit_assets`); always
    * contains the accounting asset. */
   depositAssets: string[];
   entryHaircutBps: number;
   exitHaircutBps: number;
+  /** Ascending by global sequence, both lanes merged. */
   requests: PendingWithdrawRequest[];
 };
 
-/** Cap on queue entries read per refresh — `pendingWithdrawals` counts the
- * rest; the queue is FIFO so the head entries are the actionable ones. */
-const MAX_QUEUE_READ = 50;
+/** Cap on queue entries read per lane per refresh — `pendingWithdrawals`
+ * counts the rest; lanes are FIFO so the head entries are the actionable
+ * ones. */
+const MAX_QUEUE_READ = 25;
 
 function u64Field(v: unknown): number | null {
   return typeof v === "string" || typeof v === "number" ? Number(v) : null;
 }
 
 /**
+ * Read one v2 withdrawal lane: `lane.entries` is a `Table<u64, u64>` of
+ * lane-local index → GLOBAL sequence, walked `head..tail` via client-side
+ * field-id derivation, then each surviving request is read out of the
+ * vault's `requests: Table<u64, WithdrawRequest>` by its global sequence.
+ */
+async function readLane(
+  client: ReturnType<typeof useSuiGrpcClient>,
+  lane: unknown,
+  laneLabel: LaneLabel,
+  requestsTableId: string | null,
+): Promise<PendingWithdrawRequest[]> {
+  const f = structFields(lane);
+  const head = u64Field(f?.head) ?? 0;
+  const tail = u64Field(f?.tail) ?? 0;
+  const entriesTableId = idString(f?.entries);
+  if (!entriesTableId || !requestsTableId || tail <= head) return [];
+
+  const idxs: number[] = [];
+  for (let i = head; i < tail && idxs.length < MAX_QUEUE_READ; i++) idxs.push(i);
+  const entryFieldIds = idxs.map((i) =>
+    deriveDynamicFieldID(entriesTableId, "u64", bcs.u64().serialize(i).toBytes()),
+  );
+  const entryObjs = await client.core.getObjects({
+    objectIds: entryFieldIds,
+    include: { json: true },
+  });
+  const seqs: number[] = [];
+  for (const entry of entryObjs.objects) {
+    if (entry instanceof Error) continue; // fulfilled/settled between reads
+    const seq = u64Field(structFields(entry.json)?.value);
+    if (seq != null) seqs.push(seq);
+  }
+  if (seqs.length === 0) return [];
+
+  const reqFieldIds = seqs.map((s) =>
+    deriveDynamicFieldID(requestsTableId, "u64", bcs.u64().serialize(s).toBytes()),
+  );
+  const reqObjs = await client.core.getObjects({
+    objectIds: reqFieldIds,
+    include: { json: true },
+  });
+  const requests: PendingWithdrawRequest[] = [];
+  for (let i = 0; i < seqs.length; i++) {
+    const entry = reqObjs.objects[i];
+    if (entry instanceof Error) continue;
+    const req = structFields(structFields(entry.json)?.value);
+    const recipient = typeof req?.recipient === "string" ? req.recipient : null;
+    const shares = req?.shares;
+    const payout = typeNameString(req?.payout_asset);
+    if (!recipient || !payout || (typeof shares !== "string" && typeof shares !== "number")) {
+      continue;
+    }
+    requests.push({
+      seq: BigInt(seqs[i]),
+      lane: laneLabel,
+      recipient,
+      shares: String(shares),
+      payoutAsset: canon(payout),
+      requestedAtMs: u64Field(req?.requested_at_ms),
+    });
+  }
+  return requests;
+}
+
+/**
  * Read the vault object's deposit-asset allowlist, haircuts, and pending
- * withdrawal requests (SO-370). Queue entries live in a `Table<u64,
- * WithdrawRequest>` walked `queue_head..queue_tail` via client-side field-id
- * derivation — the same posture as the other Table reads in `tx/appraisal.ts`.
+ * withdrawal requests. v2 (SO-418): the queue is two per-tranche lanes
+ * (`senior_lane` / `junior_lane`) whose entry tables map lane-local indices
+ * to global sequences, and requests live in the global `requests` table —
+ * both walked via client-side field-id derivation, the same posture as the
+ * other Table reads in `tx/appraisal.ts`.
  */
 export function useTradingVaultOnchain(vaultId: string | null) {
   const client = useSuiGrpcClient();
@@ -307,40 +436,15 @@ export function useTradingVaultOnchain(vaultId: string | null) {
         .map(typeNameString)
         .filter((t): t is string => t !== null)
         .map(canon);
-      const head = u64Field(fields?.queue_head) ?? 0;
-      const tail = u64Field(fields?.queue_tail) ?? 0;
-      const queueTableId = idString(fields?.queue);
+      const requestsTableId = idString(fields?.requests);
 
-      const requests: PendingWithdrawRequest[] = [];
-      if (queueTableId && tail > head) {
-        const seqs: number[] = [];
-        for (let s = head; s < tail && seqs.length < MAX_QUEUE_READ; s++) seqs.push(s);
-        const fieldIds = seqs.map((s) =>
-          deriveDynamicFieldID(queueTableId, "u64", bcs.u64().serialize(s).toBytes()),
-        );
-        const { objects } = await client.core.getObjects({
-          objectIds: fieldIds,
-          include: { json: true },
-        });
-        for (let i = 0; i < seqs.length; i++) {
-          const entry = objects[i];
-          if (entry instanceof Error) continue; // fulfilled between reads
-          const req = structFields(structFields(entry.json)?.value);
-          const recipient = typeof req?.recipient === "string" ? req.recipient : null;
-          const shares = req?.shares;
-          const payout = typeNameString(req?.payout_asset);
-          if (!recipient || !payout || (typeof shares !== "string" && typeof shares !== "number")) {
-            continue;
-          }
-          requests.push({
-            seq: BigInt(seqs[i]),
-            recipient,
-            shares: String(shares),
-            payoutAsset: canon(payout),
-            requestedAtMs: u64Field(req?.requested_at_ms),
-          });
-        }
-      }
+      const [senior, junior] = await Promise.all([
+        readLane(client, fields?.senior_lane, "senior", requestsTableId),
+        readLane(client, fields?.junior_lane, "junior", requestsTableId),
+      ]);
+      // Cross-lane order is lowest-global-sequence-first (§3.6).
+      const requests = [...senior, ...junior].sort((a, b) => (a.seq < b.seq ? -1 : 1));
+
       return {
         depositAssets,
         entryHaircutBps: u64Field(cfg?.entry_haircut_bps) ?? 0,

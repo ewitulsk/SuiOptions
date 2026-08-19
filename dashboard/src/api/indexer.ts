@@ -7,6 +7,12 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { useServiceUrls } from "../config";
+import {
+  laneFromCode,
+  trancheFromCode,
+  type LaneLabel,
+  type TrancheLabel,
+} from "./vault";
 
 export type IndexedEvent = {
   sequence: string;
@@ -57,10 +63,16 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
-// ── withdraw queue (TvWithdrawRequested − TvWithdrawFulfilled) ─────────
+// ── withdraw queue (v2: TvWithdrawRequested − TvWithdrawFulfilled −
+//    TvSettlementRedeemed(from_queue), keyed by global_seq per lane) ────
 
 export type WithdrawQueueEntry = {
-  seq: number;
+  globalSeq: number;
+  /** Wire code 0=senior 1=junior (untranched vaults queue on junior). */
+  lane: LaneLabel;
+  tranche: TrancheLabel;
+  positionId: string | null;
+  capitalGeneration: number;
   recipient: string | null;
   sharesRaw: number;
   basisRaw: number;
@@ -70,6 +82,8 @@ export type WithdrawQueueEntry = {
 export type WithdrawQueueView = {
   pending: WithdrawQueueEntry[];
   fulfilledCount: number;
+  /** Requests drained through the settlement pool rather than the queue. */
+  settledCount: number;
   /** True when the scan window (limit) may have truncated history. */
   truncated: boolean;
 };
@@ -81,7 +95,7 @@ export async function fetchWithdrawQueue(
   vaultId: string,
 ): Promise<WithdrawQueueView> {
   const vault = payloadHex(vaultId);
-  const [requested, fulfilled] = await Promise.all([
+  const [requested, fulfilled, settled] = await Promise.all([
     queryEvents(
       graphqlUrl,
       {
@@ -98,27 +112,48 @@ export async function fetchWithdrawQueue(
       },
       EVENT_SCAN_LIMIT,
     ),
+    // Wallet-position redemptions carry from_queue=false + global_seq=0
+    // and never touch the queue — filter them out at the source.
+    queryEvents(
+      graphqlUrl,
+      {
+        eventType: ["TvSettlementRedeemed"],
+        payloadContains: { payload: { vault_id: vault, from_queue: true } },
+      },
+      EVENT_SCAN_LIMIT,
+    ),
   ]);
-  const fulfilledSeqs = new Set(fulfilled.map((e) => num(e.payload.payload.seq)));
+  const doneSeqs = new Set([
+    ...fulfilled.map((e) => num(e.payload.payload.global_seq)),
+    ...settled.map((e) => num(e.payload.payload.global_seq)),
+  ]);
   const pending = requested
-    .filter((e) => !fulfilledSeqs.has(num(e.payload.payload.seq)))
+    .filter((e) => !doneSeqs.has(num(e.payload.payload.global_seq)))
     .map((e) => {
       const p = e.payload.payload;
       const recipient = str(p.recipient);
+      const positionId = str(p.position_id);
       return {
-        seq: num(p.seq),
+        globalSeq: num(p.global_seq),
+        lane: laneFromCode(num(p.lane)),
+        tranche: trancheFromCode(num(p.tranche)),
+        positionId: positionId ? `0x${payloadHex(positionId)}` : null,
+        capitalGeneration: num(p.capital_generation),
         recipient: recipient ? `0x${payloadHex(recipient)}` : null,
         sharesRaw: num(p.shares),
         basisRaw: num(p.basis),
         requestedAtMs: num(p.requested_at_ms) || Number(e.timestampMs),
       };
     })
-    .sort((a, b) => a.seq - b.seq);
+    .sort((a, b) => a.globalSeq - b.globalSeq);
   return {
     pending,
     fulfilledCount: fulfilled.length,
+    settledCount: settled.length,
     truncated:
-      requested.length >= EVENT_SCAN_LIMIT || fulfilled.length >= EVENT_SCAN_LIMIT,
+      requested.length >= EVENT_SCAN_LIMIT ||
+      fulfilled.length >= EVENT_SCAN_LIMIT ||
+      settled.length >= EVENT_SCAN_LIMIT,
   };
 }
 
@@ -132,19 +167,24 @@ export function useWithdrawQueue(vaultId: string | undefined) {
   });
 }
 
-// ── vault flows (LP P&L = NAV vs net deposits) ─────────────────────────
+// ── vault flows (LP P&L = NAV vs net deposits, per tranche) ────────────
+
+export type TrancheFlows = { depositedRaw: number; withdrawnRaw: number };
 
 export type VaultFlows = {
   depositedRaw: number;
   withdrawnRaw: number;
   depositCount: number;
   withdrawalCount: number;
+  /** Accounting-value flows attributed by tranche (v2: TvDeposited /
+   * TvWithdrawFulfilled / TvSettlementRedeemed all carry the code). */
+  byTranche: Record<TrancheLabel, TrancheFlows>;
   truncated: boolean;
 };
 
 export async function fetchVaultFlows(graphqlUrl: string, vaultId: string): Promise<VaultFlows> {
   const vault = payloadHex(vaultId);
-  const [deposits, fulfilled] = await Promise.all([
+  const [deposits, fulfilled, settled] = await Promise.all([
     queryEvents(
       graphqlUrl,
       { eventType: ["TvDeposited"], payloadContains: { payload: { vault_id: vault } } },
@@ -155,14 +195,43 @@ export async function fetchVaultFlows(graphqlUrl: string, vaultId: string): Prom
       { eventType: ["TvWithdrawFulfilled"], payloadContains: { payload: { vault_id: vault } } },
       EVENT_SCAN_LIMIT,
     ),
+    // Settlement redemptions (queued or wallet-held) drain vault value too.
+    queryEvents(
+      graphqlUrl,
+      { eventType: ["TvSettlementRedeemed"], payloadContains: { payload: { vault_id: vault } } },
+      EVENT_SCAN_LIMIT,
+    ),
   ]);
+  const byTranche: Record<TrancheLabel, TrancheFlows> = {
+    untranched: { depositedRaw: 0, withdrawnRaw: 0 },
+    senior: { depositedRaw: 0, withdrawnRaw: 0 },
+    junior: { depositedRaw: 0, withdrawnRaw: 0 },
+  };
+  // TvDeposited.value is the accounting-asset valuation (equal to `amount`
+  // for accounting-asset deposits) — the NAV-comparable figure.
+  for (const e of deposits) {
+    const p = e.payload.payload;
+    byTranche[trancheFromCode(num(p.tranche))].depositedRaw += num(p.value);
+  }
+  for (const e of fulfilled) {
+    const p = e.payload.payload;
+    byTranche[trancheFromCode(num(p.tranche))].withdrawnRaw += num(p.value);
+  }
+  for (const e of settled) {
+    const p = e.payload.payload;
+    byTranche[trancheFromCode(num(p.tranche))].withdrawnRaw += num(p.entitlement);
+  }
+  const totals = Object.values(byTranche);
   return {
-    depositedRaw: deposits.reduce((s, e) => s + num(e.payload.payload.amount), 0),
-    withdrawnRaw: fulfilled.reduce((s, e) => s + num(e.payload.payload.value), 0),
+    depositedRaw: totals.reduce((s, t) => s + t.depositedRaw, 0),
+    withdrawnRaw: totals.reduce((s, t) => s + t.withdrawnRaw, 0),
     depositCount: deposits.length,
-    withdrawalCount: fulfilled.length,
+    withdrawalCount: fulfilled.length + settled.length,
+    byTranche,
     truncated:
-      deposits.length >= EVENT_SCAN_LIMIT || fulfilled.length >= EVENT_SCAN_LIMIT,
+      deposits.length >= EVENT_SCAN_LIMIT ||
+      fulfilled.length >= EVENT_SCAN_LIMIT ||
+      settled.length >= EVENT_SCAN_LIMIT,
   };
 }
 

@@ -519,6 +519,27 @@ mod tests {
     }
 
     #[test]
+    fn trading_vault_terms_fields_flow_through_snapshot() {
+        // SO-418: termsVersion/specHash ride on TradingVaultObjectsInfo
+        // and are visible through the snapshot accessor unchanged.
+        let mut s = snap();
+        s.package_info.trading_vault_objects = Some(
+            serde_json::from_str(
+                r#"{
+                    "vaultProtocolConfigId": "0x1", "integrationRegistryId": "0x2",
+                    "oracleRegistryId": "0x3", "pythFeedRegistryId": "0x4",
+                    "poolAllowlistId": "0x5", "activationDigest": "d",
+                    "termsVersion": 2, "specHash": "0xabcd"
+                }"#,
+            )
+            .unwrap(),
+        );
+        let objs = s.trading_vault_objects().unwrap();
+        assert_eq!(objs.terms_version, Some(2));
+        assert_eq!(objs.spec_hash.as_deref(), Some("0xabcd"));
+    }
+
+    #[test]
     fn token_lookup_by_ticker_is_case_insensitive() {
         let s = snap();
         assert_eq!(s.token_spec("tbtc").unwrap().coin_type, "0xpkg::tbtc::TBTC");

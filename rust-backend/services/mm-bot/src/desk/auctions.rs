@@ -365,6 +365,15 @@ async fn tick(
 ) -> Result<()> {
     observe_ticket_burns(p, indexer, live).await;
 
+    // SO-418 risk gate: bids escrow settlement OUT of vault free balances,
+    // which the risk-off gate set blocks on-chain — stop before reading
+    // the board or burning gas. Ticket burns above still release
+    // reservations while parked.
+    if p.shared.risk_off.load(std::sync::atomic::Ordering::Relaxed) {
+        tracing::debug!("auction bidder idle: vault is risk-off");
+        return Ok(());
+    }
+
     let mut open = api.open_rfqs().await.context("polling open rfqs")?;
     match api.open_put_rfqs().await {
         Ok(puts) => open.extend(puts),
@@ -373,8 +382,11 @@ async fn tick(
     if open.is_empty() {
         return Ok(());
     }
-    // Drop auctions originating from a paused vault before any chain read.
-    let paused = api.paused_vault_ids().await.context("polling paused vaults")?;
+    // Drop auctions originating from a paused OR risk-off vault before any
+    // chain read (SO-418: `risk_off_vault_ids` is the superset of the old
+    // paused check — deposits paused, risk state, commitment breach, or
+    // lifecycle not open).
+    let paused = api.risk_off_vault_ids().await.context("polling risk-off vaults")?;
     let now = now_ms();
 
     // Live views first: the winning check + rebid floors need the chain's

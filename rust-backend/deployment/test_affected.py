@@ -154,6 +154,9 @@ class TestRegressionPins(unittest.TestCase):
             got,
             [
                 "api-service",
+                # SO-418: balance-monitor watches vault capital state via
+                # indexer-graphql, so indexer-graphql changes reach it.
+                "balance-monitor",
                 "keeper",
                 "mm-bot",
                 "price-charting",

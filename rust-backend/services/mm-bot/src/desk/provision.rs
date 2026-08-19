@@ -51,6 +51,31 @@ pub struct ProvisionConfig {
     pub curator_fee_bps: u64,
     pub unwind_grace_ms: u64,
     pub gas_budget: u64,
+    // ── v2 capital structure (SO-418). Defaults = UNTRANCHED: the desk
+    // vault stays untranched unless the operator opts into tranching —
+    // structure_code 1 requires ALL six tranche params set coherently or
+    // `create_vault` aborts on chain.
+    /// 0 = untranched (default), 1 = senior/junior.
+    pub structure_code: u8,
+    pub senior_hurdle_bps_annual: u64,
+    pub target_junior_bps: u64,
+    pub maintenance_junior_bps: u64,
+    pub upside_code: u8,
+    pub residual_participation_bps: u64,
+    pub total_return_cap_bps: u64,
+    /// Terms-document version recorded immutably on the vault (§9.2).
+    pub terms_version: u64,
+    /// Hex content hash of the terms document `terms_version` names.
+    /// Empty = no hash recorded.
+    pub spec_hash: String,
+    /// Curator escrowed-commitment funding (§8.6), accounting-asset raw
+    /// units, deposited via `deposit_into_commitment` when the vault is
+    /// provisioned (and topped in on adoption when the commitment slot is
+    /// missing). 0 disables — but an unfunded commitment trips the
+    /// `curator_commitment_breached` gate once the protocol floor is
+    /// nonzero, which parks the desk risk-off. Default $100k at 6
+    /// decimals.
+    pub commitment_deposit: u64,
 }
 
 impl Default for ProvisionConfig {
@@ -61,7 +86,43 @@ impl Default for ProvisionConfig {
             curator_fee_bps: 0,
             unwind_grace_ms: 24 * 60 * 60 * 1_000,
             gas_budget: 200_000_000,
+            structure_code: 0,
+            senior_hurdle_bps_annual: 0,
+            target_junior_bps: 0,
+            maintenance_junior_bps: 0,
+            upside_code: 0,
+            residual_participation_bps: 0,
+            total_return_cap_bps: 0,
+            terms_version: 1,
+            spec_hash: String::new(),
+            commitment_deposit: 100_000_000_000,
         }
+    }
+}
+
+impl ProvisionConfig {
+    /// The v2 `CreateVaultSpec` this config describes.
+    fn vault_spec(&self) -> Result<CreateVaultSpec> {
+        let spec_hash = if self.spec_hash.is_empty() {
+            Vec::new()
+        } else {
+            hex::decode(self.spec_hash.trim_start_matches("0x"))
+                .map_err(|e| anyhow!("bad [desk.provision].spec_hash: {e}"))?
+        };
+        Ok(CreateVaultSpec {
+            lockup_ms: self.lockup_ms,
+            curator_fee_bps: self.curator_fee_bps,
+            unwind_grace_ms: self.unwind_grace_ms,
+            structure_code: self.structure_code,
+            senior_hurdle_bps_annual: self.senior_hurdle_bps_annual,
+            target_junior_bps: self.target_junior_bps,
+            maintenance_junior_bps: self.maintenance_junior_bps,
+            upside_code: self.upside_code,
+            residual_participation_bps: self.residual_participation_bps,
+            total_return_cap_bps: self.total_return_cap_bps,
+            terms_version: self.terms_version,
+            spec_hash,
+        })
     }
 }
 
@@ -102,6 +163,11 @@ pub struct ResolvedVault {
     pub curator_cap: Option<ObjectID>,
     /// True when this call created the vault (and, on testnet, seeded it).
     pub provisioned: bool,
+    /// SO-418: the vault booted risk-off (capital risk state not Healthy,
+    /// or curator commitment breached). NOT a boot failure — the desk
+    /// adopts it and idles quoting until the state cures, so a vault in
+    /// breach never rolls a deploy back (the health gate stays green).
+    pub risk_off: bool,
 }
 
 /// Resolve the vault the desk will curate, provisioning one if configured.
@@ -124,7 +190,8 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedVault> {
         // A pin can point at a vault we created and failed to finish, so
         // the resume applies here too — it self-gates on creator == self.
         resume_seed(&p, &view, me).await?;
-        return Ok(ResolvedVault { vault_id, curator_cap: cap, provisioned: false });
+        let risk_off = adopt_commitment_and_risk(&p, &view, cap).await;
+        return Ok(ResolvedVault { vault_id, curator_cap: cap, provisioned: false, risk_off });
     }
 
     if !p.cfg.enabled {
@@ -142,7 +209,8 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedVault> {
         info!(vault = %vault_id.to_hex_literal(), "adopting self-created vault");
         let cap = verify(&p, &view, me).await?;
         resume_seed(&p, &view, me).await?;
-        return Ok(ResolvedVault { vault_id, curator_cap: cap, provisioned: false });
+        let risk_off = adopt_commitment_and_risk(&p, &view, cap).await;
+        return Ok(ResolvedVault { vault_id, curator_cap: cap, provisioned: false, risk_off });
     }
 
     // Nothing to adopt. Before creating, insist the indexer is current:
@@ -166,7 +234,11 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedVault> {
     provision(&p).await
 }
 
-/// Create, enable the release gate, and (testnet) seed a fresh vault.
+/// Create, enable the release gate, fund the curator commitment, and
+/// (testnet) seed a fresh vault. SO-418: provisioning is not finished —
+/// and the boot (hence the deploy health gate) does not pass — until the
+/// escrowed curator commitment is funded and the vault reads
+/// `is_risk_off == false` on chain.
 async fn provision(p: &ResolveParams<'_>) -> Result<ResolvedVault> {
     let created = trading_vault::create_vault(
         &p.wrap.client,
@@ -175,11 +247,7 @@ async fn provision(p: &ResolveParams<'_>) -> Result<ResolvedVault> {
         p.vault_protocol_config,
         p.whitelist,
         p.settlement_coin_type,
-        &CreateVaultSpec {
-            lockup_ms: p.cfg.lockup_ms,
-            curator_fee_bps: p.cfg.curator_fee_bps,
-            unwind_grace_ms: p.cfg.unwind_grace_ms,
-        },
+        &p.cfg.vault_spec()?,
         p.cfg.gas_budget,
     )
     .await
@@ -206,6 +274,23 @@ async fn provision(p: &ResolveParams<'_>) -> Result<ResolvedVault> {
     .context("enabling the vault_mm release gate on the new vault")?;
     info!(vault = %created.vault_id.to_hex_literal(), "vault_mm release enabled");
 
+    // Fund the escrowed curator commitment (§8.6) BEFORE the seed: the
+    // vault holds nothing yet, so `begin_appraisal` is complete on the
+    // spot and the whole funding fits one PTB. A hard error here fails
+    // the boot on purpose — a curator vault without its commitment parks
+    // risk-off at the first crank.
+    if p.cfg.commitment_deposit > 0 {
+        fund_commitment(p, created.vault_id, created.curator_cap_id)
+            .await
+            .context("funding the curator commitment on the new vault")?;
+    } else {
+        warn!(
+            vault = %created.vault_id.to_hex_literal(),
+            "[desk.provision].commitment_deposit = 0 — curator commitment unfunded; the vault \
+             goes risk-off once the protocol commitment floor is nonzero"
+        );
+    }
+
     // Seed. An unseeded vault is NAV 0, and NAV 0 declines every RFQ, so
     // on testnet provisioning is not finished until this lands.
     if !seed(p, created.vault_id).await? {
@@ -215,11 +300,210 @@ async fn provision(p: &ResolveParams<'_>) -> Result<ResolvedVault> {
         );
     }
 
+    // The provision-path risk gate: a fresh, funded vault must read
+    // healthy on chain before the desk reports itself bootable.
+    let risk_off = is_risk_off(&p.wrap.client, p.wrap.signer.address, p.trading_vault_package, created.vault_id)
+        .await
+        .unwrap_or(false);
+    if risk_off {
+        return Err(anyhow!(
+            "freshly provisioned vault {} reads is_risk_off on chain — provisioning is \
+             incomplete (commitment underfunded vs the protocol floor?)",
+            created.vault_id.to_hex_literal()
+        ));
+    }
+
     Ok(ResolvedVault {
         vault_id: created.vault_id,
         curator_cap: Some(created.curator_cap_id),
         provisioned: true,
+        risk_off: false,
     })
+}
+
+/// Adoption-path commitment + risk check (SO-418): fund the escrowed
+/// curator commitment when the slot is missing (cap held, config
+/// nonzero), then report whether the vault is risk-off. NEVER fails the
+/// boot — a vault in breach adopts as healthy-but-idle so a deploy is
+/// not rolled back by market state (the known health-gate trap).
+async fn adopt_commitment_and_risk(
+    p: &ResolveParams<'_>,
+    view: &TradingVault,
+    cap: Option<ObjectID>,
+) -> bool {
+    let vault_id = ObjectID::new(*view.vault_id.as_bytes());
+    let cap_id = ObjectID::new(*view.curator_cap_id.as_bytes());
+
+    // Commitment presence from chain (the indexer has no commitment
+    // column; `commitment_of` is a cheap dev-inspect).
+    match commitment_of(&p.wrap.client, p.wrap.signer.address, p.trading_vault_package, vault_id, cap_id)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => match (cap, p.cfg.commitment_deposit) {
+            (Some(cap_id), amount) if amount > 0 => {
+                // Best-effort: works whenever the vault's appraisal is
+                // trivial (accounting asset only, no positions). A vault
+                // holding appraised assets needs the full composer —
+                // deliberately out of scope here; the failure alerts and
+                // the vault runs (possibly risk-off, hence idle).
+                if let Err(e) = fund_commitment(p, vault_id, cap_id).await {
+                    error!(
+                        alert_id = "tx-failed-mm-bot-desk",
+                        vault = %vault_id.to_hex_literal(),
+                        error = %format!("{e:#}"),
+                        "adopted vault has no curator commitment and funding it failed — the \
+                         vault will park risk-off once the protocol floor binds"
+                    );
+                }
+            }
+            _ => warn!(
+                vault = %vault_id.to_hex_literal(),
+                cap_held = cap.is_some(),
+                commitment_deposit = p.cfg.commitment_deposit,
+                "adopted vault has no curator commitment and it cannot be funded from here"
+            ),
+        },
+        Err(e) => warn!(
+            vault = %vault_id.to_hex_literal(),
+            error = %format!("{e:#}"),
+            "commitment presence read failed; continuing"
+        ),
+    }
+
+    let risk_off = view.risk_state != 0 || view.curator_commitment_breached;
+    if risk_off {
+        warn!(
+            vault = %vault_id.to_hex_literal(),
+            risk_state = view.risk_state,
+            commitment_breached = view.curator_commitment_breached,
+            "adopting a RISK-OFF vault — desk boots healthy-but-idle (no quotes, no bids, no \
+             new listings) until the state cures"
+        );
+    }
+    risk_off
+}
+
+/// Mint (testnet faucet) or gather (wallet coins) `commitment_deposit`
+/// of the accounting asset and `deposit_into_commitment` it, one PTB.
+/// The appraisal is the bare `begin_appraisal` — complete only while the
+/// vault holds nothing but the accounting asset (which is the case at
+/// provision time, the only path that hard-requires this).
+async fn fund_commitment(
+    p: &ResolveParams<'_>,
+    vault_id: ObjectID,
+    curator_cap: ObjectID,
+) -> Result<()> {
+    let amount = p.cfg.commitment_deposit;
+    let refs = TradingVaultRefs {
+        package: p.trading_vault_package,
+        vault_id,
+        protocol_config_id: p.vault_protocol_config,
+        deposit_type: p.settlement_coin_type,
+    };
+    let mut pt = sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder::new();
+    let funds = match p.testnet_seed {
+        Some(seed) => {
+            // Testnet: mint the commitment from the faucet, same PTB.
+            let faucet =
+                pt.obj(sui_tx::tx::shared_object_arg(&p.wrap.client, seed.faucet_id, true).await?)?;
+            let amount_arg = pt.pure(&amount)?;
+            pt.programmable_move_call(
+                seed.tokens_package,
+                move_core_types::identifier::Identifier::new(seed.module.as_str())
+                    .map_err(|e| anyhow!("module name {}: {e}", seed.module))?,
+                move_core_types::identifier::Identifier::new("mint").unwrap(),
+                vec![],
+                vec![faucet, amount_arg],
+            )
+        }
+        None => {
+            // No faucet (prod): pay from the wallet's own coins.
+            sui_tx::tx::deepbook::gather_exact_coin(
+                &p.wrap.client,
+                &p.wrap.signer,
+                &mut pt,
+                p.settlement_coin_type,
+                amount,
+            )
+            .await
+            .context("gathering the commitment deposit from wallet coins")?
+        }
+    };
+    let appraisal =
+        trading_vault::build_begin_appraisal(&p.wrap.client, &mut pt, &refs).await?;
+    trading_vault::build_deposit_into_commitment(
+        &p.wrap.client,
+        &mut pt,
+        &refs,
+        p.whitelist,
+        curator_cap,
+        appraisal,
+        funds,
+    )
+    .await?;
+    let resp = sui_tx::tx::submit_ptb(
+        &p.wrap.client,
+        &p.wrap.signer,
+        pt,
+        p.cfg.gas_budget,
+        "desk commitment funding",
+    )
+    .await?;
+    info!(
+        vault = %vault_id.to_hex_literal(),
+        amount,
+        digest = %sui_tx::tx::tx_digest(&resp),
+        "curator commitment funded (deposit_into_commitment)"
+    );
+    Ok(())
+}
+
+/// Dev-inspect `vault::commitment_of(vault, cap_id).0` — does the
+/// escrowed commitment slot exist for this cap?
+async fn commitment_of(
+    client: &ChainClient,
+    sender: SuiAddress,
+    package: ObjectID,
+    vault_id: ObjectID,
+    cap_id: ObjectID,
+) -> Result<bool> {
+    let mut pt = sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(sui_tx::tx::shared_object_arg(client, vault_id, false).await?)?;
+    let cap = pt.pure(&cap_id)?;
+    pt.programmable_move_call(
+        package,
+        move_core_types::identifier::Identifier::new("vault").unwrap(),
+        move_core_types::identifier::Identifier::new("commitment_of").unwrap(),
+        vec![],
+        vec![vault, cap],
+    );
+    let res = client
+        .dev_inspect_ptb(sender, pt)
+        .await
+        .context("dev-inspecting commitment_of")?;
+    sui_tx::chain::decode_return_value::<bool>(&res, 0).context("decoding commitment_of.exists")
+}
+
+/// Dev-inspect `vault::is_risk_off(vault)` — the §8.4b gate the quote
+/// sessions and vault_mm releases abort on (code 124).
+async fn is_risk_off(
+    client: &ChainClient,
+    sender: SuiAddress,
+    package: ObjectID,
+    vault_id: ObjectID,
+) -> Result<bool> {
+    let mut pt = sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(sui_tx::tx::shared_object_arg(client, vault_id, false).await?)?;
+    pt.programmable_move_call(
+        package,
+        move_core_types::identifier::Identifier::new("vault").unwrap(),
+        move_core_types::identifier::Identifier::new("is_risk_off").unwrap(),
+        vec![],
+        vec![vault],
+    );
+    let res = client.dev_inspect_ptb(sender, pt).await.context("dev-inspecting is_risk_off")?;
+    sui_tx::chain::decode_return_value::<bool>(&res, 0).context("decoding is_risk_off")
 }
 
 /// Mint and deposit the `[testnet]` seed. `Ok(false)` when no seed is
@@ -443,6 +727,13 @@ pub fn report_unusable(err: &anyhow::Error) {
     );
 }
 
+/// Shared test fixture (SO-418): a healthy, untranched v2 vault view.
+/// Other desk modules' tests reuse it so the 60-field literal lives once.
+#[cfg(test)]
+pub(crate) fn test_vault_view(id: u8, creator: u8, state: &str) -> TradingVault {
+    tests::vault(id, creator, state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,7 +751,7 @@ mod tests {
         ObjectId::new(bytes)
     }
 
-    fn vault(id: u8, creator: u8, state: &str) -> TradingVault {
+    pub(crate) fn vault(id: u8, creator: u8, state: &str) -> TradingVault {
         TradingVault {
             vault_id: oid(id),
             accounting_asset: protocol_types::asset::AssetType::new("0x2::tusdc::TUSDC"),
@@ -484,6 +775,46 @@ mod tests {
             external_equity_updated_at_ms: None,
             latest_nav: None,
             nav_updated_at_ms: None,
+            // ── v2 (SO-418): an untranched, healthy, unsettled vault ──
+            structure_code: 0,
+            senior_hurdle_bps_annual: 0,
+            target_junior_bps: 0,
+            maintenance_junior_bps: 0,
+            upside_code: 0,
+            residual_participation_bps: 0,
+            total_return_cap_bps: 0,
+            terms_version: 1,
+            spec_hash: None,
+            senior_shares: 0,
+            junior_shares: 0,
+            senior_claim: 0,
+            senior_principal_basis: 0,
+            senior_nav: None,
+            junior_nav: None,
+            latest_senior_pps_e12: None,
+            latest_junior_pps_e12: None,
+            risk_state: 0,
+            curator_commitment_breached: false,
+            impaired_since_ms: None,
+            active_junior_generation: 0,
+            reset_old_generation: None,
+            reset_proposed_at_ms: None,
+            reset_executable_at_ms: None,
+            reset_recorded_nav: None,
+            reset_recorded_senior_claim: None,
+            reset_recorded_required_deposit: None,
+            settled: false,
+            settlement_final_nav: None,
+            senior_pool: None,
+            senior_supply: None,
+            junior_pool: None,
+            junior_supply: None,
+            settlement_snapshot_at_ms: None,
+            settlement_redeemed: 0,
+            senior_lane_head: 0,
+            senior_lane_tail: 0,
+            junior_lane_head: 0,
+            junior_lane_tail: 0,
         }
     }
 

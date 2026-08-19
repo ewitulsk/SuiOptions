@@ -17,6 +17,7 @@ runtime-config = { workspace = true }
 cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
 hex            = "0.4"
+sha2           = { workspace = true }
 deployments    = { workspace = true }
 move-publish   = { workspace = true }
 

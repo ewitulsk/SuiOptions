@@ -9,6 +9,7 @@ use sui_types::crypto::SuiKeyPair;
 use tracing::{error, info, warn};
 
 use balance_monitor::protocol_watch::{AdminWatch, DrainWatchState};
+use balance_monitor::vault_watch::VaultWatch;
 use balance_monitor::{config::Watch, Cli, Config};
 
 const MIST_PER_SUI: f64 = 1_000_000_000.0;
@@ -92,6 +93,19 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Trading-vault capital watches (SO-418): senior-claim coverage +
+    // junior buffer, re-derived from the indexer's tradingVaults view.
+    let vault_watch = match cli.indexer_graphql_url.as_deref() {
+        Some(url) => {
+            info!(indexer = %url, "trading-vault capital watch enabled");
+            Some(VaultWatch::new(url.to_string()))
+        }
+        None => {
+            info!("no indexer GraphQL url configured — trading-vault capital watch disabled");
+            None
+        }
+    };
+
     let mut drain_watches: Vec<DrainWatchState> = cfg
         .drain_watches
         .iter()
@@ -128,6 +142,9 @@ async fn main() -> Result<()> {
         }
         for d in &mut drain_watches {
             d.poll(&sui).await;
+        }
+        if let Some(w) = vault_watch.as_ref() {
+            w.poll().await;
         }
     }
 }

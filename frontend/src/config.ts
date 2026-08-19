@@ -175,6 +175,11 @@ export type TradingVaultObjects = {
   poolAllowlistId: string;
   /** Options-adapter VolBook (premium marks) — absent on older deploys. */
   volBookId?: string | null;
+  /** §9.2 terms binding (SO-418): the spec version + content hash new
+   * vaults are created under — absent on records predating v2. */
+  termsVersion?: number | null;
+  /** Hex spec hash (with 0x). */
+  specHash?: string | null;
 };
 export let TRADING_VAULT_OBJECTS: TradingVaultObjects | undefined;
 

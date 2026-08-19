@@ -55,8 +55,9 @@ tracing-subscriber = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 
-# Postgres persistence.
-diesel = { workspace = true }
+# Postgres persistence. `64-column-tables`: trading_vaults passed 32
+# columns with the v2 per-tranche/settlement fields (SO-418).
+diesel = { workspace = true, features = ["64-column-tables"] }
 diesel_migrations = { workspace = true }
 r2d2 = { workspace = true }
 bigdecimal = { workspace = true }

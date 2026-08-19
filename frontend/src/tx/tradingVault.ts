@@ -1,11 +1,13 @@
 // Programmable Transaction Block builders for the curated trading vault's
-// wallet-facing flows (SO-288).
+// wallet-facing flows (SO-288, v2 overhaul SO-418).
 //
 // Shapes mirror the Move signatures in
-// `contracts/trading-vault/sources/vault.move`. Since SO-370 the vault is
-// multi-asset: `deposit<T>` takes the DEPOSITED coin type (any allowlisted
-// asset, with an `Option<PriceAttestation>` valuing non-accounting deposits)
-// and `request_withdraw<P>` takes the requested payout asset.
+// `contracts/trading-vault-v2/sources/vault.move` + `vault_position.move`.
+// v2 deltas: `deposit<T>` takes a `tranche_code` and RETURNS a transferable
+// `VaultPosition` NFT the PTB must place (`transferObjects` to the sender);
+// `request_withdraw<P>` CONSUMES a whole position object (partial exit =
+// split first); the settlement pool replaces `enqueue_closed_stake`; and
+// `create_vault` carries the immutable capital-structure terms + the Clock.
 
 import { bcs } from "@mysten/sui/bcs";
 import { Transaction, coinWithBalance } from "@mysten/sui/transactions";
@@ -17,6 +19,7 @@ import {
   EQUITY_ORACLE_PACKAGE_ID,
   TRADING_VAULT_OBJECTS,
   TRADING_VAULT_PACKAGE_ID,
+  TREASURY_ID,
   WHITELIST_ID,
 } from "../config";
 
@@ -42,6 +45,43 @@ function requireWhitelist(): string {
   return WHITELIST_ID;
 }
 
+/** The shared core `Treasury` — settlement redemptions deposit the protocol
+ * fee cut into it. */
+function requireTreasury(): string {
+  if (!TREASURY_ID) {
+    throw new Error(
+      `No treasuryId for VITE_ENVIRONMENT="${ENV}" — cannot build settlement PTBs`,
+    );
+  }
+  return TREASURY_ID;
+}
+
+// ═══════════════════════════════ creation ═══════════════════════════════
+
+/** Immutable capital-structure terms for `create_vault` (SO-418). An
+ * untranched vault passes structure code 0 and all six tranche params 0. */
+export type CreateVaultCapitalParams = {
+  /** 0 = Untranched, 1 = SeniorJunior. */
+  structureCode: number;
+  seniorHurdleBpsAnnual: number;
+  targetJuniorBps: number;
+  maintenanceJuniorBps: number;
+  /** 0 = PreferredOnly, 1 = CappedParticipating, 2 = UncappedParticipating. */
+  upsideCode: number;
+  residualParticipationBps: number;
+  totalReturnCapBps: number;
+};
+
+export const UNTRANCHED_CAPITAL: CreateVaultCapitalParams = {
+  structureCode: 0,
+  seniorHurdleBpsAnnual: 0,
+  targetJuniorBps: 0,
+  maintenanceJuniorBps: 0,
+  upsideCode: 0,
+  residualParticipationBps: 0,
+  totalReturnCapBps: 0,
+};
+
 export type CreateTradingVaultParams = {
   /** Shared `VaultProtocolConfig` object id (resolved from the publish tx). */
   protocolConfigId: string;
@@ -50,15 +90,23 @@ export type CreateTradingVaultParams = {
   lockupMs: number;
   curatorFeeBps: number;
   unwindGraceMs: number;
+  capital: CreateVaultCapitalParams;
+  /** §9.2 terms binding: the spec version + content hash governing issuance. */
+  termsVersion: number;
+  /** Hex spec hash (with or without 0x); empty = no hash recorded. */
+  specHashHex: string;
 };
 
 /**
  * `vault::create_vault<T>` — permissionless vault creation. The creator is
  * the initial curator: the `CuratorCap` is transferred to the sender inside
- * the call; the vault is shared.
+ * the call; the vault is shared. The capital structure is immutable at
+ * creation (SO-418) and validated on-chain against the protocol floors/caps.
  */
 export function buildCreateTradingVaultTx(p: CreateTradingVaultParams): Transaction {
   const pkg = requirePackage();
+  const c = p.capital;
+  const specHash = p.specHashHex.replace(/^0x/, "");
   const tx = new Transaction();
   tx.moveCall({
     target: `${pkg}::vault::create_vault`,
@@ -69,10 +117,22 @@ export function buildCreateTradingVaultTx(p: CreateTradingVaultParams): Transact
       tx.pure.u64(p.lockupMs),
       tx.pure.u64(p.curatorFeeBps),
       tx.pure.u64(p.unwindGraceMs),
+      tx.pure.u8(c.structureCode),
+      tx.pure.u64(c.seniorHurdleBpsAnnual),
+      tx.pure.u64(c.targetJuniorBps),
+      tx.pure.u64(c.maintenanceJuniorBps),
+      tx.pure.u8(c.upsideCode),
+      tx.pure.u64(c.residualParticipationBps),
+      tx.pure.u64(c.totalReturnCapBps),
+      tx.pure.u64(p.termsVersion),
+      tx.pure(bcs.vector(bcs.u8()).serialize(specHash ? fromHex(specHash) : new Uint8Array())),
+      tx.object(CLOCK_ID),
     ],
   });
   return tx;
 }
+
+// ═══════════════════════════════ deposit ═══════════════════════════════
 
 export type TradingVaultDepositParams = {
   vaultId: string;
@@ -83,16 +143,21 @@ export type TradingVaultDepositParams = {
   depositCoinType: string;
   /** Deposit amount in smallest units. */
   amountRaw: bigint;
+  /** 0 untranched / 1 senior / 2 junior. */
+  trancheCode: number;
+  /** The sender — the minted `VaultPosition` NFT is transferred here. */
+  sender: string;
 };
 
 /**
- * `vault::begin_appraisal<T>` piped into `vault::deposit<T>` — mint shares at
- * NAV into the sender's stake, accounting-asset deposits only (`att` is
- * `none`). This two-call PTB only succeeds while the vault holds nothing but
- * its accounting asset (no positions, no other balances); otherwise the
- * appraisal is incomplete and `deposit` aborts. Non-accounting deposits go
- * through `buildAppraisedDepositTx` (tx/appraisal.ts), which composes the
- * attestation the option must carry.
+ * `vault::begin_appraisal<T>` piped into `vault::deposit<T>` — mint a
+ * `VaultPosition` NFT at NAV and transfer it to the sender (v2: `deposit`
+ * RETURNS the position; the PTB decides where it goes). Accounting-asset
+ * deposits only (`att` is `none`). This PTB only succeeds while the vault
+ * holds nothing but its accounting asset (no positions, no other
+ * balances); otherwise the appraisal is incomplete and `deposit` aborts.
+ * Non-accounting deposits go through `buildAppraisedDepositTx`
+ * (tx/appraisal.ts), which composes the attestation the option must carry.
  */
 export function buildTradingVaultDepositTx(p: TradingVaultDepositParams): Transaction {
   const pkg = requirePackage();
@@ -110,7 +175,7 @@ export function buildTradingVaultDepositTx(p: TradingVaultDepositParams): Transa
     typeArguments: [`${pkg}::price::PriceAttestation`],
     arguments: [],
   });
-  tx.moveCall({
+  const position = tx.moveCall({
     target: `${pkg}::vault::deposit`,
     typeArguments: [p.depositCoinType],
     arguments: [
@@ -120,25 +185,29 @@ export function buildTradingVaultDepositTx(p: TradingVaultDepositParams): Transa
       appraisal,
       funds,
       noAtt,
+      tx.pure.u8(p.trancheCode),
       tx.object(CLOCK_ID),
     ],
   });
+  tx.transferObjects([position], p.sender);
   return tx;
 }
 
+// ═══════════════════════════ withdrawal queue ═══════════════════════════
+
 export type TradingVaultWithdrawParams = {
   vaultId: string;
-  /** Shares to queue, in atomic share units (u128 — NOT u64). */
-  sharesRaw: bigint;
+  /** The wallet-held `VaultPosition` object to CONSUME (v2 — whole
+   * positions only; partial exit = `buildSplitThenWithdrawTx`). */
+  positionId: string;
   /** Requested payout asset — the `P` type arg; must be on the vault's
    * `deposit_assets` allowlist. */
   payoutCoinType: string;
 };
 
 /**
- * `vault::request_withdraw<P>` — queue a FIFO withdrawal from the sender's
- * stake, payable in `P`. `shares` is a u128, so it must be encoded with
- * `pure.u128`.
+ * `vault::request_withdraw<P>` — queue a lane-FIFO withdrawal by consuming
+ * the whole position object, payable in `P`.
  */
 export function buildTradingVaultWithdrawTx(p: TradingVaultWithdrawParams): Transaction {
   const pkg = requirePackage();
@@ -146,18 +215,40 @@ export function buildTradingVaultWithdrawTx(p: TradingVaultWithdrawParams): Tran
   tx.moveCall({
     target: `${pkg}::vault::request_withdraw`,
     typeArguments: [p.payoutCoinType],
-    arguments: [
-      tx.object(p.vaultId),
-      tx.pure.u128(p.sharesRaw),
-      tx.object(CLOCK_ID),
-    ],
+    arguments: [tx.object(p.vaultId), tx.object(p.positionId), tx.object(CLOCK_ID)],
+  });
+  return tx;
+}
+
+export type SplitThenWithdrawParams = TradingVaultWithdrawParams & {
+  /** Shares to split OFF and queue, in atomic share units (u128); must be
+   * strictly less than the position's shares. */
+  sharesRaw: bigint;
+};
+
+/**
+ * Partial exit (v2): `vault_position::split` the requested shares out of the
+ * position, then `vault::request_withdraw<P>` the CHILD. The parent stays in
+ * the wallet with the remaining shares and pro-rata basis.
+ */
+export function buildSplitThenWithdrawTx(p: SplitThenWithdrawParams): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  const child = tx.moveCall({
+    target: `${pkg}::vault_position::split`,
+    arguments: [tx.object(p.positionId), tx.pure.u128(p.sharesRaw)],
+  });
+  tx.moveCall({
+    target: `${pkg}::vault::request_withdraw`,
+    typeArguments: [p.payoutCoinType],
+    arguments: [tx.object(p.vaultId), child, tx.object(CLOCK_ID)],
   });
   return tx;
 }
 
 export type AmendPayoutAssetParams = {
   vaultId: string;
-  /** Queue sequence number of the pending request. */
+  /** GLOBAL sequence number of the pending request (v2). */
   seq: bigint;
   /** New payout asset — must be on the vault's allowlist. */
   payoutCoinType: string;
@@ -178,6 +269,160 @@ export function buildAmendPayoutAssetTx(p: AmendPayoutAssetParams): Transaction 
   });
   return tx;
 }
+
+// ═══════════════════════ position split / merge / transfer ═══════════════════════
+
+export type SplitPositionParams = {
+  /** The wallet-held `VaultPosition` to split. */
+  positionId: string;
+  /** Shares for the NEW child position (u128, atomic share units). */
+  sharesRaw: bigint;
+  /** Recipient of the child — usually the sender. */
+  recipient: string;
+};
+
+/** `vault_position::split` — basis allocates pro rata; both objects keep the
+ * same vault, tranche, generation, and lock expiry. */
+export function buildSplitPositionTx(p: SplitPositionParams): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  const child = tx.moveCall({
+    target: `${pkg}::vault_position::split`,
+    arguments: [tx.object(p.positionId), tx.pure.u128(p.sharesRaw)],
+  });
+  tx.transferObjects([child], p.recipient);
+  return tx;
+}
+
+export type MergePositionsParams = {
+  /** The surviving position. */
+  intoPositionId: string;
+  /** The position merged in (consumed). */
+  fromPositionId: string;
+};
+
+/** `vault_position::merge` — identical vault/tranche/generation only; shares
+ * and basis ADD, the lock takes the max. */
+export function buildMergePositionsTx(p: MergePositionsParams): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::vault_position::merge`,
+    arguments: [tx.object(p.intoPositionId), tx.object(p.fromPositionId)],
+  });
+  return tx;
+}
+
+export type TransferPositionParams = {
+  positionId: string;
+  recipient: string;
+};
+
+/** Plain object transfer of a `VaultPosition` (key + store — never
+ * module-gated). The UI interposes the value-vs-basis disclosure first. */
+export function buildTransferPositionTx(p: TransferPositionParams): Transaction {
+  const tx = new Transaction();
+  tx.transferObjects([tx.object(p.positionId)], p.recipient);
+  return tx;
+}
+
+export type BurnWipedPositionParams = {
+  vaultId: string;
+  positionId: string;
+};
+
+/** `vault::burn_wiped_position` — cleanup for a wiped-generation junior
+ * position (permanently zero value, §8.5). */
+export function buildBurnWipedPositionTx(p: BurnWipedPositionParams): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::vault::burn_wiped_position`,
+    arguments: [tx.object(p.vaultId), tx.object(p.positionId)],
+  });
+  return tx;
+}
+
+// ═══════════════════ terminal settlement pool (§8.7) ═══════════════════
+
+export type RedeemSettledPositionParams = {
+  vaultId: string;
+  /** Shared `VaultProtocolConfig` object id. */
+  protocolConfigId: string;
+  /** The wallet-held position to redeem (consumed). */
+  positionId: string;
+  /** The vault's accounting asset — the `T` type arg (settlement pays it). */
+  accountingCoinType: string;
+};
+
+/** `vault::redeem_settled_position<T>` — redeem directly against the frozen
+ * pool: no queue, no appraisal, no keeper. */
+export function buildRedeemSettledPositionTx(p: RedeemSettledPositionParams): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::vault::redeem_settled_position`,
+    typeArguments: [p.accountingCoinType],
+    arguments: [
+      tx.object(p.vaultId),
+      tx.object(p.protocolConfigId),
+      tx.object(requireTreasury()),
+      tx.object(p.positionId),
+    ],
+  });
+  return tx;
+}
+
+export type SettleQueuedRequestParams = {
+  vaultId: string;
+  /** Shared `VaultProtocolConfig` object id. */
+  protocolConfigId: string;
+  /** GLOBAL sequence of the outstanding queued request. */
+  globalSeq: bigint;
+  accountingCoinType: string;
+};
+
+/** `vault::settle_queued_request<T>` — permissionless: settle an outstanding
+ * queued request from the pool at the snapshot entitlement. */
+export function buildSettleQueuedRequestTx(p: SettleQueuedRequestParams): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::vault::settle_queued_request`,
+    typeArguments: [p.accountingCoinType],
+    arguments: [
+      tx.object(p.vaultId),
+      tx.object(p.protocolConfigId),
+      tx.object(requireTreasury()),
+      tx.pure.u64(p.globalSeq),
+    ],
+  });
+  return tx;
+}
+
+export type ClaimSettlementCuratorFeesParams = {
+  vaultId: string;
+  /** The curator's owned `CuratorCap` object id. */
+  curatorCapId: string;
+  accountingCoinType: string;
+};
+
+/** `vault::claim_settlement_curator_fees<T>` — pay out the curator fees
+ * accrued from settlement redemptions. Current-cap-gated, wallet-paid. */
+export function buildClaimSettlementCuratorFeesTx(
+  p: ClaimSettlementCuratorFeesParams,
+): Transaction {
+  const pkg = requirePackage();
+  const tx = new Transaction();
+  tx.moveCall({
+    target: `${pkg}::vault::claim_settlement_curator_fees`,
+    typeArguments: [p.accountingCoinType],
+    arguments: [tx.object(p.vaultId), tx.object(p.curatorCapId)],
+  });
+  return tx;
+}
+
+// ═══════════════════ curator asset management (SO-370) ═══════════════════
 
 export type DepositAssetParams = {
   vaultId: string;

@@ -94,6 +94,9 @@ pub struct ExposureDto {
     pub premium_by_strike_bucket: [f64; 3],
     pub kill_switch: bool,
     pub stress_blocked: bool,
+    /// SO-418: the vault is risk-off (capital risk state / commitment
+    /// breach / lifecycle) — quoting, bids and new listings are idle.
+    pub risk_off: bool,
 }
 
 /// Continuous utilizations against the SOFT limits (1.0 = at limit),
@@ -339,6 +342,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
         .shared
         .stress_blocked
         .load(std::sync::atomic::Ordering::Relaxed);
+    let risk_off = desk.shared.risk_off.load(std::sync::atomic::Ordering::Relaxed);
     let book_delta_units = desk.shared.book_delta_units.read().clone();
     let funding_rate_annual = *desk.shared.funding_rate_annual.read();
 
@@ -558,6 +562,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             premium_by_strike_bucket: exposure.premium_by_strike_bucket,
             kill_switch: exposure.kill_switch,
             stress_blocked,
+            risk_off,
         },
         limits,
         greeks: GreeksDto {

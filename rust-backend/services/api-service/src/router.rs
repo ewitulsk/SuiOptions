@@ -61,9 +61,15 @@ pub async fn serve(
             "/trading-vaults/:vault_id/pps-history",
             get(handlers::trading_vaults::get_pps_history),
         )
+        // Static `positions` wins over the `:vault_id` param routes (matchit
+        // gives static segments priority), so this can live alongside them.
         .route(
-            "/trading-vaults/:vault_id/stake/:address",
-            get(handlers::trading_vaults::get_stake),
+            "/trading-vaults/positions/:position_id",
+            get(handlers::trading_vaults::get_position),
+        )
+        .route(
+            "/trading-vaults/:vault_id/positions/:address",
+            get(handlers::trading_vaults::get_wallet_positions),
         )
         .route(
             "/trading-vaults/:vault_id/trades",
@@ -72,6 +78,14 @@ pub async fn serve(
         .route(
             "/trading-vaults/:vault_id/pending-requests",
             get(handlers::trading_vaults::get_pending_requests),
+        )
+        .route(
+            "/trading-vaults/:vault_id/waterfall",
+            get(handlers::trading_vaults::get_waterfall),
+        )
+        .route(
+            "/trading-vaults/:vault_id/settlement",
+            get(handlers::trading_vaults::get_settlement),
         )
         // The covered-call vault endpoints (`/vaults`, `/vaults/:id`,
         // `/vaults/:id/{rounds,apy,receipts}`) were unrouted with the product
@@ -109,4 +123,28 @@ fn build_cors(allowed_origins: &[String]) -> Result<CorsLayer> {
         .allow_origin(origins)
         .allow_methods(Any)
         .allow_headers(Any))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{routing::get, Router};
+
+    /// axum panics at registration time on conflicting paths — a runtime
+    /// failure `cargo check` can't catch. Pin that the static
+    /// `/trading-vaults/positions/:id` route coexists with the
+    /// `:vault_id`-param routes (SO-418).
+    #[test]
+    fn trading_vault_routes_do_not_conflict() {
+        async fn h() {}
+        let _router: Router<()> = Router::new()
+            .route("/trading-vaults", get(h))
+            .route("/trading-vaults/:vault_id", get(h))
+            .route("/trading-vaults/:vault_id/pps-history", get(h))
+            .route("/trading-vaults/positions/:position_id", get(h))
+            .route("/trading-vaults/:vault_id/positions/:address", get(h))
+            .route("/trading-vaults/:vault_id/trades", get(h))
+            .route("/trading-vaults/:vault_id/pending-requests", get(h))
+            .route("/trading-vaults/:vault_id/waterfall", get(h))
+            .route("/trading-vaults/:vault_id/settlement", get(h));
+    }
 }

@@ -31,6 +31,8 @@ low_balance_sui = 2.0
 # ── Protocol watches (SO-387) ───────────────────────────────────────────
 # The admin-change watch (whitelist membership / pause-flag tampering
 # tripwire) is enabled by TOKEN_INFO_URL in the compose env — no config here.
+# The trading-vault capital watches (tv-claim-coverage / tv-buffer-low,
+# SO-418) are enabled the same way by INDEXER_GRAPHQL_URL.
 #
 # Drain watches poll a shared object's TOP-LEVEL balance fields and fire
 # `drain-suspected-<name>` when the sum drops more than drop_bps below the

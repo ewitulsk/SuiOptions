@@ -18,6 +18,7 @@
 
 pub mod config;
 pub mod protocol_watch;
+pub mod vault_watch;
 
 pub use config::Config;
 
@@ -50,6 +51,12 @@ pub struct Cli {
     /// snapshot). Unset (e.g. dev) skips the watch.
     #[arg(long, env = "TOKEN_INFO_URL")]
     pub token_info_url: Option<String>,
+
+    /// Indexer GraphQL URL. When set, enables the trading-vault capital
+    /// watches (senior-claim coverage + junior buffer, SO-418). Unset
+    /// skips them.
+    #[arg(long, env = "INDEXER_GRAPHQL_URL")]
+    pub indexer_graphql_url: Option<String>,
 }
 
 cli_spec::define_program! {

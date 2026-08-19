@@ -4,6 +4,7 @@ import { Composer } from "./screens/Composer";
 import { Dashboard } from "./screens/Dashboard";
 import { TradingVaults } from "./screens/TradingVaults";
 import { TradingVaultDetailScreen } from "./screens/TradingVaultDetail";
+import { VaultPositionDetailScreen } from "./screens/VaultPositionDetail";
 import { Activity } from "./screens/Activity";
 import { Analytics } from "./screens/Analytics";
 import { Bridge } from "./screens/Bridge";
@@ -30,6 +31,11 @@ export function App() {
         {/* Curated trading vaults (SO-288). */}
         <Route path="/vaults" element={<TradingVaults />} />
         <Route path="/vaults/:vaultId" element={<TradingVaultDetailScreen />} />
+        {/* Any position by id — secondary-buyer due diligence (SO-418). */}
+        <Route
+          path="/vaults/:vaultId/positions/:positionId"
+          element={<VaultPositionDetailScreen />}
+        />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/activity" element={<Activity />} />
         {/* Spot + realized-vol analytics chart (SO-390). */}

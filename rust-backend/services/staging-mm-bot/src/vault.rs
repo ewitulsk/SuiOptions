@@ -103,6 +103,10 @@ pub struct ResolvedDirectVault {
     /// The vault's direct-custody identity BalanceManager: the manager the
     /// bot's signed orders name.
     pub manager_id: ObjectID,
+    /// The vault's `CuratorCap`, when this wallet holds it (SO-418: the
+    /// funding pass needs it to fund the escrowed curator commitment via
+    /// `deposit_into_commitment`). `None` = commitment upkeep disabled.
+    pub curator_cap: Option<ObjectID>,
     /// True when this call created the vault.
     pub provisioned: bool,
 }
@@ -130,8 +134,8 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedDirectVault> {
             )
         })?;
         info!(vault = %vault_id.to_hex_literal(), creator = %view.creator, "adopting pinned vault");
-        let manager_id = ensure_wired(&p, &view, me).await?;
-        return Ok(ResolvedDirectVault { vault_id, manager_id, provisioned: false });
+        let (manager_id, curator_cap) = ensure_wired(&p, &view, me).await?;
+        return Ok(ResolvedDirectVault { vault_id, manager_id, curator_cap, provisioned: false });
     }
 
     if !p.cfg.enabled {
@@ -148,8 +152,8 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedDirectVault> {
     if let Some(view) = pick(mine, &wired) {
         let vault_id = ObjectID::new(*view.vault_id.as_bytes());
         info!(vault = %vault_id.to_hex_literal(), "adopting self-created vault");
-        let manager_id = ensure_wired(&p, &view, me).await?;
-        return Ok(ResolvedDirectVault { vault_id, manager_id, provisioned: false });
+        let (manager_id, curator_cap) = ensure_wired(&p, &view, me).await?;
+        return Ok(ResolvedDirectVault { vault_id, manager_id, curator_cap, provisioned: false });
     }
 
     // Nothing to adopt. Before creating, insist the indexer is current: a
@@ -197,10 +201,25 @@ async fn provision(p: &ResolveParams<'_>, me: SuiAddress) -> Result<ResolvedDire
         p.vault_protocol_config,
         p.whitelist,
         p.accounting_coin_type,
+        // v2 (SO-418): always UNTRANCHED — this bot's vault is testnet
+        // exchange liquidity, not a structured product. structure_code 0
+        // requires all six tranche params zero (the contract aborts
+        // otherwise). The escrowed curator commitment is funded by the
+        // funding pass right after resolution (it has the appraisal
+        // composer; provisioning does not).
         &CreateVaultSpec {
             lockup_ms: p.cfg.lockup_ms,
             curator_fee_bps: p.cfg.curator_fee_bps,
             unwind_grace_ms: p.cfg.unwind_grace_ms,
+            structure_code: 0,
+            senior_hurdle_bps_annual: 0,
+            target_junior_bps: 0,
+            maintenance_junior_bps: 0,
+            upside_code: 0,
+            residual_participation_bps: 0,
+            total_return_cap_bps: 0,
+            terms_version: 1,
+            spec_hash: Vec::new(),
         },
         p.cfg.gas_budget,
     )
@@ -223,18 +242,20 @@ async fn provision(p: &ResolveParams<'_>, me: SuiAddress) -> Result<ResolvedDire
     Ok(ResolvedDirectVault {
         vault_id: created.vault_id,
         manager_id: custody.bm_id,
+        curator_cap: Some(created.curator_cap_id),
         provisioned: true,
     })
 }
 
 /// Verify an adopted vault against chain state and finish any wiring a
 /// crashed provision (or an older ceremony) left undone. Returns the
-/// identity BM the orders will name. Errors mean "unusable".
+/// identity BM the orders will name plus the CuratorCap when this wallet
+/// holds it. Errors mean "unusable".
 async fn ensure_wired(
     p: &ResolveParams<'_>,
     view: &TradingVault,
     me: SuiAddress,
-) -> Result<ObjectID> {
+) -> Result<(ObjectID, Option<ObjectID>)> {
     let vault_id = ObjectID::new(*view.vault_id.as_bytes());
 
     if view.state != "open" {
@@ -323,7 +344,7 @@ async fn ensure_wired(
         }
     }
 
-    Ok(custody.bm_id)
+    Ok((custody.bm_id, cap))
 }
 
 /// `init_direct_custody` + `add_quote_adapter`, one PTB — atomic, so
@@ -666,6 +687,61 @@ async fn deposit_assets(p: &ResolveParams<'_>, vault_id: ObjectID) -> Result<Vec
     Ok(set.contents.iter().map(|t| canonicalize_move_type(&t.name)).collect())
 }
 
+/// SO-418: is this vault "risk-off" for quoting? Mirrors the §8.4b gate
+/// set the on-chain releases abort on (code 124) plus the terminal
+/// states: capital risk state not Healthy, curator commitment breached,
+/// lifecycle not open, or settled. The quoter hard-stops on this BEFORE
+/// signing orders whose fills would abort at settlement.
+pub fn risk_off(v: &TradingVault) -> bool {
+    v.risk_state != 0 || v.curator_commitment_breached || v.state != "open" || v.settled
+}
+
+/// Mirror of the Move `SHARE_OFFSET` (shares are offset-scaled vs value).
+const SHARE_OFFSET: u128 = 1_000_000;
+
+/// SO-418: the junior/risk-bearing capital measure of a TRANCHED vault,
+/// accounting-asset raw units — `junior_nav` from the latest capital
+/// sync, falling back to the observed junior pps × junior shares. The
+/// senior claim is not the bot's to quote against. `None` for untranched
+/// vaults (the whole book is risk capital) or when nothing has priced
+/// the junior side yet.
+pub fn junior_capital(v: &TradingVault) -> Option<u64> {
+    if v.structure_code == 0 {
+        return None;
+    }
+    let nav = v.junior_nav.or_else(|| {
+        v.latest_junior_pps_e12.map(|pps| {
+            pps.saturating_mul(v.junior_shares) / 1_000_000_000_000u128 / SHARE_OFFSET
+        })
+    });
+    nav.map(|n| u64::try_from(n).unwrap_or(u64::MAX))
+}
+
+/// Dev-inspect `vault::commitment_of(vault, cap_id).0` — does the
+/// escrowed curator commitment slot exist for this cap (SO-418)? The
+/// funding pass funds it when missing.
+pub async fn has_commitment(
+    client: &ChainClient,
+    sender: SuiAddress,
+    trading_vault_package: ObjectID,
+    vault_id: ObjectID,
+    cap_id: ObjectID,
+) -> Result<bool> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
+    let cap = pt.pure(cap_id)?;
+    pt.programmable_move_call(
+        trading_vault_package,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("commitment_of").unwrap(),
+        vec![],
+        vec![vault, cap],
+    );
+    let res =
+        client.dev_inspect_ptb(sender, pt).await.context("dev-inspecting commitment_of")?;
+    decode_return_value::<bool>(&res, 0).context("decoding commitment_of.exists")
+}
+
 /// Address-owner field of a BalanceManager's JSON, with a type check.
 pub async fn manager_owner(client: &ChainClient, id: ObjectID) -> Result<String> {
     let (obj, json) = client
@@ -738,6 +814,46 @@ mod tests {
             external_equity_updated_at_ms: None,
             latest_nav: None,
             nav_updated_at_ms: None,
+            // ── v2 (SO-418): an untranched, healthy, unsettled vault ──
+            structure_code: 0,
+            senior_hurdle_bps_annual: 0,
+            target_junior_bps: 0,
+            maintenance_junior_bps: 0,
+            upside_code: 0,
+            residual_participation_bps: 0,
+            total_return_cap_bps: 0,
+            terms_version: 1,
+            spec_hash: None,
+            senior_shares: 0,
+            junior_shares: 0,
+            senior_claim: 0,
+            senior_principal_basis: 0,
+            senior_nav: None,
+            junior_nav: None,
+            latest_senior_pps_e12: None,
+            latest_junior_pps_e12: None,
+            risk_state: 0,
+            curator_commitment_breached: false,
+            impaired_since_ms: None,
+            active_junior_generation: 0,
+            reset_old_generation: None,
+            reset_proposed_at_ms: None,
+            reset_executable_at_ms: None,
+            reset_recorded_nav: None,
+            reset_recorded_senior_claim: None,
+            reset_recorded_required_deposit: None,
+            settled: false,
+            settlement_final_nav: None,
+            senior_pool: None,
+            senior_supply: None,
+            junior_pool: None,
+            junior_supply: None,
+            settlement_snapshot_at_ms: None,
+            settlement_redeemed: 0,
+            senior_lane_head: 0,
+            senior_lane_tail: 0,
+            junior_lane_head: 0,
+            junior_lane_tail: 0,
         }
     }
 
@@ -765,6 +881,41 @@ mod tests {
     #[test]
     fn pick_of_nothing_is_none() {
         assert!(pick(Vec::new(), &HashSet::new()).is_none());
+    }
+
+    // ── SO-418 risk gate + tranche budget measure ──────────────────────
+
+    #[test]
+    fn risk_off_covers_state_breach_lifecycle_and_settlement() {
+        assert!(!risk_off(&vault(1, 0)));
+        let mut v = vault(1, 0);
+        v.risk_state = 2; // Impaired
+        assert!(risk_off(&v));
+        let mut v = vault(1, 0);
+        v.curator_commitment_breached = true;
+        assert!(risk_off(&v));
+        let mut v = vault(1, 0);
+        v.state = "closing".into();
+        assert!(risk_off(&v));
+        let mut v = vault(1, 0);
+        v.settled = true;
+        assert!(risk_off(&v));
+    }
+
+    #[test]
+    fn junior_capital_is_none_untranched_and_prefers_synced_nav() {
+        let mut v = vault(1, 0);
+        assert_eq!(junior_capital(&v), None, "untranched: whole book is risk capital");
+        v.structure_code = 1;
+        assert_eq!(junior_capital(&v), None, "no junior pricing yet");
+        // Observed pps fallback: pps_e12 = value×1e12×OFFSET/shares —
+        // a par vault reads 1e12.
+        v.junior_shares = 3_000 * 1_000_000;
+        v.latest_junior_pps_e12 = Some(1_000_000_000_000);
+        assert_eq!(junior_capital(&v), Some(3_000));
+        // The synced waterfall NAV wins once present.
+        v.junior_nav = Some(2_500);
+        assert_eq!(junior_capital(&v), Some(2_500));
     }
 
     #[test]

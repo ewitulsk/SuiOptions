@@ -351,6 +351,35 @@ impl ApiServiceClient {
             })
             .collect()
     }
+
+    /// Vault ids that are "quote-paused" (SO-418): deposits paused, capital
+    /// risk state not Healthy, curator commitment breached, or lifecycle
+    /// state not `open`. A superset of [`Self::paused_vault_ids`] — the
+    /// bots treat these vaults as off-risk and skip quoting for them.
+    /// Distinct from `paused_vault_ids` so existing pause semantics don't
+    /// silently change under consumers.
+    pub async fn risk_off_vault_ids(&self) -> Result<HashSet<ObjectId>> {
+        let url = format!("{}/trading-vaults", self.base_url);
+        let wire: VaultsWire = observability::client::instrumented("api-service", "GET /trading-vaults", |h| {
+            self.http.get(&url).headers(h).send()
+        })
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("GET {url} returned an error status"))?
+        .json()
+        .await
+        .with_context(|| format!("decoding vaults from {url}"))?;
+
+        wire.vaults
+            .into_iter()
+            .filter(VaultStatusWire::risk_off)
+            .map(|v| {
+                ObjectId::from_hex(&v.vault_id)
+                    .map_err(|e| anyhow::anyhow!("vault_id {}: {e}", v.vault_id))
+            })
+            .collect()
+    }
 }
 
 /// One bucket with a live secondary-market venue, flattened from
@@ -405,6 +434,30 @@ struct VaultsWire {
 struct VaultStatusWire {
     vault_id: String,
     deposits_paused: bool,
+    /// v2 capital fields (SO-418); serde defaults keep this client
+    /// compatible with an api-service that predates them (defaults read as
+    /// "healthy open vault", so only `deposits_paused` gates).
+    #[serde(default)]
+    risk_state_code: u8,
+    #[serde(default)]
+    curator_commitment_breached: bool,
+    #[serde(default = "default_vault_state")]
+    state: String,
+}
+
+fn default_vault_state() -> String {
+    "open".to_string()
+}
+
+impl VaultStatusWire {
+    /// The SO-418 quote-pause rule: any capital risk-off signal, a breached
+    /// curator commitment, a non-open lifecycle state, or paused deposits.
+    fn risk_off(&self) -> bool {
+        self.deposits_paused
+            || self.risk_state_code != 0
+            || self.curator_commitment_breached
+            || self.state != "open"
+    }
 }
 
 #[derive(Deserialize)]
@@ -542,5 +595,25 @@ mod tests {
         assert_eq!(wire.series[0].buckets.len(), 2);
         assert!(wire.series[0].buckets[0].bucket_id.is_none());
         assert_eq!(wire.series[0].buckets[1].bucket_id.as_deref(), Some("0x0a"));
+    }
+
+    /// The SO-418 quote-pause rule: any of the four signals flags the vault,
+    /// and a pre-v2 payload (fields absent) reads as a healthy open vault.
+    #[test]
+    fn risk_off_covers_all_four_signals_and_defaults_healthy() {
+        let v = |json: &str| -> VaultStatusWire { serde_json::from_str(json).unwrap() };
+        // Pre-v2 wire: only the legacy fields.
+        assert!(!v(r#"{"vault_id":"0x1","deposits_paused":false}"#).risk_off());
+        assert!(v(r#"{"vault_id":"0x1","deposits_paused":true}"#).risk_off());
+        let full = r#"{"vault_id":"0x1","deposits_paused":false,
+            "risk_state_code":0,"curator_commitment_breached":false,"state":"open"}"#;
+        assert!(!v(full).risk_off());
+        assert!(v(&full.replace("\"risk_state_code\":0", "\"risk_state_code\":1")).risk_off());
+        assert!(v(&full.replace(
+            "\"curator_commitment_breached\":false",
+            "\"curator_commitment_breached\":true"
+        ))
+        .risk_off());
+        assert!(v(&full.replace("\"state\":\"open\"", "\"state\":\"closing\"")).risk_off());
     }
 }

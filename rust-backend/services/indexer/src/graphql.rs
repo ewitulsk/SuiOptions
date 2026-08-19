@@ -463,6 +463,58 @@ pub struct TradingVaultGql {
     /// decimal string; SO-304).
     pub latest_nav_raw: Option<String>,
     pub nav_updated_at_ms: Option<String>,
+    // ── trading-vault v2 (SO-418) ──
+    /// 0 = Untranched, 1 = SeniorJunior. Immutable.
+    pub structure_code: i32,
+    pub senior_hurdle_bps_annual: String,
+    pub target_junior_bps: String,
+    pub maintenance_junior_bps: String,
+    pub upside_code: i32,
+    pub residual_participation_bps: String,
+    pub total_return_cap_bps: String,
+    pub terms_version: String,
+    /// 0x-prefixed hex; null when absent.
+    pub spec_hash: Option<String>,
+    pub senior_shares_raw: String,
+    /// Untranched supply lives here (mirrors capital.move).
+    pub junior_shares_raw: String,
+    pub senior_claim_raw: String,
+    pub senior_principal_basis_raw: String,
+    /// Waterfall NAV split from the latest TvCapitalSynced.
+    pub senior_nav_raw: Option<String>,
+    pub junior_nav_raw: Option<String>,
+    /// Observed per-tranche pps (1e12-scaled). Untranched vaults keep
+    /// using latestPpsE12Raw.
+    pub latest_senior_pps_e12_raw: Option<String>,
+    pub latest_junior_pps_e12_raw: Option<String>,
+    /// 0=Healthy 1=CoverageBreach 2=Impaired 3=ResetPending.
+    pub risk_state: i32,
+    pub curator_commitment_breached: bool,
+    pub impaired_since_ms: Option<String>,
+    pub active_junior_generation: String,
+    /// Open junior-reset proposal; all null when there is none.
+    pub reset_old_generation: Option<String>,
+    pub reset_proposed_at_ms: Option<String>,
+    pub reset_executable_at_ms: Option<String>,
+    pub reset_recorded_nav_raw: Option<String>,
+    pub reset_recorded_senior_claim_raw: Option<String>,
+    pub reset_recorded_required_deposit_raw: Option<String>,
+    /// Terminal settlement pool (frozen at TvSettlementSnapshot).
+    pub settled: bool,
+    pub settlement_final_nav_raw: Option<String>,
+    pub senior_pool_raw: Option<String>,
+    pub senior_supply_raw: Option<String>,
+    pub junior_pool_raw: Option<String>,
+    pub junior_supply_raw: Option<String>,
+    pub settlement_snapshot_at_ms: Option<String>,
+    /// Cumulative entitlement drawn from the settlement pools.
+    pub settlement_redeemed_raw: String,
+    /// Per-lane queue cursors: tail = highest requested global_seq + 1,
+    /// head = highest fulfilled/settled global_seq + 1.
+    pub senior_lane_head: String,
+    pub senior_lane_tail: String,
+    pub junior_lane_head: String,
+    pub junior_lane_tail: String,
 }
 
 impl From<TradingVaultRow> for TradingVaultGql {
@@ -492,6 +544,96 @@ impl From<TradingVaultRow> for TradingVaultGql {
                 .map(|t| t.to_string()),
             latest_nav_raw: v.latest_nav.map(|n| n.to_string()),
             nav_updated_at_ms: v.nav_updated_at_ms.map(|t| t.to_string()),
+            structure_code: v.structure_code as i32,
+            senior_hurdle_bps_annual: v.senior_hurdle_bps_annual.to_string(),
+            target_junior_bps: v.target_junior_bps.to_string(),
+            maintenance_junior_bps: v.maintenance_junior_bps.to_string(),
+            upside_code: v.upside_code as i32,
+            residual_participation_bps: v.residual_participation_bps.to_string(),
+            total_return_cap_bps: v.total_return_cap_bps.to_string(),
+            terms_version: v.terms_version.to_string(),
+            spec_hash: v.spec_hash,
+            senior_shares_raw: v.senior_shares.to_string(),
+            junior_shares_raw: v.junior_shares.to_string(),
+            senior_claim_raw: v.senior_claim.to_string(),
+            senior_principal_basis_raw: v.senior_principal_basis.to_string(),
+            senior_nav_raw: v.senior_nav.map(|n| n.to_string()),
+            junior_nav_raw: v.junior_nav.map(|n| n.to_string()),
+            latest_senior_pps_e12_raw: v.latest_senior_pps_e12.map(|p| p.to_string()),
+            latest_junior_pps_e12_raw: v.latest_junior_pps_e12.map(|p| p.to_string()),
+            risk_state: v.risk_state as i32,
+            curator_commitment_breached: v.curator_commitment_breached,
+            impaired_since_ms: v.impaired_since_ms.map(|t| t.to_string()),
+            active_junior_generation: v.active_junior_generation.to_string(),
+            reset_old_generation: v.reset_old_generation.map(|g| g.to_string()),
+            reset_proposed_at_ms: v.reset_proposed_at_ms.map(|t| t.to_string()),
+            reset_executable_at_ms: v.reset_executable_at_ms.map(|t| t.to_string()),
+            reset_recorded_nav_raw: v.reset_recorded_nav.map(|n| n.to_string()),
+            reset_recorded_senior_claim_raw: v
+                .reset_recorded_senior_claim
+                .map(|n| n.to_string()),
+            reset_recorded_required_deposit_raw: v
+                .reset_recorded_required_deposit
+                .map(|n| n.to_string()),
+            settled: v.settled,
+            settlement_final_nav_raw: v.settlement_final_nav.map(|n| n.to_string()),
+            senior_pool_raw: v.senior_pool.map(|n| n.to_string()),
+            senior_supply_raw: v.senior_supply.map(|n| n.to_string()),
+            junior_pool_raw: v.junior_pool.map(|n| n.to_string()),
+            junior_supply_raw: v.junior_supply.map(|n| n.to_string()),
+            settlement_snapshot_at_ms: v.settlement_snapshot_at_ms.map(|t| t.to_string()),
+            settlement_redeemed_raw: v.settlement_redeemed.to_string(),
+            senior_lane_head: v.senior_lane_head.to_string(),
+            senior_lane_tail: v.senior_lane_tail.to_string(),
+            junior_lane_head: v.junior_lane_head.to_string(),
+            junior_lane_tail: v.junior_lane_tail.to_string(),
+        }
+    }
+}
+
+/// One `VaultPosition` NFT's lifecycle + lineage (SO-418). Ownership is
+/// NOT indexed (transfers emit no events); api-service resolves current
+/// owners JIT from chain. Rows never delete — consumed/settled/burned
+/// stay for history.
+#[derive(SimpleObject)]
+pub struct VaultPositionGql {
+    pub position_id: String,
+    pub vault_id: String,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: i32,
+    pub capital_generation: String,
+    pub shares_raw: String,
+    pub cost_basis_raw: String,
+    pub locked_until_ms: String,
+    /// live | queued | consumed | settled | burned.
+    pub status: String,
+    /// Split lineage: the parent this position was carved out of.
+    pub parent_position_id: Option<String>,
+    /// Merge lineage: the kept position this one was folded into.
+    pub merged_into: Option<String>,
+    /// The withdraw request's global_seq once queued (kept after
+    /// consumption as the historical join key).
+    pub queued_global_seq: Option<String>,
+    pub created_at_ms: String,
+    pub updated_at_ms: String,
+}
+
+impl From<crate::db::models::VaultPositionRow> for VaultPositionGql {
+    fn from(p: crate::db::models::VaultPositionRow) -> Self {
+        VaultPositionGql {
+            position_id: p.position_id,
+            vault_id: p.vault_id,
+            tranche: p.tranche as i32,
+            capital_generation: p.capital_generation.to_string(),
+            shares_raw: p.shares.to_string(),
+            cost_basis_raw: p.cost_basis.to_string(),
+            locked_until_ms: p.locked_until_ms.to_string(),
+            status: p.status,
+            parent_position_id: p.parent_position_id,
+            merged_into: p.merged_into,
+            queued_global_seq: p.queued_global_seq.map(|v| v.to_string()),
+            created_at_ms: p.created_at_ms.to_string(),
+            updated_at_ms: p.updated_at_ms.to_string(),
         }
     }
 }
@@ -861,6 +1003,36 @@ impl QueryRoot {
         Ok(rows.into_iter().map(TradingVaultPositionGql::from).collect())
     }
 
+    /// JIT: VaultPosition NFT lifecycle rows for one trading vault
+    /// (SO-418), all statuses, ascending by creation time.
+    async fn vault_positions(
+        &self,
+        ctx: &Context<'_>,
+        vault_id: String,
+    ) -> async_graphql::Result<Vec<VaultPositionGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let rows = db_query("vault_positions_query", move || {
+            repo.vault_positions_query(&vault_id)
+        })
+        .await?;
+        Ok(rows.into_iter().map(VaultPositionGql::from).collect())
+    }
+
+    /// JIT: one VaultPosition lifecycle row by its object id (SO-418),
+    /// or null if unknown.
+    async fn vault_position(
+        &self,
+        ctx: &Context<'_>,
+        position_id: String,
+    ) -> async_graphql::Result<Option<VaultPositionGql>> {
+        let repo = ctx.data_unchecked::<Repo>().clone();
+        let row = db_query("vault_position_by_id", move || {
+            repo.vault_position_by_id(&position_id)
+        })
+        .await?;
+        Ok(row.map(VaultPositionGql::from))
+    }
+
     /// Generalized event query over the full `indexed_events` log.
     /// `limit` is clamped to 1..=1000; paginate with the returned `nextCursor`.
     async fn events(
@@ -900,6 +1072,74 @@ impl QueryRoot {
 }
 
 pub type IndexerSchema = Schema<QueryRoot, EmptyMutation, EmptySubscription>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SO-418: pin the exact GraphQL field names the indexer-graphql client
+    /// and api-service query — camelCase rendering of e.g. `_e12_raw` and
+    /// the new vaultPositions queries must not drift.
+    #[test]
+    fn schema_exposes_trading_vault_v2_fields() {
+        let sdl = Schema::build(QueryRoot, EmptyMutation, EmptySubscription)
+            .finish()
+            .sdl();
+        for field in [
+            // TradingVaultGql v2 additions.
+            "structureCode",
+            "seniorHurdleBpsAnnual",
+            "targetJuniorBps",
+            "maintenanceJuniorBps",
+            "upsideCode",
+            "residualParticipationBps",
+            "totalReturnCapBps",
+            "termsVersion",
+            "specHash",
+            "seniorSharesRaw",
+            "juniorSharesRaw",
+            "seniorClaimRaw",
+            "seniorPrincipalBasisRaw",
+            "seniorNavRaw",
+            "juniorNavRaw",
+            "latestSeniorPpsE12Raw",
+            "latestJuniorPpsE12Raw",
+            "riskState",
+            "curatorCommitmentBreached",
+            "impairedSinceMs",
+            "activeJuniorGeneration",
+            "resetOldGeneration",
+            "resetProposedAtMs",
+            "resetExecutableAtMs",
+            "resetRecordedNavRaw",
+            "resetRecordedSeniorClaimRaw",
+            "resetRecordedRequiredDepositRaw",
+            "settled",
+            "settlementFinalNavRaw",
+            "seniorPoolRaw",
+            "seniorSupplyRaw",
+            "juniorPoolRaw",
+            "juniorSupplyRaw",
+            "settlementSnapshotAtMs",
+            "settlementRedeemedRaw",
+            "seniorLaneHead",
+            "seniorLaneTail",
+            "juniorLaneHead",
+            "juniorLaneTail",
+            // VaultPositionGql + queries.
+            "vaultPositions",
+            "vaultPosition",
+            "positionId",
+            "capitalGeneration",
+            "costBasisRaw",
+            "parentPositionId",
+            "mergedInto",
+            "queuedGlobalSeq",
+        ] {
+            assert!(sdl.contains(field), "schema is missing field {field:?}");
+        }
+    }
+}
 
 async fn graphiql() -> impl IntoResponse {
     Html(GraphiQLSource::build().endpoint("/graphql").finish())

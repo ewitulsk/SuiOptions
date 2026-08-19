@@ -8,28 +8,43 @@
 //!   3. Sweep DeepBook settled amounts into each custody's manager.
 //!   4. Sweep vault_mm transfer-ins parked at the vault's address
 //!      (Positions, option coins, premium coins).
-//!   5. Force-unwind when the withdrawal queue head has aged past the
-//!      vault's grace period: cancel books + sweep manager balances.
+//!   5. Force-unwind when the OLDEST withdrawal head across BOTH lanes
+//!      (v2: senior + junior FIFO lanes under one global sequence) has
+//!      aged past the vault's grace period: cancel books + sweep manager
+//!      balances. A class-blocked junior head still counts as unmet exit
+//!      demand.
 //!   6. Post external-account equity into the `EquityBook` (SO-299) when
 //!      a venue source has an opinion, stepping within the book's
 //!      on-chain guardrails ([`crate::venue_equity`]; the keeper wallet
 //!      must be an allowlisted poster). While an external account is still
 //!      unfunded, create its zero entry instead (SO-310, permissionless).
-//!   7. Fulfill the withdrawal queue with a FULL attestation-bearing
+//!   7. Fulfill the withdrawal lanes with a FULL attestation-bearing
 //!      appraisal (sui_tx::tx::appraisal composer) — cash-only vaults
 //!      need no price legs, everything else gets Pyth attestations;
-//!      external-configured vaults get the mandatory equity leg.
+//!      external-configured vaults get the mandatory equity leg. The v2
+//!      plan merges both lanes by global sequence, skipping the junior
+//!      lane while the vault is risk-off (the contract itself picks the
+//!      lowest payable head, so the plan is a conservative superset).
 //!      Accounting-payable heads use `fulfill_withdrawals`; heads
 //!      requesting a non-accounting payout go through the fulfillment
 //!      potato with per-payout-asset attestations (SO-370).
-//!   8. When nothing needs fulfilling but the vault holds positions or
-//!      foreign assets, refresh their marks (SO-304): the same composed
-//!      appraisal finished with the permissionless `crank_appraisal`,
-//!      rate-limited per vault.
+//!   8. When nothing needs fulfilling, run the permissionless
+//!      `crank_capital` at `mark_refresh_interval_ms` cadence (SO-418):
+//!      the same composed appraisal now also drives hurdle accrual, the
+//!      waterfall, risk-state transitions and the commitment test. The
+//!      hurdle accrual cap makes this cadence a correctness obligation
+//!      (`tv-accrual-cadence`), not just mark freshness.
+//!   9. Terminal settlement (v2 §8.7): a Closed vault without a
+//!      settlement snapshot gets the permissionless `snapshot_settlement`
+//!      crank (`tv-settlement-missing` after 1h); once settled, every
+//!      outstanding queued request is paid via `settle_queued_request`;
+//!      a settled vault with zero pending requests is skipped forever.
 //!
 //! Alongside the cranks, a read-only reconciliation monitor
 //! (`hedge-reconciliation` alert) compares each external account's
-//! recorded exposure against its attested equity every tick.
+//! recorded exposure against its attested equity every tick, and a
+//! capital-state monitor raises `tv-coverage-breach` / `tv-impaired` /
+//! `tv-reset-proposed` / `tv-commitment-breach` once per transition.
 //!
 //! Governance/object ids come from token-info's `trading_vault_objects`
 //! block when present (written by the deploy-time activation, SO-292);
@@ -115,6 +130,32 @@ pub struct TradingVaultCtx {
     /// vault retries at FULL TICK RATE, and one bad night multiplied a
     /// per-vault failure into hundreds of paid reverts.
     pub crank_backoff: std::sync::Mutex<BTreeMap<ObjectID, (u32, u64)>>,
+    /// Per-vault last-seen capital state (SO-418): risk-state alerts fire
+    /// once per TRANSITION, not every tick.
+    pub capital_watch: std::sync::Mutex<BTreeMap<ObjectID, CapitalWatch>>,
+    /// Closed-but-unsettled vaults: (first seen at, alerted). Drives the
+    /// `tv-settlement-missing` 1h incident clock.
+    pub settlement_watch: std::sync::Mutex<BTreeMap<ObjectID, (u64, bool)>>,
+    /// Vaults confirmed Closed && settled && zero pending requests —
+    /// terminal forever (requests cannot be added once Closed), skipped
+    /// without a chain read.
+    pub settled_done: std::sync::Mutex<std::collections::BTreeSet<ObjectID>>,
+}
+
+/// Mirror of `capital::ACCRUAL_CAP_MS` (2 years): the overflow sanity
+/// bound on hurdle accrual. Crank cadence must stay ≪ this or a vault
+/// silently under-accrues — config validation rejects
+/// `mark_refresh_interval_ms ≥ cap/1000` and `tv-accrual-cadence` fires
+/// when a tranched vault's last capital sync ages past cap/100.
+pub const ACCRUAL_CAP_MS: u64 = 63_072_000_000;
+
+/// Last-seen capital state per vault, for transition-edge alerting.
+#[derive(Default, Clone, Copy)]
+pub struct CapitalWatch {
+    pub risk_state: u8,
+    pub reset_proposed: bool,
+    pub commitment_breached: bool,
+    pub accrual_alerted: bool,
 }
 
 /// Backoff schedule for non-benign crank failures: tick-rate on the
@@ -271,13 +312,17 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
     };
     post_vols(wrap, ctx, now_ms).await;
     for v in vaults {
-        if v.state == "closed" && v.pending_withdrawals == 0 {
-            continue;
-        }
         let vault_id = match ObjectID::from_hex_literal(&v.vault_id.to_hex()) {
             Ok(id) => id,
             Err(_) => continue,
         };
+        // v2: "fully closed" means SETTLED — a Closed vault still needs
+        // its one-shot settlement snapshot and its queued requests paid
+        // from the pool. Only a vault confirmed settled with zero pending
+        // requests is terminal (cached: that state can never regress).
+        if ctx.settled_done.lock().expect("settled_done poisoned").contains(&vault_id) {
+            continue;
+        }
         let external = v.external_account.as_ref().and_then(|a| {
             Some(ExternalView {
                 account: SuiAddress::from_bytes(a.as_bytes()).ok()?,
@@ -306,7 +351,6 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
             http,
             ctx,
             vault_id,
-            v.pending_withdrawals,
             &option_buckets,
             external.as_ref(),
             book_params,
@@ -336,11 +380,29 @@ pub async fn tick(wrap: &SuiClientWrapper, http: &reqwest::Client, indexer: &Ind
 /// benign race (which must NOT feed the backoff — races resolve on the
 /// very next tick).
 fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) -> bool {
+    use protocol_types::vault_abort;
     let msg = format!("{e:#}");
-    // Known benign shapes: appraisal raced a session (83), incomplete
-    // because holdings changed under us (82), insufficient free balance
-    // (78), auction not yet past deadline / bucket state races.
-    let benign = [", 82)", ", 83)", ", 78)", "deadline", "not expired"];
+    let abort = |code: u64| format!(", {code})");
+    // Known benign shapes (codes from `protocol_types::vault_abort`, the
+    // shared v2 error table): appraisal raced a session
+    // (APPRAISAL_MISMATCH), incomplete because holdings changed under us
+    // (APPRAISAL_INCOMPLETE), insufficient free balance
+    // (INSUFFICIENT_BALANCE), auction not yet past deadline / bucket
+    // state races.
+    let benign_codes = [
+        vault_abort::APPRAISAL_INCOMPLETE,
+        vault_abort::APPRAISAL_MISMATCH,
+        vault_abort::INSUFFICIENT_BALANCE,
+    ];
+    let benign_code = benign_codes.iter().any(|c| msg.contains(&abort(*c)));
+    let benign_text = ["deadline", "not expired"].iter().any(|b| msg.contains(b));
+    // v2 permissionless-crank races: the vault flipped risk-off between
+    // compose and execute (RISK_OFF), or a racing cranker settled the
+    // queue / snapshot first (QUEUE_SETTLED). Both scoped to vault aborts
+    // so an unrelated 124/136 still alerts.
+    let risk_race = msg.contains("vault")
+        && (msg.contains(&abort(vault_abort::RISK_OFF))
+            || msg.contains(&abort(vault_abort::QUEUE_SETTLED)));
     // Equity-oracle E_TOO_SOON (3): another poster (or our previous tick)
     // raced the min-interval window — benign, but ONLY for equity_oracle
     // aborts so an unrelated code-3 abort still alerts. E_STALE (5) and
@@ -351,12 +413,12 @@ fn classify_and_log(vault_id: ObjectID, e: &anyhow::Error) -> bool {
     // Bid-ticket cranks (SO-299) losing races: still the best bidder when
     // a donated look-alike coin was fed in (options_adapter
     // E_STILL_BEST_BIDDER, 10), ticket already burned by a racing cranker
-    // (vault position_missing, 86), or the auction/receiving input was
+    // (vault POSITION_MISSING), or the auction/receiving input was
     // consumed between compose and execute.
     let bid_ticket_race = (msg.contains("options_adapter") && msg.contains(", 10)"))
-        || (msg.contains("vault") && msg.contains(", 86)"))
+        || (msg.contains("vault") && msg.contains(&abort(vault_abort::POSITION_MISSING)))
         || msg.contains("not available for consumption");
-    if benign.iter().any(|b| msg.contains(b)) || equity_race || vol_race || bid_ticket_race {
+    if benign_code || benign_text || risk_race || equity_race || vol_race || bid_ticket_race {
         debug!(vault = %vault_id, error = %msg, "trading-vault crank lost a race; next tick");
         true
     } else {
@@ -377,24 +439,42 @@ async fn tick_one(
     http: &reqwest::Client,
     ctx: &TradingVaultCtx,
     vault_id: ObjectID,
-    pending_withdrawals: u64,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
     external: Option<&ExternalView>,
     book_params: Option<(u64, u64)>,
 ) -> Result<()> {
     let client = &wrap.client;
     let holdings = discover_holdings(client, vault_id).await?;
+    let view = vault_view(client, vault_id).await?;
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+
+    // Capital-state monitor: transition-edge alerts + the accrual
+    // cadence SLO, straight off this tick's vault read.
+    monitor_capital(ctx, vault_id, &view, now_ms);
+
+    if view.closed {
+        // Terminal path (v2 §8.7): drive the one-shot settlement
+        // snapshot, then pay outstanding queued requests from the pool.
+        // A Closed vault has zero positions and only the accounting
+        // asset, so none of the trading cranks below apply.
+        return terminal_settlement(wrap, http, ctx, vault_id, &holdings, option_buckets, &view, now_ms)
+            .await;
+    }
+    ctx.settlement_watch.lock().expect("settlement_watch poisoned").remove(&vault_id);
 
     settle_due_tickets(wrap, ctx, vault_id, &holdings, now_ms).await;
     crank_bid_tickets(wrap, ctx, vault_id, &holdings).await;
     redeem_expired_positions(wrap, ctx, vault_id, &holdings, now_ms).await;
     sweep_custody_settled(wrap, ctx, vault_id, &holdings).await;
     sweep_vault_address(wrap, ctx, vault_id).await;
-    force_unwind_if_starved(wrap, ctx, vault_id, &holdings, now_ms).await;
+    // The merged (both-lane, global-sequence-ordered) pending run: drives
+    // both the force-unwind age trigger (junior heads count even while
+    // class-blocked) and the fulfillment plan.
+    let run = queue_run(client, &view, MAX_MIXED_RUN).await?;
+    force_unwind_if_starved(wrap, ctx, vault_id, &holdings, &view, &run, now_ms).await;
     // BEFORE the post so a freshly registered account has its zero anchor to
     // step off of.
     init_external_entry(wrap, ctx, vault_id, &holdings).await;
@@ -403,18 +483,28 @@ async fn tick_one(
         post_external_equity(wrap, ctx, vault_id, ext, book_params, now_ms).await;
     }
 
-    if pending_withdrawals > 0 {
+    // A run whose every entry is a class-blocked junior head has nothing
+    // fulfillable — and MUST fall through to the capital crank below:
+    // risk states only cure on consumed appraisals, and fulfillment (the
+    // other appraisal consumer) would never submit here.
+    let junior_blocked = view.risk_state != 0;
+    let has_payable = run.iter().any(|e| !(junior_blocked && e.lane == 1));
+    if has_payable {
         // Re-discover: the cranks above may have changed holdings.
         let holdings = discover_holdings(client, vault_id).await?;
-        fulfill(wrap, http, ctx, vault_id, &holdings, option_buckets).await?;
-    } else if !holdings.is_cash_only() && mark_refresh_due(ctx, vault_id, now_ms) {
-        // Crank 8 (SO-304): nothing to fulfill, but the vault holds
-        // positions / foreign assets — refresh their marks. Cash-only
-        // vaults have nothing to mark and are skipped. Re-discover:
-        // the cranks above may have changed holdings.
+        fulfill(wrap, http, ctx, vault_id, &holdings, option_buckets, &view, &run, now_ms).await?;
+    } else if (view.tranched || !holdings.is_cash_only()) && mark_refresh_due(ctx, vault_id, now_ms)
+    {
+        // Crank 8 (SO-304 → SO-418): nothing to fulfill — run the
+        // permissionless capital crank. Beyond mark freshness this is a
+        // CORRECTNESS cadence on tranched vaults (hurdle accrual,
+        // risk-state transitions, commitment test), so those run even
+        // when cash-only; untranched cash-only vaults have nothing to
+        // mark or accrue and are skipped. Re-discover: the cranks above
+        // may have changed holdings.
         let holdings = discover_holdings(client, vault_id).await?;
-        if !holdings.is_cash_only() {
-            refresh_marks(wrap, http, ctx, vault_id, &holdings, option_buckets).await?;
+        if view.tranched || !holdings.is_cash_only() {
+            crank_capital_pass(wrap, http, ctx, vault_id, &holdings, option_buckets).await?;
             ctx.mark_refreshed_at
                 .lock()
                 .expect("mark_refreshed_at poisoned")
@@ -448,6 +538,174 @@ fn refs_for(ctx: &TradingVaultCtx, vault_id: ObjectID) -> AppraisalRefs {
         equity_book_id: ctx.equity_book_id,
         vol_book_id: ctx.vol_book_id,
     }
+}
+
+/// One withdrawal lane's bounds + its `entries` table (lane idx → global
+/// sequence).
+struct LaneView {
+    head: u64,
+    tail: u64,
+    entries_table: ObjectID,
+}
+
+/// The v2 vault fields the keeper reads every tick, from ONE object
+/// fetch. Written against the gRPC JSON rendering: no `fields` wrapper,
+/// enums as `{"@variant": …}`, `TypeName` as a bare string
+/// (docs/sui-json-rpc-migration.md; api-service goldens are the
+/// reference).
+struct VaultView {
+    /// Lifecycle `Closed` (settlement pool replaces the queue).
+    closed: bool,
+    /// The one-time settlement snapshot has been taken.
+    settled: bool,
+    /// `CapitalStructure::SeniorJunior` (untranched vaults are always
+    /// Healthy and accrue no hurdle).
+    tranched: bool,
+    /// Wire code: 0 Healthy, 1 CoverageBreach, 2 Impaired, 3 ResetPending.
+    risk_state: u8,
+    reset_proposed: bool,
+    commitment_breached: bool,
+    /// `book.last_accrual_ms` — the last consumed capital sync.
+    last_accrual_ms: u64,
+    active_junior_generation: u64,
+    unwind_grace_ms: u64,
+    /// `requests` table (global seq → WithdrawRequest).
+    requests_table: ObjectID,
+    senior: LaneView,
+    junior: LaneView,
+}
+
+fn table_id(v: &Value, ptr: &str) -> Result<ObjectID> {
+    v.pointer(ptr)
+        .and_then(Value::as_str)
+        .and_then(|s| ObjectID::from_hex_literal(s).ok())
+        .ok_or_else(|| anyhow!("vault table id at {ptr} unreadable"))
+}
+
+async fn vault_view(client: &ChainClient, vault_id: ObjectID) -> Result<VaultView> {
+    let (_, json) = client.get_object_json(vault_id).await?;
+    let v = json.ok_or_else(|| anyhow!("vault {vault_id} has no parsed content"))?;
+    let variant = |ptr: &str| -> Option<&str> {
+        v.pointer(ptr).and_then(|x| x.get("@variant")).and_then(Value::as_str)
+    };
+    let closed = variant("/state") == Some("Closed");
+    // Options render inline: null/absent = none.
+    let settled = v.pointer("/settlement").map(|x| !x.is_null()).unwrap_or(false);
+    let reset_proposed =
+        v.pointer("/book/reset_proposal").map(|x| !x.is_null()).unwrap_or(false);
+    let tranched = variant("/capital") == Some("SeniorJunior");
+    let risk_state = match variant("/book/risk_state")
+        .ok_or_else(|| anyhow!("vault {vault_id} book.risk_state unreadable"))?
+    {
+        "Healthy" => 0,
+        "CoverageBreach" => 1,
+        "Impaired" => 2,
+        "ResetPending" => 3,
+        other => return Err(anyhow!("unknown risk state {other:?}")),
+    };
+    let commitment_breached = v
+        .pointer("/curator_commitment_breached")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let num = |ptr: &str| -> Result<u64> {
+        as_u64(v.pointer(ptr).ok_or_else(|| anyhow!("vault missing {ptr}"))?)
+            .ok_or_else(|| anyhow!("vault {ptr} unreadable"))
+    };
+    let lane = |name: &str| -> Result<LaneView> {
+        Ok(LaneView {
+            head: num(&format!("/{name}/head"))?,
+            tail: num(&format!("/{name}/tail"))?,
+            entries_table: table_id(&v, &format!("/{name}/entries/id"))?,
+        })
+    };
+    Ok(VaultView {
+        closed,
+        settled,
+        tranched,
+        risk_state,
+        reset_proposed,
+        commitment_breached,
+        last_accrual_ms: num("/book/last_accrual_ms")?,
+        active_junior_generation: num("/book/active_junior_generation")?,
+        unwind_grace_ms: num("/config/unwind_grace_ms")?,
+        requests_table: table_id(&v, "/requests/id")?,
+        senior: lane("senior_lane")?,
+        junior: lane("junior_lane")?,
+    })
+}
+
+/// Capital-state monitor (SO-418, runbooks.md): risk-state transition
+/// alerts (once per transition — the last-seen state lives in
+/// `ctx.capital_watch`) + the accrual-cadence SLO. Repo convention:
+/// alertable conditions log `error!` with an `alert_id` regardless of
+/// nominal severity.
+fn monitor_capital(ctx: &TradingVaultCtx, vault_id: ObjectID, view: &VaultView, now_ms: u64) {
+    let mut watch = ctx.capital_watch.lock().expect("capital_watch poisoned");
+    let prev = watch.get(&vault_id).copied().unwrap_or_default();
+
+    if view.risk_state != prev.risk_state {
+        match view.risk_state {
+            1 => tracing::error!(
+                alert_id = "tv-coverage-breach",
+                vault = %vault_id,
+                "junior buffer below maintenance: junior lane paused, deployment gated"
+            ),
+            2 => tracing::error!(
+                alert_id = "tv-impaired",
+                vault = %vault_id,
+                "vault impaired: NAV < senior claim — verify marks FIRST, then watch for a reset proposal"
+            ),
+            // 3 (ResetPending) is alerted through the proposal edge below.
+            3 => {}
+            _ => info!(
+                vault = %vault_id,
+                from = prev.risk_state,
+                "vault capital state recovered to Healthy"
+            ),
+        }
+    }
+    if view.reset_proposed && !prev.reset_proposed {
+        tracing::error!(
+            alert_id = "tv-reset-proposed",
+            vault = %vault_id,
+            "junior generational reset proposed — user-facing: surface terms + executable time; \
+             recovery before execution cancels it"
+        );
+    }
+    if view.commitment_breached && !prev.commitment_breached {
+        tracing::error!(
+            alert_id = "tv-commitment-breach",
+            vault = %vault_id,
+            "curator commitment marked below the protocol floor: deployment halts until \
+             deposit_into_commitment cures it"
+        );
+    }
+
+    // Accrual cadence SLO: consumed capital syncs must stay ≪ the 2y
+    // accrual cap or hurdle silently under-accrues (spec §2). Only a
+    // correctness bound on tranched vaults.
+    let accrual_late =
+        view.tranched && now_ms.saturating_sub(view.last_accrual_ms) > ACCRUAL_CAP_MS / 100;
+    if accrual_late && !prev.accrual_alerted {
+        tracing::error!(
+            alert_id = "tv-accrual-cadence",
+            vault = %vault_id,
+            last_accrual_ms = view.last_accrual_ms,
+            age_ms = now_ms.saturating_sub(view.last_accrual_ms),
+            "last consumed capital sync is older than 1/100 of the accrual cap — the crank \
+             cadence is a correctness obligation"
+        );
+    }
+
+    watch.insert(
+        vault_id,
+        CapitalWatch {
+            risk_state: view.risk_state,
+            reset_proposed: view.reset_proposed,
+            commitment_breached: view.commitment_breached,
+            accrual_alerted: accrual_late,
+        },
+    );
 }
 
 /// Crank 7: step VolBook entries toward oracle-service realized vol,
@@ -984,55 +1242,26 @@ fn holdings_deposit_hint() -> String {
     String::new()
 }
 
-/// Crank 5: force-unwind when the queue head is starved past grace.
+/// Crank 5: force-unwind when the oldest queue head is starved past
+/// grace. v2: the age trigger is the OLDEST head across BOTH lanes —
+/// lowest global sequence, which `run` is ordered by — matching the
+/// on-chain `begin_force_session` unlock (a class-blocked junior head
+/// still counts as unmet exit demand). The vault input is mutable, as v2
+/// `begin_force_session(&mut vault, …)` requires.
 async fn force_unwind_if_starved(
     wrap: &SuiClientWrapper,
     ctx: &TradingVaultCtx,
     vault_id: ObjectID,
     holdings: &VaultHoldings,
+    view: &VaultView,
+    run: &[QueueEntry],
     now_ms: u64,
 ) {
     let Some(dba) = ctx.deepbook_adapter_pkg else { return };
     let result: Result<()> = async {
         let client = &wrap.client;
-        // Direct pointers: the gRPC rendering has no `fields` wrapper
-        // (docs/sui-json-rpc-migration.md) — these two were the last
-        // JSON-RPC-shaped stragglers and failed every crank on a vault
-        // with pending withdrawals.
-        let head = as_u64(&json_field(client, vault_id, "/queue_head").await?)
-            .unwrap_or(0);
-        let tail = as_u64(&json_field(client, vault_id, "/queue_tail").await?)
-            .unwrap_or(0);
-        if head >= tail {
-            return Ok(());
-        }
-        let grace = as_u64(
-            &json_field(client, vault_id, "/config/unwind_grace_ms").await?,
-        )
-        .unwrap_or(u64::MAX);
-        let queue_table = json_field(client, vault_id, "/queue/id")
-            .await?
-            .as_str()
-            .and_then(|s| ObjectID::from_hex_literal(s).ok())
-            .ok_or_else(|| anyhow!("vault queue table id unreadable"))?;
-        // Derive the field id rather than asking for a dynamic-field index
-        // (some providers don't serve one) — same trick as the Pyth
-        // price_info lookup in `discovery.rs`.
-        let key_bytes = bcs::to_bytes(&head).context("bcs of queue head index")?;
-        let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
-            queue_table,
-            &TypeTag::U64,
-            &key_bytes,
-        )
-        .context("deriving queue head field id")?;
-        let requested_at = client
-            .try_get_object_json(field_id)
-            .await
-            .context("reading queue head")?
-            .and_then(|(_, json)| json)
-            .and_then(|j| j.pointer("/value/requested_at_ms").and_then(as_u64_ref))
-            .ok_or_else(|| anyhow!("queue head missing requested_at_ms"))?;
-        if now_ms.saturating_sub(requested_at) <= grace {
+        let Some(oldest) = run.first() else { return Ok(()) };
+        if now_ms.saturating_sub(oldest.requested_at_ms) <= view.unwind_grace_ms {
             return Ok(());
         }
         // Starved: cancel every custody's books, then sweep balances home.
@@ -1411,64 +1640,115 @@ async fn compose_full_appraisal(
 /// bounds the per-tick PTB size; longer runs drain over successive ticks.
 const MAX_MIXED_RUN: usize = 25;
 
-/// The pending queue run from the head, straight off the queue table's
-/// dynamic fields (derived field ids, same trick as
-/// `force_unwind_if_starved`): per request, the canonical payout asset
-/// and `requested_at_ms`.
+/// One pending withdrawal, read off the vault's tables.
+struct QueueEntry {
+    global_seq: u64,
+    /// Wire lane code: 0 senior, 1 junior (untranched rides lane 1).
+    lane: u8,
+    /// Canonical payout asset.
+    payout: String,
+    requested_at_ms: u64,
+    /// Junior request from a pre-reset generation: permanently
+    /// zero-value, payable in any asset with no funding.
+    wiped: bool,
+}
+
+/// Read one dynamic-field value JSON off a `Table<u64, V>` by deriving
+/// the field id (no dynamic-field index API — some providers don't
+/// serve one; same trick as the Pyth price_info lookup in
+/// `discovery.rs`).
+async fn table_entry_json(
+    client: &ChainClient,
+    table: ObjectID,
+    key: u64,
+) -> Result<Option<Value>> {
+    let key_bytes = bcs::to_bytes(&key).context("bcs of table key")?;
+    let field_id =
+        sui_types::dynamic_field::derive_dynamic_field_id(table, &TypeTag::U64, &key_bytes)
+            .context("deriving table entry field id")?;
+    Ok(client
+        .try_get_object_json(field_id)
+        .await
+        .with_context(|| format!("reading table entry {key}"))?
+        .and_then(|(_, json)| json))
+}
+
+/// The pending run, merged across BOTH lanes in global-sequence order
+/// (v2 §3.6): walk each lane's `entries` table (lane idx → global seq),
+/// then fetch each request from the `requests` table. No payability
+/// filtering here — `fulfill` skips the junior lane when risk-off, while
+/// the force-unwind age trigger deliberately counts it.
 async fn queue_run(
     client: &ChainClient,
-    vault_id: ObjectID,
+    view: &VaultView,
     max: usize,
-) -> Result<Vec<(String, u64)>> {
-    let head = as_u64(&json_field(client, vault_id, "/queue_head").await?).unwrap_or(0);
-    let tail = as_u64(&json_field(client, vault_id, "/queue_tail").await?).unwrap_or(0);
-    if head >= tail {
-        return Ok(Vec::new());
-    }
-    let queue_table = json_field(client, vault_id, "/queue/id")
-        .await?
-        .as_str()
-        .and_then(|s| ObjectID::from_hex_literal(s).ok())
-        .ok_or_else(|| anyhow!("vault queue table id unreadable"))?;
+) -> Result<Vec<QueueEntry>> {
     let mut out = Vec::new();
-    for seq in head..tail.min(head + max as u64) {
-        let key_bytes = bcs::to_bytes(&seq).context("bcs of queue seq")?;
-        let field_id = sui_types::dynamic_field::derive_dynamic_field_id(
-            queue_table,
-            &TypeTag::U64,
-            &key_bytes,
-        )
-        .context("deriving queue entry field id")?;
-        let json = client
-            .try_get_object_json(field_id)
-            .await
-            .with_context(|| format!("reading queue entry {seq}"))?
-            .and_then(|(_, json)| json)
-            .ok_or_else(|| anyhow!("queue entry {seq} unreadable"))?;
-        // TypeName renders as a bare string in the gRPC json (struct
-        // shape tolerated for renderings that don't collapse it).
-        let payout = json
-            .pointer("/value/payout_asset")
-            .and_then(|v| v.as_str().or_else(|| v.pointer("/name").and_then(Value::as_str)))
-            .map(protocol_types::asset::canonicalize_move_type)
-            .ok_or_else(|| anyhow!("queue entry {seq} missing payout_asset"))?;
-        let requested_at = json
-            .pointer("/value/requested_at_ms")
-            .and_then(as_u64_ref)
-            .ok_or_else(|| anyhow!("queue entry {seq} missing requested_at_ms"))?;
-        out.push((payout, requested_at));
+    for (lane_code, lane) in [(0u8, &view.senior), (1u8, &view.junior)] {
+        for idx in lane.head..lane.tail.min(lane.head + max as u64) {
+            // Lane heads advance LAZILY on-chain (`lane_head_seq` walks
+            // over holes) and `settle_queued_request` removes entries in
+            // any order, so a missing index is a gap, not an error.
+            let Some(seq) = table_entry_json(client, lane.entries_table, idx)
+                .await?
+                .and_then(|j| j.pointer("/value").and_then(as_u64_ref))
+            else {
+                continue;
+            };
+            // Missing request = a racing fulfill/settle consumed it
+            // between the lane read and this one.
+            let Some(req) = table_entry_json(client, view.requests_table, seq).await? else {
+                continue;
+            };
+            // TypeName renders as a bare string in the gRPC json (struct
+            // shape tolerated for renderings that don't collapse it).
+            let payout = req
+                .pointer("/value/payout_asset")
+                .and_then(|v| v.as_str().or_else(|| v.pointer("/name").and_then(Value::as_str)))
+                .map(protocol_types::asset::canonicalize_move_type)
+                .ok_or_else(|| anyhow!("queue request {seq} missing payout_asset"))?;
+            let requested_at_ms = req
+                .pointer("/value/requested_at_ms")
+                .and_then(as_u64_ref)
+                .ok_or_else(|| anyhow!("queue request {seq} missing requested_at_ms"))?;
+            let junior = req
+                .pointer("/value/tranche")
+                .and_then(|t| t.get("@variant"))
+                .and_then(Value::as_str)
+                == Some("Junior");
+            let generation = req
+                .pointer("/value/capital_generation")
+                .and_then(as_u64_ref)
+                .unwrap_or(0);
+            out.push(QueueEntry {
+                global_seq: seq,
+                lane: lane_code,
+                payout,
+                requested_at_ms,
+                wiped: junior && generation < view.active_junior_generation,
+            });
+        }
     }
+    out.sort_by_key(|e| e.global_seq);
+    out.truncate(max);
     Ok(out)
 }
 
-/// Crank 7: fulfillment with a full appraisal. Accounting-payable heads
-/// (requested in the accounting asset, or aged past the grace fallback)
-/// keep the on-chain batch crank `fulfill_withdrawals<Accounting>`; a
-/// head requesting a NON-accounting payout goes through the fulfillment
-/// potato (SO-370) with one attestation per distinct non-accounting
-/// payout asset in the reachable run. `fulfill_next` returning false is
-/// a no-op, not an abort — an unfundable/wedged head is benign, never an
+/// Crank 7: fulfillment with a full appraisal, over the merged two-lane
+/// run. The junior lane is skipped entirely while the vault is risk-off
+/// (the contract would refuse those heads anyway; the senior lane keeps
+/// draining, §3.6). Accounting-payable heads (requested in the
+/// accounting asset, aged past the grace fallback, or WIPED — zero-value
+/// claims settle in any asset) keep the on-chain batch crank
+/// `fulfill_withdrawals<Accounting>`; a head requesting a NON-accounting
+/// payout goes through the fulfillment potato (SO-370) with one
+/// attestation per distinct non-accounting payout asset in the reachable
+/// run. The contract itself picks the lowest payable head per
+/// `fulfill_next`, so the plan is a conservative (payout_type, count)
+/// chain in global-sequence order; `fulfill_next` returning false is a
+/// no-op, not an abort — an unfundable/wedged head is benign, never an
 /// alert.
+#[allow(clippy::too_many_arguments)]
 async fn fulfill(
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
@@ -1476,6 +1756,9 @@ async fn fulfill(
     vault_id: ObjectID,
     holdings: &VaultHoldings,
     option_buckets: &BTreeMap<String, OptionBucketInfo>,
+    view: &VaultView,
+    run: &[QueueEntry],
+    now_ms: u64,
 ) -> Result<()> {
     let client = &wrap.client;
     let refs = sui_tx::tx::trading_vault::TradingVaultRefs {
@@ -1485,19 +1768,24 @@ async fn fulfill(
         deposit_type: &holdings.deposit_type,
     };
     let accounting = &holdings.deposit_type;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let run = queue_run(client, vault_id, MAX_MIXED_RUN).await?;
-    let Some((head_payout, head_requested_at)) = run.first() else {
-        return Ok(()); // raced: someone drained the queue since discovery
+    // Class-block: while risk-off, junior heads are unpayable (wiped ones
+    // included — the contract checks the block first). Untranched vaults
+    // ride lane 1 but are always Healthy, so this never skips them.
+    let junior_blocked = view.risk_state != 0;
+    let payable: Vec<&QueueEntry> =
+        run.iter().filter(|e| !(junior_blocked && e.lane == 1)).collect();
+    let Some(head) = payable.first() else {
+        debug!(
+            vault = %vault_id,
+            risk_state = view.risk_state,
+            "no payable lane heads (junior lane blocked, or the queue was drained under us)"
+        );
+        return Ok(());
     };
-    let grace = as_u64(&json_field(client, vault_id, "/config/unwind_grace_ms").await?)
-        .unwrap_or(u64::MAX);
+    let grace = view.unwind_grace_ms;
     let aged = |requested_at: u64| now_ms > requested_at.saturating_add(grace);
 
-    if head_payout == accounting || aged(*head_requested_at) {
+    if head.wiped || head.payout == *accounting || aged(head.requested_at_ms) {
         // Accounting-payable head: the on-chain batch crank drains every
         // consecutive accounting-payable head (grace-aged ones included).
         let mut pt = ProgrammableTransactionBuilder::new();
@@ -1527,13 +1815,14 @@ async fn fulfill(
     // accounting branch above on a later tick.
     let mut plan: Vec<(String, usize)> = Vec::new();
     let mut non_accounting: std::collections::BTreeSet<String> = Default::default();
-    for (payout, requested_at) in &run {
-        let p = if payout == accounting
-            || (aged(*requested_at) && !holdings.free_assets.contains(payout))
+    for e in &payable {
+        let p = if e.wiped
+            || e.payout == *accounting
+            || (aged(e.requested_at_ms) && !holdings.free_assets.contains(&e.payout))
         {
             accounting.clone()
-        } else if holdings.free_assets.contains(payout) {
-            payout.clone()
+        } else if holdings.free_assets.contains(&e.payout) {
+            e.payout.clone()
         } else {
             break;
         };
@@ -1551,7 +1840,7 @@ async fn fulfill(
         // fallback unwedges it.
         debug!(
             vault = %vault_id,
-            payout = %head_payout,
+            payout = %head.payout,
             "queue head requests an unheld payout asset; nothing fundable this tick"
         );
         return Ok(());
@@ -1589,11 +1878,14 @@ async fn fulfill(
     Ok(())
 }
 
-/// Crank 8 (SO-304): a periodic mark refresh — the same full appraisal,
-/// finished with the permissionless `crank_appraisal` so the
-/// PositionAppraised / VaultAppraised events publish fresh marks with no
-/// deposit/fulfillment attached.
-async fn refresh_marks(
+/// Crank 8 (SO-304 → SO-418): the periodic capital crank — the same full
+/// appraisal, finished with the permissionless `crank_capital`, which
+/// beyond publishing fresh PositionAppraised / VaultAppraised marks runs
+/// the full capital sync: hurdle accrual, the waterfall, risk-state
+/// transition, and the curator-commitment test. Its
+/// `mark_refresh_interval_ms` cadence is a correctness obligation on
+/// tranched vaults (the accrual cap; see [`ACCRUAL_CAP_MS`]).
+async fn crank_capital_pass(
     wrap: &SuiClientWrapper,
     http: &reqwest::Client,
     ctx: &TradingVaultCtx,
@@ -1606,7 +1898,7 @@ async fn refresh_marks(
     let (appraisal, _) =
         compose_full_appraisal(wrap, http, ctx, vault_id, holdings, option_buckets, &mut pt)
             .await?;
-    sui_tx::tx::trading_vault::build_crank_appraisal(
+    sui_tx::tx::trading_vault::build_crank_capital(
         client,
         &mut pt,
         &sui_tx::tx::trading_vault::TradingVaultRefs {
@@ -1618,11 +1910,105 @@ async fn refresh_marks(
         appraisal,
     )
     .await?;
-    submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::crank_appraisal")
+    submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::crank_capital")
         .await?;
-    info!(vault = %vault_id, "trading-vault marks refreshed");
+    info!(vault = %vault_id, "trading-vault capital synced (marks refreshed)");
     Ok(())
 }
+
+/// Crank 9 (SO-418, v2 §8.7): terminal settlement. Closed && unsettled →
+/// drive the one-shot permissionless `snapshot_settlement` (a Closed
+/// vault holds only the accounting asset, so the composed appraisal is
+/// cheap), alerting `tv-settlement-missing` once it has been wedged for
+/// over an hour. Closed && settled → permissionlessly
+/// `settle_queued_request` every outstanding queued request (order no
+/// longer matters — NAV is frozen). Settled with zero pending requests →
+/// remember the vault as terminal so the tick loop never reads it again.
+#[allow(clippy::too_many_arguments)]
+async fn terminal_settlement(
+    wrap: &SuiClientWrapper,
+    http: &reqwest::Client,
+    ctx: &TradingVaultCtx,
+    vault_id: ObjectID,
+    holdings: &VaultHoldings,
+    option_buckets: &BTreeMap<String, OptionBucketInfo>,
+    view: &VaultView,
+    now_ms: u64,
+) -> Result<()> {
+    let client = &wrap.client;
+    if !view.settled {
+        {
+            let mut watch =
+                ctx.settlement_watch.lock().expect("settlement_watch poisoned");
+            let (since, alerted) = *watch.entry(vault_id).or_insert((now_ms, false));
+            if !alerted && now_ms.saturating_sub(since) > SETTLEMENT_MISSING_ALERT_MS {
+                tracing::error!(
+                    alert_id = "tv-settlement-missing",
+                    vault = %vault_id,
+                    unsettled_ms = now_ms.saturating_sub(since),
+                    "vault is Closed but the settlement snapshot still hasn't landed"
+                );
+                watch.insert(vault_id, (since, true));
+            }
+        }
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let (appraisal, _) =
+            compose_full_appraisal(wrap, http, ctx, vault_id, holdings, option_buckets, &mut pt)
+                .await?;
+        sui_tx::tx::trading_vault::build_snapshot_settlement(
+            client,
+            &mut pt,
+            &sui_tx::tx::trading_vault::TradingVaultRefs {
+                package: ctx.trading_vault_pkg,
+                vault_id,
+                protocol_config_id: ctx.protocol_config_id,
+                deposit_type: &holdings.deposit_type,
+            },
+            appraisal,
+        )
+        .await?;
+        submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::snapshot_settlement")
+            .await?;
+        info!(vault = %vault_id, "terminal settlement snapshot taken");
+        ctx.settlement_watch.lock().expect("settlement_watch poisoned").remove(&vault_id);
+        return Ok(());
+    }
+    ctx.settlement_watch.lock().expect("settlement_watch poisoned").remove(&vault_id);
+
+    let run = queue_run(client, view, MAX_MIXED_RUN).await?;
+    if run.is_empty() {
+        // Settled, nothing queued: terminal forever (Closed vaults accept
+        // no new requests) — cache and never read this vault again.
+        ctx.settled_done.lock().expect("settled_done poisoned").insert(vault_id);
+        info!(vault = %vault_id, "vault settled with zero pending requests; retiring from the tick loop");
+        return Ok(());
+    }
+    let refs = sui_tx::tx::trading_vault::TradingVaultRefs {
+        package: ctx.trading_vault_pkg,
+        vault_id,
+        protocol_config_id: ctx.protocol_config_id,
+        deposit_type: &holdings.deposit_type,
+    };
+    let mut pt = ProgrammableTransactionBuilder::new();
+    for e in &run {
+        sui_tx::tx::trading_vault::build_settle_queued_request(
+            client,
+            &mut pt,
+            &refs,
+            ctx.treasury_id,
+            e.global_seq,
+        )
+        .await?;
+    }
+    submit_ptb(client, &wrap.signer, pt, ctx.gas_budget, "trading_vault::settle_queued_request")
+        .await?;
+    info!(vault = %vault_id, requests = run.len(), "queued requests settled from the pool");
+    Ok(())
+}
+
+/// A Closed-but-unsettled vault is an incident after this long
+/// (runbooks.md: 1h).
+const SETTLEMENT_MISSING_ALERT_MS: u64 = 3_600_000;
 
 async fn object_type_of(client: &ChainClient, id: ObjectID) -> Result<String> {
     client
@@ -1671,6 +2057,17 @@ pub async fn build_ctx(
     vol_window_days: u32,
     mark_refresh_interval_ms: u64,
 ) -> Result<Option<TradingVaultCtx>> {
+    // Cadence SLO (SO-418): the hurdle accrual cap (2y) turns the crank
+    // interval into a correctness bound — an interval anywhere near the
+    // cap silently under-accrues senior hurdle. Fail fast on a config
+    // that couldn't keep the required margin (interval must stay under
+    // 1/1000 of the cap; the runtime alert fires at 1/100).
+    anyhow::ensure!(
+        mark_refresh_interval_ms < ACCRUAL_CAP_MS / 1000,
+        "mark_refresh_interval_ms ({mark_refresh_interval_ms}) must be < ACCRUAL_CAP_MS/1000 \
+         ({}) — the hurdle accrual cap makes the capital-crank cadence a correctness bound",
+        ACCRUAL_CAP_MS / 1000,
+    );
     // Absent records mean token-info served a partial snapshot (boot
     // race in a same-wave deploy) — every env publishes the family since
     // SO-292, so this is a loud boot failure, not a silent pass-disable:
@@ -1834,6 +2231,9 @@ pub async fn build_ctx(
         mark_refreshed_at: std::sync::Mutex::new(BTreeMap::new()),
         mark_refresh_interval_ms,
         crank_backoff: std::sync::Mutex::new(BTreeMap::new()),
+        capital_watch: std::sync::Mutex::new(BTreeMap::new()),
+        settlement_watch: std::sync::Mutex::new(BTreeMap::new()),
+        settled_done: std::sync::Mutex::new(std::collections::BTreeSet::new()),
     }))
 }
 

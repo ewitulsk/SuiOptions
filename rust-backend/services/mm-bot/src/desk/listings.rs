@@ -434,7 +434,21 @@ impl Engine {
         let marks = self.shared.marks.read().clone();
         let mut live: HashSet<ObjectId> = HashSet::new();
 
+        // SO-418 risk gate: placing/replacing an ask escrows option coins
+        // OUT of vault custody via a curator session, which the risk-off
+        // gate set blocks on-chain (forced sessions cannot `take`, code
+        // 91). Skip the placement loop; `live` stays empty, so the stale
+        // sweep below pulls the resting asks — deployment stops,
+        // unwinding continues.
+        let risk_off = self.shared.risk_off.load(std::sync::atomic::Ordering::Relaxed);
+        if risk_off {
+            tracing::debug!("listings idle: vault is risk-off; pulling resting asks");
+        }
+
         for h in &holdings {
+            if risk_off {
+                break;
+            }
             let vault_units = h.amount_vault.saturating_add(h.amount_coin_positions());
             if vault_units == 0 || h.expiry_ms <= now {
                 continue;

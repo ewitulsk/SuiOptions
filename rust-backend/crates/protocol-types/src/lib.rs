@@ -25,6 +25,7 @@ pub mod pyth_id;
 pub mod quote;
 pub mod sides;
 pub mod signing_scheme;
+pub mod vault_abort;
 
 pub use asset::AssetType;
 pub use bucket_spec::BucketSpec;

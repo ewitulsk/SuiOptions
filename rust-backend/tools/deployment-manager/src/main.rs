@@ -480,17 +480,21 @@ async fn deploy_one(
     // `auction` / `rfq` / `vault` blocks; every consumer treats them as
     // optional. Do not reinstate a publish step without also re-enabling
     // the product's off-chain surface.
+    // v2 (SO-418): the published package is `vault_v2` from
+    // contracts/trading-vault-v2 — a hard cutover. The deployments.json
+    // record KEYS are unchanged (`tradingVault`, `tradingVaultObjects`):
+    // every consumer reads ids by key, and the id now points at vault_v2.
     let trading_vault_out = publish_dep_package(
         &client,
         &signer,
-        &contracts_root.join("trading-vault"),
+        &contracts_root.join("trading-vault-v2"),
         "trading_vault",
         env,
         gas_budget,
     )
     .await
-    .with_context(|| format!("publishing trading_vault to {network}"))?;
-    tracing::info!(package = %trading_vault_out.package_id, "trading_vault published");
+    .with_context(|| format!("publishing trading_vault (vault_v2) to {network}"))?;
+    tracing::info!(package = %trading_vault_out.package_id, "trading_vault (vault_v2) published");
 
     let oracle_pyth_out = publish_dep_package(
         &client,
@@ -807,6 +811,8 @@ async fn deploy_one(
             equity_book_id: Some(objects.equity_book_id.to_string()),
             vol_book_id: Some(objects.vol_book_id.to_string()),
             registrar_pubkey: registrar_pubkey.map(str::to_owned),
+            terms_version: Some(deployment_manager::trading_vault_init::TERMS_VERSION),
+            spec_hash: Some(deployment_manager::trading_vault_init::spec_hash_hex()),
             activation_digest,
         })
     };

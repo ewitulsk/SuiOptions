@@ -17,13 +17,13 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 use crate::store::{
     AccountState, BucketState, DeepBookPoolState, ExchangeMarketState, PositionState,
     ReceiptState, RfqState, RfqStatus, TradingVaultPositionState, TradingVaultState,
-    VaultRoundState, VaultState,
+    VaultPositionState, VaultRoundState, VaultState,
 };
 
 use super::schema::{
     accounts, bucket_deepbook_pools, buckets, event_participants, exchange_market_links,
     indexed_events, indexer_progress, positions, rfq_bids, rfqs, trading_vault_positions,
-    trading_vaults, vault_rounds, vault_user_receipts, vaults,
+    trading_vaults, vault_positions, vault_rounds, vault_user_receipts, vaults,
 };
 
 // ---------- indexer_progress ----------
@@ -147,6 +147,19 @@ pub fn event_type_tag(ev: &ChainEvent) -> &'static str {
         ChainEvent::TvDeposited(_) => "TvDeposited",
         ChainEvent::TvWithdrawRequested(_) => "TvWithdrawRequested",
         ChainEvent::TvWithdrawFulfilled(_) => "TvWithdrawFulfilled",
+        ChainEvent::TvPositionMinted(_) => "TvPositionMinted",
+        ChainEvent::TvPositionSplit(_) => "TvPositionSplit",
+        ChainEvent::TvPositionMerged(_) => "TvPositionMerged",
+        ChainEvent::TvWipedPositionBurned(_) => "TvWipedPositionBurned",
+        ChainEvent::TvCapitalSynced(_) => "TvCapitalSynced",
+        ChainEvent::TvRiskStateChanged(_) => "TvRiskStateChanged",
+        ChainEvent::TvJuniorResetProposed(_) => "TvJuniorResetProposed",
+        ChainEvent::TvJuniorResetCancelled(_) => "TvJuniorResetCancelled",
+        ChainEvent::TvJuniorResetExecuted(_) => "TvJuniorResetExecuted",
+        ChainEvent::TvCommitmentReleased(_) => "TvCommitmentReleased",
+        ChainEvent::TvSettlementSnapshot(_) => "TvSettlementSnapshot",
+        ChainEvent::TvSettlementRedeemed(_) => "TvSettlementRedeemed",
+        ChainEvent::TvSettlementCuratorFeesClaimed(_) => "TvSettlementCuratorFeesClaimed",
         ChainEvent::TvDepositAssetAdded(_) => "TvDepositAssetAdded",
         ChainEvent::TvDepositAssetRemoved(_) => "TvDepositAssetRemoved",
         ChainEvent::TvHaircutsSet(_) => "TvHaircutsSet",
@@ -634,6 +647,9 @@ impl VaultReceiptRow {
 #[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
 #[diesel(table_name = trading_vaults)]
 #[diesel(primary_key(vault_id))]
+// Rows are full snapshots of in-memory state, so a None must CLEAR the
+// column on upsert (e.g. a cancelled reset proposal), not skip it.
+#[diesel(treat_none_as_null = true)]
 pub struct TradingVaultRow {
     pub vault_id: String,
     /// The vault's unit of account (renamed from deposit_asset in SO-370:
@@ -666,6 +682,51 @@ pub struct TradingVaultRow {
     /// NAV from the latest consumed appraisal (TvVaultAppraised, SO-304).
     pub latest_nav: Option<BigDecimal>,
     pub nav_updated_at_ms: Option<i64>,
+    // ── trading-vault v2 (SO-418) ──
+    /// 0 = Untranched, 1 = SeniorJunior. Immutable.
+    pub structure_code: i16,
+    pub senior_hurdle_bps_annual: i64,
+    pub target_junior_bps: i64,
+    pub maintenance_junior_bps: i64,
+    pub upside_code: i16,
+    pub residual_participation_bps: i64,
+    pub total_return_cap_bps: i64,
+    pub terms_version: i64,
+    /// 0x-prefixed hex; null for pre-v2 rows / empty hashes.
+    pub spec_hash: Option<String>,
+    pub senior_shares: BigDecimal,
+    /// Untranched supply lives here, mirroring capital.move.
+    pub junior_shares: BigDecimal,
+    pub senior_claim: BigDecimal,
+    pub senior_principal_basis: BigDecimal,
+    pub senior_nav: Option<BigDecimal>,
+    pub junior_nav: Option<BigDecimal>,
+    pub latest_senior_pps_e12: Option<BigDecimal>,
+    pub latest_junior_pps_e12: Option<BigDecimal>,
+    /// 0=Healthy 1=CoverageBreach 2=Impaired 3=ResetPending.
+    pub risk_state: i16,
+    pub curator_commitment_breached: bool,
+    pub impaired_since_ms: Option<i64>,
+    pub active_junior_generation: i64,
+    pub reset_old_generation: Option<i64>,
+    pub reset_proposed_at_ms: Option<i64>,
+    pub reset_executable_at_ms: Option<i64>,
+    pub reset_recorded_nav: Option<BigDecimal>,
+    pub reset_recorded_senior_claim: Option<BigDecimal>,
+    pub reset_recorded_required_deposit: Option<i64>,
+    pub settled: bool,
+    pub settlement_final_nav: Option<BigDecimal>,
+    pub senior_pool: Option<i64>,
+    pub senior_supply: Option<BigDecimal>,
+    pub junior_pool: Option<i64>,
+    pub junior_supply: Option<BigDecimal>,
+    pub settlement_snapshot_at_ms: Option<i64>,
+    /// Cumulative settlement entitlement drawn (TvSettlementRedeemed).
+    pub settlement_redeemed: BigDecimal,
+    pub senior_lane_head: i64,
+    pub senior_lane_tail: i64,
+    pub junior_lane_head: i64,
+    pub junior_lane_tail: i64,
 }
 
 impl TradingVaultRow {
@@ -706,6 +767,137 @@ impl TradingVaultRow {
                     .map(|v| v as u64),
                 latest_nav: self.latest_nav.as_ref().map(bigdecimal_to_u128).transpose()?,
                 nav_updated_at_ms: self.nav_updated_at_ms.map(|v| v as u64),
+                structure_code: self.structure_code as u8,
+                senior_hurdle_bps_annual: self.senior_hurdle_bps_annual as u64,
+                target_junior_bps: self.target_junior_bps as u64,
+                maintenance_junior_bps: self.maintenance_junior_bps as u64,
+                upside_code: self.upside_code as u8,
+                residual_participation_bps: self.residual_participation_bps as u64,
+                total_return_cap_bps: self.total_return_cap_bps as u64,
+                terms_version: self.terms_version as u64,
+                spec_hash: self.spec_hash,
+                senior_shares: bigdecimal_to_u128(&self.senior_shares)?,
+                junior_shares: bigdecimal_to_u128(&self.junior_shares)?,
+                senior_claim: bigdecimal_to_u128(&self.senior_claim)?,
+                senior_principal_basis: bigdecimal_to_u128(&self.senior_principal_basis)?,
+                senior_nav: self.senior_nav.as_ref().map(bigdecimal_to_u128).transpose()?,
+                junior_nav: self.junior_nav.as_ref().map(bigdecimal_to_u128).transpose()?,
+                latest_senior_pps_e12: self
+                    .latest_senior_pps_e12
+                    .as_ref()
+                    .map(bigdecimal_to_u128)
+                    .transpose()?,
+                latest_junior_pps_e12: self
+                    .latest_junior_pps_e12
+                    .as_ref()
+                    .map(bigdecimal_to_u128)
+                    .transpose()?,
+                risk_state: self.risk_state as u8,
+                curator_commitment_breached: self.curator_commitment_breached,
+                impaired_since_ms: self.impaired_since_ms.map(|v| v as u64),
+                active_junior_generation: self.active_junior_generation as u64,
+                reset_old_generation: self.reset_old_generation.map(|v| v as u64),
+                reset_proposed_at_ms: self.reset_proposed_at_ms.map(|v| v as u64),
+                reset_executable_at_ms: self.reset_executable_at_ms.map(|v| v as u64),
+                reset_recorded_nav: self
+                    .reset_recorded_nav
+                    .as_ref()
+                    .map(bigdecimal_to_u128)
+                    .transpose()?,
+                reset_recorded_senior_claim: self
+                    .reset_recorded_senior_claim
+                    .as_ref()
+                    .map(bigdecimal_to_u128)
+                    .transpose()?,
+                reset_recorded_required_deposit: self
+                    .reset_recorded_required_deposit
+                    .map(|v| v as u64),
+                settled: self.settled,
+                settlement_final_nav: self
+                    .settlement_final_nav
+                    .as_ref()
+                    .map(bigdecimal_to_u128)
+                    .transpose()?,
+                senior_pool: self.senior_pool.map(|v| v as u64),
+                senior_supply: self
+                    .senior_supply
+                    .as_ref()
+                    .map(bigdecimal_to_u128)
+                    .transpose()?,
+                junior_pool: self.junior_pool.map(|v| v as u64),
+                junior_supply: self
+                    .junior_supply
+                    .as_ref()
+                    .map(bigdecimal_to_u128)
+                    .transpose()?,
+                settlement_snapshot_at_ms: self.settlement_snapshot_at_ms.map(|v| v as u64),
+                settlement_redeemed: bigdecimal_to_u128(&self.settlement_redeemed)?,
+                senior_lane_head: self.senior_lane_head as u64,
+                senior_lane_tail: self.senior_lane_tail as u64,
+                junior_lane_head: self.junior_lane_head as u64,
+                junior_lane_tail: self.junior_lane_tail as u64,
+            },
+        ))
+    }
+}
+
+// ---------- vault_positions (SO-418: VaultPosition NFT lifecycle) ----------
+
+#[derive(Queryable, Identifiable, Insertable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = vault_positions)]
+#[diesel(primary_key(position_id))]
+// Full snapshots: a cleared queued_global_seq must null the column.
+#[diesel(treat_none_as_null = true)]
+pub struct VaultPositionRow {
+    pub position_id: String,
+    pub vault_id: String,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: i16,
+    pub capital_generation: i64,
+    pub shares: BigDecimal,
+    pub cost_basis: BigDecimal,
+    pub locked_until_ms: i64,
+    /// live | queued | consumed | settled | burned.
+    pub status: String,
+    /// Split lineage: parent this position was carved out of.
+    pub parent_position_id: Option<String>,
+    /// Merge lineage: kept position this one was folded into.
+    pub merged_into: Option<String>,
+    /// Set while queued: the withdraw request's global_seq (the fulfil
+    /// event carries no position id, so this is the join key).
+    pub queued_global_seq: Option<i64>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub updated_at_seq: i64,
+}
+
+impl VaultPositionRow {
+    pub fn into_state(self) -> anyhow::Result<(ObjectId, VaultPositionState)> {
+        let position = ObjectId::from_hex(&self.position_id)
+            .map_err(|e| anyhow::anyhow!("vault position_id {}: {e}", self.position_id))?;
+        let vault = ObjectId::from_hex(&self.vault_id)
+            .map_err(|e| anyhow::anyhow!("vault position vault_id {}: {e}", self.vault_id))?;
+        let opt_id = |s: &Option<String>, field: &str| -> anyhow::Result<Option<ObjectId>> {
+            s.as_deref()
+                .map(ObjectId::from_hex)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("vault position {field}: {e}"))
+        };
+        Ok((
+            position,
+            VaultPositionState {
+                vault_id: vault,
+                tranche: self.tranche as u8,
+                capital_generation: self.capital_generation as u64,
+                shares: bigdecimal_to_u128(&self.shares)?,
+                cost_basis: bigdecimal_to_u64(&self.cost_basis)?,
+                locked_until_ms: self.locked_until_ms as u64,
+                status: self.status,
+                parent_position_id: opt_id(&self.parent_position_id, "parent_position_id")?,
+                merged_into: opt_id(&self.merged_into, "merged_into")?,
+                queued_global_seq: self.queued_global_seq.map(|v| v as u64),
+                created_at_ms: self.created_at_ms as u64,
+                updated_at_ms: self.updated_at_ms as u64,
             },
         ))
     }

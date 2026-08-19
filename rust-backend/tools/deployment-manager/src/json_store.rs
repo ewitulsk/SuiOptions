@@ -147,6 +147,17 @@ pub struct TradingVaultObjectsRecord {
     /// external-account registration disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registrar_pubkey: Option<String>,
+    /// v2 terms provenance (SO-418, plan §9.5.6): the normative spec
+    /// version this deployment ships under…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms_version: Option<u64>,
+    /// …and the hex sha256 of the exact spec document
+    /// (docs/trading-vault-v2/spec.md), embedded at compile time so the
+    /// recorded hash always matches the checkout the deploy ran from.
+    /// Optional only for READING pre-v2 records — every fresh deploy
+    /// writes both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_hash: Option<String>,
     pub activation_digest: String,
 }
 

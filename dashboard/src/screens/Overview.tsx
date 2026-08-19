@@ -4,9 +4,10 @@
 import { enabledState, useDeskState } from "../api/deskState";
 import { fmtAmount, fmtPct, fmtRaw, fmtSigned, fromRaw, timeAgo } from "../api/format";
 import { useVaultFlows } from "../api/indexer";
-import { useVaultDetail, vaultTvlRaw } from "../api/vault";
+import { isTranched, useVaultDetail, vaultTvlRaw, type TrancheLabel } from "../api/vault";
 import { Card, Empty, ErrorNote, Meter, Pill, Tile, type PillTone } from "../components/ui";
 import { DeskDownBanner } from "../components/DeskDownBanner";
+import { RISK_TONE } from "./VaultScreen";
 
 export function Overview() {
   const desk = useDeskState();
@@ -31,6 +32,15 @@ export function Overview() {
     vault.data?.latestNavRaw != null && netDeposits != null
       ? Number(vault.data.latestNavRaw) - netDeposits
       : null;
+  // Per-tranche attribution: tranche NAV (latest capital sync) − tranche
+  // net deposits. Null until both sides exist.
+  const tranchePnlRaw = (tranche: TrancheLabel): number | null => {
+    const navRaw =
+      tranche === "senior" ? vault.data?.seniorNavRaw : vault.data?.juniorNavRaw;
+    const f = flows.data?.byTranche[tranche];
+    if (navRaw == null || f == null) return null;
+    return Number(navRaw) - (f.depositedRaw - f.withdrawnRaw);
+  };
 
   return (
     <div className="dash-grid">
@@ -43,6 +53,19 @@ export function Overview() {
           <Pill tone={state.exposure.stressBlocked ? "bad" : "ok"}>
             stress gate {state.exposure.stressBlocked ? "BLOCKING" : "clear"}
           </Pill>
+          {vault.data && (
+            <Pill tone={RISK_TONE[vault.data.riskState]}>
+              capital risk{" "}
+              {vault.data.riskState === "healthy"
+                ? "healthy"
+                : vault.data.riskState.replace("_", " ").toUpperCase()}
+            </Pill>
+          )}
+          {vault.data && (
+            <Pill tone={vault.data.curatorCommitmentBreached ? "bad" : "ok"}>
+              commitment {vault.data.curatorCommitmentBreached ? "BREACHED" : "ok"}
+            </Pill>
+          )}
           <Pill
             tone={state.vault.curatorSessionFlowsEnabled ? "ok" : "warn"}
             title="CuratorCap + IntegrationRegistry resolved — gates vault-funded bids and vault-custody exits"
@@ -110,6 +133,26 @@ export function Overview() {
                   : "NAV − net deposits"
               }
             />
+            {isTranched(vault.data) &&
+              (["senior", "junior"] as const).map((tranche) => {
+                const pnl = tranchePnlRaw(tranche);
+                return (
+                  <Tile
+                    key={tranche}
+                    label={`LP P&L (${tranche})`}
+                    value={
+                      pnl == null ? (
+                        "—"
+                      ) : (
+                        <span className={pnl >= 0 ? "pos" : "neg"}>
+                          {fmtSigned(fromRaw(pnl, dec))}
+                        </span>
+                      )
+                    }
+                    hint="tranche NAV − tranche net deposits"
+                  />
+                );
+              })}
             <Tile label="Pending withdrawals" value={vault.data.pendingWithdrawals} />
             <Tile
               label="State"

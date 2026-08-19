@@ -7,13 +7,14 @@
 //! a JSONL file.
 //!
 //! On boot the inventory is reconstructed from VAULT custody:
-//!   - NAV from the indexer's `trading_vaults` view
-//!     (`latest_pps_e12 × total_shares / 1e12`, deposit-asset raw units),
-//!     falling back to the vault's settlement free balance
-//!     (`vault::free_balance_of<Settlement>` dev-inspect) when the vault
-//!     has no observed pps yet. **Documented choice**: pps×shares is the
-//!     appraised NAV (positions included); the free-balance fallback
-//!     under-counts by design and only covers a freshly-created vault.
+//!   - The budget base from the indexer's `trading_vaults` view via
+//!     [`budget_base`] (SO-418): the latest appraised NAV on untranched
+//!     vaults, the junior/risk-bearing measure on tranched ones — falling
+//!     back to the vault's settlement free balance
+//!     (`vault::free_balance_of<Settlement>` dev-inspect) when nothing
+//!     has priced the vault yet. **Documented choice**: the appraised
+//!     figure includes positions; the free-balance fallback under-counts
+//!     by design and only covers a freshly-created vault.
 //!   - Held option coins per live bucket via
 //!     `vault::free_balance_of<OptionCoin>` dev-inspect (the
 //!     `custody_balance` pattern from the old vault_deepbook quoter),
@@ -380,6 +381,54 @@ fn append_jsonl<T: Serialize>(path: &PathBuf, rec: &T) -> Result<()> {
     Ok(())
 }
 
+// ── v2 budget base (SO-418) ────────────────────────────────────────────
+
+/// Mirror of the Move `SHARE_OFFSET` (shares are offset-scaled vs value;
+/// observed pps_e12 = value × 1e12 × OFFSET / shares).
+const SHARE_OFFSET: u128 = 1_000_000;
+
+/// The desk's premium-budget base for one vault view (SO-418).
+///
+/// v1 used `latest_pps_e12 × total_shares` — total NAV. v2 bounds
+/// reservations by the RISK-BEARING measure instead:
+///
+/// - untranched (`structure_code == 0`): the whole book is risk capital —
+///   `latest_nav` from the last consumed appraisal/capital sync, falling
+///   back to the observed pps over the junior book (which carries the
+///   untranched supply).
+/// - tranched: the junior side only — `junior_nav` from the last capital
+///   sync, falling back to the junior observed pps × junior shares. The
+///   senior claim is not the desk's to deploy against.
+///
+/// `None` = no usable measure yet (fresh vault); callers fall back to the
+/// free settlement balance, which under-counts by design.
+pub fn budget_base(v: &indexer_graphql::TradingVault) -> Option<u64> {
+    let from_pps = |pps: Option<u128>, shares: u128| {
+        pps.map(|pps| {
+            u64::try_from(
+                pps.saturating_mul(shares) / 1_000_000_000_000u128 / SHARE_OFFSET,
+            )
+            .unwrap_or(u64::MAX)
+        })
+    };
+    let nav = if v.structure_code == 0 {
+        v.latest_nav
+            .or_else(|| from_pps(v.latest_pps_e12, v.junior_shares).map(u128::from))
+    } else {
+        v.junior_nav
+            .or_else(|| from_pps(v.latest_junior_pps_e12, v.junior_shares).map(u128::from))
+    };
+    nav.map(|n| u64::try_from(n).unwrap_or(u64::MAX))
+}
+
+/// Is this vault "risk-off" for the desk (SO-418)? Mirrors the §8.4b gate
+/// set the quote sessions and `vault_mm` releases abort on (code 124),
+/// plus the terminal states: capital risk state not Healthy, curator
+/// commitment breached, lifecycle not open, or settled.
+pub fn vault_risk_off(v: &indexer_graphql::TradingVault) -> bool {
+    v.risk_state != 0 || v.curator_commitment_breached || v.state != "open" || v.settled
+}
+
 // ── boot reconstruction ────────────────────────────────────────────────
 
 /// Everything reconstruction needs (kept together so `spawn_desk` stays
@@ -398,27 +447,22 @@ pub struct ReconstructParams<'a> {
 }
 
 /// Reconstruct the book from vault custody (module docs describe the
-/// sources and the NAV choice).
+/// sources; SO-418 switched the budget base from total pps × shares to
+/// the risk-state-aware measure — see [`budget_base`]).
 pub async fn reconstruct(p: ReconstructParams<'_>) -> Result<Book> {
-    // NAV: appraised pps × shares from the indexer view, else settlement
-    // free balance.
+    // Budget base: latest NAV (untranched) / junior NAV (tranched) from
+    // the indexer view, else settlement free balance.
     let vault_hex = p.vault_id.to_hex_literal();
     let vaults = p.indexer.trading_vaults().await.context("indexer trading_vaults")?;
     let ours = vaults
         .iter()
         .find(|v| v.vault_id.to_hex() == vault_hex || format!("0x{}", v.vault_id.to_hex()) == vault_hex);
-    let nav = match ours {
-        Some(v) => match v.latest_pps_e12 {
-            Some(pps) => u64::try_from(pps.saturating_mul(v.total_shares) / 1_000_000_000_000u128)
-                .unwrap_or(u64::MAX),
-            None => {
-                free_balance_of(p.wrap, p.trading_vault_package, p.vault_id, &p.settlement_coin_type)
-                    .await
-                    .unwrap_or(0)
-            }
-        },
+    let nav = match ours.and_then(budget_base) {
+        Some(nav) => nav,
         None => {
-            tracing::warn!(vault = %vault_hex, "vault not in indexer view yet; NAV from free balance");
+            if ours.is_none() {
+                tracing::warn!(vault = %vault_hex, "vault not in indexer view yet; NAV from free balance");
+            }
             free_balance_of(p.wrap, p.trading_vault_package, p.vault_id, &p.settlement_coin_type)
                 .await
                 .unwrap_or(0)
@@ -947,6 +991,58 @@ mod tests {
             amount,
             covered: 0,
         }
+    }
+
+    // ── v2 budget base (SO-418) ────────────────────────────────────────
+
+    #[test]
+    fn budget_base_untranched_prefers_latest_nav_then_pps_over_junior_book() {
+        let mut v = crate::desk::provision::test_vault_view(1, 1, "open");
+        // Fresh vault: nothing to price from.
+        assert_eq!(budget_base(&v), None);
+        // Observed pps over the junior book (untranched supply lives
+        // there): pps_e12 = value×1e12×OFFSET/shares.
+        // pps_e12 = value×1e12×OFFSET/shares → a par vault reads 1e12.
+        v.junior_shares = 500 * 1_000_000; // 500 value at OFFSET scale
+        v.latest_pps_e12 = Some(1_000_000_000_000);
+        assert_eq!(budget_base(&v), Some(500));
+        // The appraised NAV wins once present.
+        v.latest_nav = Some(1_234);
+        assert_eq!(budget_base(&v), Some(1_234));
+    }
+
+    #[test]
+    fn budget_base_tranched_bounds_by_the_junior_measure() {
+        let mut v = crate::desk::provision::test_vault_view(1, 1, "open");
+        v.structure_code = 1;
+        v.latest_nav = Some(10_000); // total NAV must NOT be the budget
+        assert_eq!(budget_base(&v), None, "senior claim is not deployable");
+        v.junior_nav = Some(3_000);
+        assert_eq!(budget_base(&v), Some(3_000));
+        // Without a sync, the junior observed pps stands in.
+        v.junior_nav = None;
+        v.junior_shares = 2_000 * 1_000_000;
+        v.latest_junior_pps_e12 = Some(1_000_000_000_000); // par
+
+        assert_eq!(budget_base(&v), Some(2_000));
+    }
+
+    #[test]
+    fn risk_off_covers_state_breach_lifecycle_and_settlement() {
+        let healthy = crate::desk::provision::test_vault_view(1, 1, "open");
+        assert!(!vault_risk_off(&healthy));
+        let mut v = healthy.clone();
+        v.risk_state = 1; // CoverageBreach
+        assert!(vault_risk_off(&v));
+        let mut v = healthy.clone();
+        v.curator_commitment_breached = true;
+        assert!(vault_risk_off(&v));
+        let mut v = healthy.clone();
+        v.state = "closing".into();
+        assert!(vault_risk_off(&v));
+        let mut v = healthy.clone();
+        v.settled = true;
+        assert!(vault_risk_off(&v));
     }
 
     #[test]

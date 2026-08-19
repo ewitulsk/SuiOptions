@@ -12,6 +12,7 @@ use exchange_book::MatchIntent;
 use exchange_types::Digest;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
+use protocol_types::vault_abort;
 use sui_tx::chain::ChainClient;
 use sui_tx::sui_client::Signer;
 use sui_tx::tx::{clock_arg, submit_ptb_rebuilding, tx_digest};
@@ -90,6 +91,12 @@ pub enum SettleOutcome {
     /// A direct maker's quoting is off (vault not open / adapter delisted /
     /// curator opt-out): prune all of that manager's orders.
     VaultQuotingDisabled,
+    /// A direct maker's vault is in a risk-off capital state (coverage
+    /// breach / impaired / reset pending — vault_abort::RISK_OFF): outflows
+    /// are gated on-chain, so prune that manager's orders. Distinct from
+    /// `VaultQuotingDisabled` so a breach reads as "vault risk-off", not an
+    /// unknown abort or a curator opt-out.
+    VaultRiskOff,
     /// The market's on-chain pause flag is set (SO-416): restore the book
     /// and stop matching — an ops state, not a failure, so never alert.
     MarketPaused,
@@ -126,10 +133,9 @@ const E_INSUFFICIENT_ESCROW: u64 = 2;
 // exchange_adapter.move (SO-372 direct escrow)
 const EA_INSUFFICIENT_ESCROW_A: u64 = 9;
 const EA_INSUFFICIENT_ESCROW_B: u64 = 10;
-// trading_vault vault.move quote-session gates (module name "vault")
-const TV_VAULT_NOT_OPEN: u64 = 72;
-const TV_ADAPTER_NOT_ALLOWED: u64 = 75;
-const TV_QUOTE_ADAPTER_NOT_ENABLED: u64 = 113;
+// trading_vault vault.move quote-session gates (module name "vault") use
+// the shared constants from protocol_types::vault_abort (WS-0.3) — never
+// re-declare the numbers here.
 
 /// A decoded Move abort: (module name, abort code).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -403,9 +409,14 @@ pub fn decode_abort(abort: &MoveAbort, job: &MatchJob, raw: &str) -> SettleOutco
         }
         // trading_vault quote-session gates: the maker's direct quoting is
         // off (vault not open / adapter delisted / curator opt-out).
-        ("vault", TV_VAULT_NOT_OPEN)
-        | ("vault", TV_ADAPTER_NOT_ALLOWED)
-        | ("vault", TV_QUOTE_ADAPTER_NOT_ENABLED) => SettleOutcome::VaultQuotingDisabled,
+        ("vault", vault_abort::VAULT_NOT_OPEN)
+        | ("vault", vault_abort::ADAPTER_NOT_ALLOWED)
+        | ("vault", vault_abort::QUOTE_ADAPTER_NOT_ENABLED) => {
+            SettleOutcome::VaultQuotingDisabled
+        }
+        // v2 risk-off capital state (coverage breach / impaired / reset
+        // pending): deployment outflows gated — first-class outcome.
+        ("vault", vault_abort::RISK_OFF) => SettleOutcome::VaultRiskOff,
         ("settlement", E_PAUSED) => SettleOutcome::MarketPaused,
         ("registry", E_OVERFILL) => SettleOutcome::Stale,
         ("settlement", E_ALREADY_FILLED)
@@ -544,6 +555,8 @@ mod tests {
         assert_eq!(decode("vault", 113), SettleOutcome::VaultQuotingDisabled);
         assert_eq!(decode("vault", 72), SettleOutcome::VaultQuotingDisabled);
         assert_eq!(decode("vault", 75), SettleOutcome::VaultQuotingDisabled);
+        // v2 risk-off gate (vault_abort::RISK_OFF = 124) is its own outcome.
+        assert_eq!(decode("vault", 124), SettleOutcome::VaultRiskOff);
         // Unknown adapter/vault aborts stay loud.
         assert!(matches!(decode("exchange_adapter", 12), SettleOutcome::Failed { .. }));
 

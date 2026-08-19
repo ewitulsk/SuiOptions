@@ -75,8 +75,10 @@ pub async fn pubkey(
 // -------------------------------------------------------- registration attest
 
 /// Domain separator of the external-account registration attestation.
-/// `trading_vault::vault::set_external_account_attested` rebuilds the same
-/// message on chain, so these bytes are part of the interface.
+/// `vault::set_external_account_attested` rebuilds the same message on
+/// chain, so these bytes are part of the interface. Byte-identical in
+/// trading-vault v2 (`EXTERNAL_REG_DOMAIN` in vault.move) — completed
+/// ceremonies survive the cutover with no re-registration.
 pub const REGISTRATION_DOMAIN: &str = "tv_external_reg_v1";
 
 #[derive(Debug, Serialize)]

@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from "react";
 
-import type { TradingVaultDetail } from "../../api/tradingVaults";
+import { isRiskOff, riskStateLabel, type TradingVaultDetail } from "../../api/tradingVaults";
 import { fetchFrostPubkey } from "../../api/hedgeSigner";
 import type { AppraisalPlan } from "../../tx/appraisal";
 import type { useTradingVaultActions } from "../../state/tradingVault";
@@ -189,18 +189,32 @@ function ReleaseControl({
   }
 
   const amountNum = Number(amount) || 0;
+  // SO-418: release_external aborts in EVERY risk-off state (coverage
+  // breach / impaired / reset-pending / commitment breach), not just when
+  // the vault leaves Open — gate before the user signs a doomed tx.
+  const riskOff = isRiskOff(vault);
   const disabled =
-    !!actions.busy || amountNum <= 0 || decimals == null || plan == null || !cfgId || vault.state !== "open";
+    !!actions.busy ||
+    amountNum <= 0 ||
+    decimals == null ||
+    plan == null ||
+    !cfgId ||
+    vault.state !== "open" ||
+    riskOff;
   const title =
     vault.state !== "open"
       ? "The vault is no longer open"
-      : !cfgId
-        ? "Protocol config unavailable"
-        : plan == null
-          ? planError
-            ? `Release unavailable: ${planError}`
-            : "Analyzing vault holdings…"
-          : undefined;
+      : riskOff
+        ? vault.curatorCommitmentBreached && vault.riskState === "healthy"
+          ? "Blocked: curator commitment breached — fund the commitment to resume"
+          : `Blocked while risk-off (${riskStateLabel(vault.riskState)})`
+        : !cfgId
+          ? "Protocol config unavailable"
+          : plan == null
+            ? planError
+              ? `Release unavailable: ${planError}`
+              : "Analyzing vault holdings…"
+            : undefined;
 
   const onRelease = () => {
     if (decimals == null || amountNum <= 0 || plan == null || !cfgId) return;
