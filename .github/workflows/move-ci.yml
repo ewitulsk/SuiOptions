@@ -68,6 +68,9 @@ jobs:
           - core
           - mm-collateral
           - trading-vault
+          # v2 curated vault (SO-417) — replaces trading-vault at rollout;
+          # v1 stays in the matrix until it leaves the tree.
+          - trading-vault-v2
           - oracle-pyth
           - oracle-switchboard
           - equity-oracle
