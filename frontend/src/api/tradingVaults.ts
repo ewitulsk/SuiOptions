@@ -1,12 +1,13 @@
-// HTTP client for the api-service curated trading-vault endpoints (SO-288).
+// HTTP client for the api-service curated trading-vault endpoints (SO-288,
+// v2 overhaul SO-418).
 //
-// The list/detail endpoints ship snake_case DTOs (pps-history and stake ship
-// camelCase); the wire types + mappers below convert to the app-facing
-// camelCase types, and are the only place to adjust if the API shifts.
+// The endpoints ship snake_case DTOs; the wire types + mappers below convert
+// to the app-facing camelCase types, and are the only place to adjust if the
+// API shifts.
 //
-// Raw u128 fields (`totalSharesRaw`, `latestPpsE12Raw`) ship as decimal
-// strings to preserve precision; use them when building a tx and the scaled
-// helpers below for display.
+// Raw u128/u64 fields (`totalSharesRaw`, `latestPpsE12Raw`, …) ship as
+// decimal strings to preserve precision; use them when building a tx and the
+// scaled helpers below for display.
 
 import { normalizeStructTag } from "@mysten/sui/utils";
 
@@ -22,9 +23,47 @@ export const PPS_E12 = 1e12;
 /**
  * Virtual-offset share scale (SO-370): genesis mints `value × 1e6` shares
  * against one virtual asset unit, so raw shares are 1e6× the accounting
- * asset's raw units at pps 1. Display shares and pps rescale by this.
+ * asset's raw units at pps 1. Display shares and pps rescale by this. v2
+ * keeps the same offset per tranche.
  */
 export const SHARE_OFFSET = 1e6;
+
+// ═════════════════════════ v2 capital-structure types ═════════════════════════
+
+/** Wire tranche label (codes: 0 untranched / 1 senior / 2 junior). */
+export type TrancheLabel = "untranched" | "senior" | "junior";
+
+/** Wire risk-state label (codes 0..3). */
+export type RiskStateLabel = "healthy" | "coverage_breach" | "impaired" | "reset_pending";
+
+/** Wire withdrawal-lane label (codes: 0 senior / 1 junior; untranched vaults
+ * use the junior lane). */
+export type LaneLabel = "senior" | "junior";
+
+export type UpsideMode = "preferred_only" | "capped_participating" | "uncapped_participating";
+
+/** Immutable senior/junior terms; null on untranched vaults. */
+export type VaultCapitalStructure = {
+  seniorHurdleBpsAnnual: number;
+  targetJuniorBps: number;
+  maintenanceJuniorBps: number;
+  upside: UpsideMode;
+  residualParticipationBps: number;
+  totalReturnCapBps: number;
+};
+
+/** A pending junior generational reset (§8.5); null when none. */
+export type VaultResetProposal = {
+  oldGeneration: number;
+  proposedAtMs: number;
+  executableAtMs: number;
+  /** u128 decimal strings, accounting-asset smallest units. */
+  recordedNavRaw: string;
+  recordedSeniorClaimRaw: string;
+  recordedRequiredDepositRaw: string;
+};
+
+export type LaneBounds = { head: number; tail: number };
 
 /** One curated trading vault. Mirrors the api-service trading-vault DTO. */
 export type TradingVault = {
@@ -42,7 +81,7 @@ export type TradingVault = {
   unwindGraceMs: number;
   depositsPaused: boolean;
   mmReleaseEnabled: boolean;
-  /** u128 decimal string, atomic share units. */
+  /** u128 decimal string, atomic share units (senior + junior). */
   totalSharesRaw: string;
   positionCount: number;
   pendingWithdrawals: number;
@@ -64,10 +103,43 @@ export type TradingVault = {
   latestNavRaw: string | null;
   /** Ms since epoch, or null before the first appraisal. */
   navUpdatedAtMs: number | null;
+
+  // ── v2 capital structure & risk state (SO-418) ──
+  /** Immutable at creation; null for untranched vaults. */
+  capitalStructure: VaultCapitalStructure | null;
+  termsVersion: number;
+  /** Hex spec hash of the governing terms, or null when absent. */
+  specHash: string | null;
+  riskState: RiskStateLabel;
+  riskStateCode: number;
+  curatorCommitmentBreached: boolean;
+  /** u128 decimal strings, atomic share units. */
+  seniorSharesRaw: string;
+  juniorSharesRaw: string;
+  /** u128 decimal string, accounting-asset smallest units. */
+  seniorClaimRaw: string;
+  /** From the latest TvCapitalSynced; null before the first sync. */
+  seniorNavRaw: string | null;
+  juniorNavRaw: string | null;
+  /** Per-tranche observed pps (1e12-scaled float + raw string). */
+  seniorPps: number | null;
+  seniorPpsRaw: string | null;
+  juniorPps: number | null;
+  juniorPpsRaw: string | null;
+  /** junior_nav × 1e4 / nav from the latest sync; null before it. */
+  juniorBufferBps: number | null;
+  impairedSinceMs: number | null;
+  activeJuniorGeneration: number;
+  resetProposal: VaultResetProposal | null;
+  /** True once the terminal settlement snapshot has run (§8.7). */
+  settled: boolean;
+  laneHeads: { senior: LaneBounds; junior: LaneBounds } | null;
 };
 
-/** One custodied position row from the detail endpoint. */
-export type TradingVaultPosition = {
+/** One CUSTODIED position row from the detail endpoint — an adapter-held
+ * object the appraisal walks (renamed from `TradingVaultPosition` so the
+ * `VaultPosition` claim NFT below owns the plain name). */
+export type VaultHoldingPosition = {
   positionId: string;
   adapter: string;
   active: boolean;
@@ -83,8 +155,9 @@ export type TradingVaultPosition = {
 /**
  * One free balance the vault holds outside custody (SO-313) — a
  * `vault::BalanceKey<T>` dynamic field on the vault object. Includes the
- * deposit asset. Distinct from a *position*, which is a custodied object the
- * appraisal walks; a curator spot trade only ever moves free balances.
+ * deposit asset. Distinct from a *holding position*, which is a custodied
+ * object the appraisal walks; a curator spot trade only ever moves free
+ * balances.
  */
 export type TradingVaultBalance = {
   /** Canonical `0x…::mod::T` coin type. */
@@ -98,7 +171,7 @@ export type TradingVaultBalance = {
 };
 
 export type TradingVaultDetail = TradingVault & {
-  positions: TradingVaultPosition[];
+  positions: VaultHoldingPosition[];
   balances: TradingVaultBalance[];
   /**
    * The live balance read failed, so `balances` is *unknown* rather than
@@ -107,8 +180,25 @@ export type TradingVaultDetail = TradingVault & {
   balancesStale: boolean;
 };
 
-/** Wire shape of one vault row: api-service ships these two endpoints in
- * snake_case (unlike pps-history/stake, which are camelCase). */
+type CapitalStructureWire = {
+  senior_hurdle_bps_annual: number;
+  target_junior_bps: number;
+  maintenance_junior_bps: number;
+  upside: UpsideMode;
+  residual_participation_bps: number;
+  total_return_cap_bps: number;
+};
+
+type ResetProposalWire = {
+  old_generation: number;
+  proposed_at_ms: number;
+  executable_at_ms: number;
+  recorded_nav_raw: string;
+  recorded_senior_claim_raw: string;
+  recorded_required_deposit_raw: string;
+};
+
+/** Wire shape of one vault row (snake_case, per the WS-3 DTO contract). */
 type TradingVaultWire = {
   vault_id: string;
   /** SO-370 rename; api-services predating it send `deposit_coin_type`. */
@@ -138,6 +228,29 @@ type TradingVaultWire = {
   /** u128 decimal string; absent before the first consumed appraisal. */
   latest_nav_raw: string | null;
   nav_updated_at_ms: number | null;
+  // ── v2 additions (marked optional so the UI degrades to untranched /
+  // healthy defaults against an api-service predating SO-418) ──
+  capital_structure?: CapitalStructureWire | null;
+  terms_version?: number;
+  spec_hash?: string | null;
+  risk_state?: RiskStateLabel;
+  risk_state_code?: number;
+  curator_commitment_breached?: boolean;
+  senior_shares_raw?: string;
+  junior_shares_raw?: string;
+  senior_claim_raw?: string;
+  senior_nav_raw?: string | null;
+  junior_nav_raw?: string | null;
+  senior_pps?: number | null;
+  senior_pps_raw?: string | null;
+  junior_pps?: number | null;
+  junior_pps_raw?: string | null;
+  junior_buffer_bps?: number | null;
+  impaired_since_ms?: number | null;
+  active_junior_generation?: number;
+  reset_proposal?: ResetProposalWire | null;
+  settled?: boolean;
+  lane_heads?: { senior: LaneBounds; junior: LaneBounds } | null;
 };
 
 type TradingVaultBalanceWire = {
@@ -147,7 +260,7 @@ type TradingVaultBalanceWire = {
   amount_raw: string;
 };
 
-type TradingVaultPositionWire = {
+type VaultHoldingPositionWire = {
   position_id: string;
   adapter: string;
   active: boolean;
@@ -187,6 +300,47 @@ function mapVault(w: TradingVaultWire): TradingVault {
       w.external_equity_updated_at_ms == null ? null : Number(w.external_equity_updated_at_ms),
     latestNavRaw: w.latest_nav_raw ?? null,
     navUpdatedAtMs: w.nav_updated_at_ms ?? null,
+    capitalStructure:
+      w.capital_structure == null
+        ? null
+        : {
+            seniorHurdleBpsAnnual: w.capital_structure.senior_hurdle_bps_annual,
+            targetJuniorBps: w.capital_structure.target_junior_bps,
+            maintenanceJuniorBps: w.capital_structure.maintenance_junior_bps,
+            upside: w.capital_structure.upside,
+            residualParticipationBps: w.capital_structure.residual_participation_bps,
+            totalReturnCapBps: w.capital_structure.total_return_cap_bps,
+          },
+    termsVersion: w.terms_version ?? 1,
+    specHash: w.spec_hash ?? null,
+    riskState: w.risk_state ?? "healthy",
+    riskStateCode: w.risk_state_code ?? 0,
+    curatorCommitmentBreached: w.curator_commitment_breached ?? false,
+    seniorSharesRaw: w.senior_shares_raw ?? "0",
+    juniorSharesRaw: w.junior_shares_raw ?? w.total_shares_raw,
+    seniorClaimRaw: w.senior_claim_raw ?? "0",
+    seniorNavRaw: w.senior_nav_raw ?? null,
+    juniorNavRaw: w.junior_nav_raw ?? null,
+    seniorPps: w.senior_pps ?? null,
+    seniorPpsRaw: w.senior_pps_raw ?? null,
+    juniorPps: w.junior_pps ?? null,
+    juniorPpsRaw: w.junior_pps_raw ?? null,
+    juniorBufferBps: w.junior_buffer_bps ?? null,
+    impairedSinceMs: w.impaired_since_ms ?? null,
+    activeJuniorGeneration: w.active_junior_generation ?? 0,
+    resetProposal:
+      w.reset_proposal == null
+        ? null
+        : {
+            oldGeneration: w.reset_proposal.old_generation,
+            proposedAtMs: w.reset_proposal.proposed_at_ms,
+            executableAtMs: w.reset_proposal.executable_at_ms,
+            recordedNavRaw: w.reset_proposal.recorded_nav_raw,
+            recordedSeniorClaimRaw: w.reset_proposal.recorded_senior_claim_raw,
+            recordedRequiredDepositRaw: w.reset_proposal.recorded_required_deposit_raw,
+          },
+    settled: w.settled ?? false,
+    laneHeads: w.lane_heads ?? null,
   };
 }
 
@@ -204,10 +358,10 @@ export async function fetchTradingVault(vaultId: string): Promise<TradingVaultDe
   if (!res.ok) {
     throw new Error(`GET /trading-vaults/:id failed: ${res.status} ${res.statusText}`);
   }
-  // Detail flattens the vault fields to the top level, plus positions and
-  // free balances.
+  // Detail flattens the vault fields to the top level, plus custodied
+  // positions and free balances.
   const body = (await res.json()) as TradingVaultWire & {
-    positions: TradingVaultPositionWire[];
+    positions: VaultHoldingPositionWire[];
     // Optional so the app keeps working against an api-service that predates
     // SO-313 — an absent field reads as "unknown", not "holds nothing".
     balances?: TradingVaultBalanceWire[];
@@ -234,14 +388,30 @@ export async function fetchTradingVault(vaultId: string): Promise<TradingVaultDe
   };
 }
 
-/** One share-price sample from the pps-history endpoint (SO-293). */
+// ═════════════════════════ pps history (per tranche) ═════════════════════════
+
+/** One share-price sample. v2 (SO-418): per-tranche series with junior
+ * generation-reset markers; untranched vaults emit `tranche: "untranched"`. */
 export type TradingVaultPpsPoint = {
-  /** Event time (ms since epoch), decimal string. */
-  timestampMs: string;
+  timestampMs: number;
+  tranche: TrancheLabel;
+  /** Display share price (1e12-scaled float already divided down). */
+  pps: number;
   /** u128 decimal string, pps × 1e12. */
-  ppsE12: string;
-  /** `deposit` | `fulfillment`. */
+  ppsRaw: string;
+  /** `deposit` | `withdraw` | `capital_sync`. */
   source: string;
+  /** True on the first junior point of a new generation (pps re-bases). */
+  reset: boolean;
+};
+
+type TradingVaultPpsPointWire = {
+  timestamp_ms: number;
+  tranche: TrancheLabel;
+  pps: number;
+  pps_raw: string;
+  source: string;
+  reset: boolean;
 };
 
 export async function fetchTradingVaultPpsHistory(
@@ -253,8 +423,15 @@ export async function fetchTradingVaultPpsHistory(
   if (!res.ok) {
     throw new Error(`GET /trading-vaults/:id/pps-history failed: ${res.status} ${res.statusText}`);
   }
-  const body = (await res.json()) as { points: TradingVaultPpsPoint[] };
-  return body.points;
+  const body = (await res.json()) as { points: TradingVaultPpsPointWire[] };
+  return body.points.map((p) => ({
+    timestampMs: p.timestamp_ms,
+    tranche: p.tranche,
+    pps: p.pps,
+    ppsRaw: p.pps_raw,
+    source: p.source,
+    reset: p.reset,
+  }));
 }
 
 /**
@@ -288,39 +465,327 @@ export async function fetchTradingVaultTrades(vaultId: string): Promise<TradingV
   return body.trades.map((t) => ({ ...t, timestampMs: Number(t.timestampMs) }));
 }
 
-/** The connected wallet's stake in one vault (SO-293). Raw integer fields
- * ship as decimal strings to preserve u128/u64 precision. */
-export type TradingVaultStake = {
+// ═════════════════════════ VaultPosition claim NFTs ═════════════════════════
+
+/**
+ * One wallet-held `vault_position::VaultPosition` claim NFT (SO-418).
+ * Replaces the address-keyed stake: a wallet may hold N positions per
+ * vault, each with its own shares, basis, lockup, tranche, and junior
+ * generation. Raw integer fields ship as decimal strings.
+ */
+export type VaultPosition = {
+  positionId: string;
+  vaultId: string;
+  tranche: TrancheLabel;
+  trancheCode: number;
+  capitalGeneration: number;
+  /** True for a junior position of a wiped (pre-reset) generation —
+   * permanently zero value. */
+  wiped: boolean;
   /** u128 decimal string, atomic share units. */
-  shares: string;
-  /** u64 decimal string, deposit-asset smallest units. */
-  costBasis: string;
-  /** u64 decimal string at the latest pps, or null pre-appraisal. */
-  estimatedValue: string | null;
-  /** Ms since epoch, or null if the wallet never deposited. Ships as a
-   * decimal string on the wire; normalized to a number in the fetcher. */
-  lockedUntilMs: number | null;
+  sharesRaw: string;
+  /** u64 decimal string, accounting-asset smallest units. */
+  costBasisRaw: string;
+  lockedUntilMs: number;
+  /** shares × (nav_t+1)/(S_t+OFFSET) at the latest tranche ratio; null
+   * before the first capital sync. */
+  estimatedValueRaw: string | null;
+  /** max(value − basis, 0). */
+  estimatedProfitRaw: string | null;
+  /** profit × curator_fee_bps / 1e4 — the embedded fee liability. */
+  estimatedFeeRaw: string | null;
 };
 
-export async function fetchTradingVaultStake(
-  vaultId: string,
-  address: string,
-): Promise<TradingVaultStake> {
-  const res = await fetch(
-    `${API_BASE_URL}/trading-vaults/${encodeURIComponent(vaultId)}/stake/${encodeURIComponent(address)}`,
-  );
-  if (!res.ok) {
-    throw new Error(`GET /trading-vaults/:id/stake/:address failed: ${res.status} ${res.statusText}`);
-  }
-  const body = (await res.json()) as Omit<TradingVaultStake, "lockedUntilMs"> & {
-    lockedUntilMs: string | number | null;
-  };
+type VaultPositionWire = {
+  position_id: string;
+  vault_id: string;
+  tranche: TrancheLabel;
+  tranche_code: number;
+  capital_generation: number;
+  wiped: boolean;
+  shares_raw: string;
+  cost_basis_raw: string;
+  locked_until_ms: number;
+  estimated_value_raw: string | null;
+  estimated_profit_raw: string | null;
+  estimated_fee_raw: string | null;
+};
+
+function mapPosition(w: VaultPositionWire): VaultPosition {
   return {
-    ...body,
-    // Serialized as a decimal string like the other raw-int fields.
-    lockedUntilMs: body.lockedUntilMs == null ? null : Number(body.lockedUntilMs),
+    positionId: w.position_id,
+    vaultId: w.vault_id,
+    tranche: w.tranche,
+    trancheCode: w.tranche_code,
+    capitalGeneration: w.capital_generation,
+    wiped: w.wiped,
+    sharesRaw: w.shares_raw,
+    costBasisRaw: w.cost_basis_raw,
+    lockedUntilMs: w.locked_until_ms,
+    estimatedValueRaw: w.estimated_value_raw ?? null,
+    estimatedProfitRaw: w.estimated_profit_raw ?? null,
+    estimatedFeeRaw: w.estimated_fee_raw ?? null,
   };
 }
+
+/** `GET /trading-vaults/:id/positions/:address` — the wallet's live
+ * VaultPosition NFTs in one vault (JIT owned-object query, SO-418). */
+export async function fetchVaultPositions(
+  vaultId: string,
+  address: string,
+): Promise<VaultPosition[]> {
+  const res = await fetch(
+    `${API_BASE_URL}/trading-vaults/${encodeURIComponent(vaultId)}/positions/${encodeURIComponent(address)}`,
+  );
+  if (!res.ok) {
+    throw new Error(
+      `GET /trading-vaults/:id/positions/:address failed: ${res.status} ${res.statusText}`,
+    );
+  }
+  const body = (await res.json()) as { positions: VaultPositionWire[] };
+  return body.positions.map(mapPosition);
+}
+
+/** A position looked up by id — works for ANY holder (positions are freely
+ * transferable; a prospective secondary buyer renders this pre-purchase). */
+export type VaultPositionDetail = VaultPosition & {
+  /** Live object owner, or null when not wallet-owned. */
+  owner: string | null;
+};
+
+/** `GET /trading-vaults/positions/:positionId` — 404s when the object
+ * doesn't exist or isn't a VaultPosition. */
+export async function fetchVaultPositionDetail(positionId: string): Promise<VaultPositionDetail> {
+  const res = await fetch(
+    `${API_BASE_URL}/trading-vaults/positions/${encodeURIComponent(positionId)}`,
+  );
+  if (!res.ok) {
+    throw new Error(
+      res.status === 404
+        ? `No VaultPosition exists at ${positionId}`
+        : `GET /trading-vaults/positions/:id failed: ${res.status} ${res.statusText}`,
+    );
+  }
+  const body = (await res.json()) as VaultPositionWire & { owner: string | null };
+  return { ...mapPosition(body), owner: body.owner ?? null };
+}
+
+// ═════════════════════════════ waterfall ═════════════════════════════
+
+/** The §3.4a waterfall decomposition at the latest capital sync (SO-418).
+ * Powers the tranche stat strip and the client-side deposit-buffer check. */
+export type VaultWaterfall = {
+  /** u128 decimal strings, accounting-asset smallest units. */
+  navRaw: string;
+  seniorClaimRaw: string;
+  seniorPrincipalBasisRaw: string | null;
+  preferredRaw: string;
+  participationRaw: string;
+  seniorNavRaw: string;
+  juniorNavRaw: string;
+  juniorBufferBps: number;
+  targetJuniorBps: number;
+  maintenanceJuniorBps: number;
+  upside: UpsideMode;
+  residualParticipationBps: number;
+  totalReturnCapBps: number;
+  riskState: RiskStateLabel;
+  riskStateCode: number;
+  /** u128 decimal strings, atomic share units. */
+  seniorSharesRaw: string;
+  juniorSharesRaw: string;
+  updatedAtMs: number;
+};
+
+type VaultWaterfallWire = {
+  nav_raw: string;
+  senior_claim_raw: string;
+  senior_principal_basis_raw: string | null;
+  preferred_raw: string;
+  participation_raw: string;
+  senior_nav_raw: string;
+  junior_nav_raw: string;
+  junior_buffer_bps: number;
+  target_junior_bps: number;
+  maintenance_junior_bps: number;
+  upside: UpsideMode;
+  residual_participation_bps: number;
+  total_return_cap_bps: number;
+  risk_state: RiskStateLabel;
+  risk_state_code: number;
+  senior_shares_raw: string;
+  junior_shares_raw: string;
+  updated_at_ms: number;
+};
+
+/** `GET /trading-vaults/:id/waterfall` (SO-418). */
+export async function fetchVaultWaterfall(vaultId: string): Promise<VaultWaterfall> {
+  const res = await fetch(
+    `${API_BASE_URL}/trading-vaults/${encodeURIComponent(vaultId)}/waterfall`,
+  );
+  if (!res.ok) {
+    throw new Error(`GET /trading-vaults/:id/waterfall failed: ${res.status} ${res.statusText}`);
+  }
+  const w = (await res.json()) as VaultWaterfallWire;
+  return {
+    navRaw: w.nav_raw,
+    seniorClaimRaw: w.senior_claim_raw,
+    seniorPrincipalBasisRaw: w.senior_principal_basis_raw ?? null,
+    preferredRaw: w.preferred_raw,
+    participationRaw: w.participation_raw,
+    seniorNavRaw: w.senior_nav_raw,
+    juniorNavRaw: w.junior_nav_raw,
+    juniorBufferBps: w.junior_buffer_bps,
+    targetJuniorBps: w.target_junior_bps,
+    maintenanceJuniorBps: w.maintenance_junior_bps,
+    upside: w.upside,
+    residualParticipationBps: w.residual_participation_bps,
+    totalReturnCapBps: w.total_return_cap_bps,
+    riskState: w.risk_state,
+    riskStateCode: w.risk_state_code,
+    seniorSharesRaw: w.senior_shares_raw,
+    juniorSharesRaw: w.junior_shares_raw,
+    updatedAtMs: w.updated_at_ms,
+  };
+}
+
+// ═════════════════════════════ settlement ═════════════════════════════
+
+/** Terminal settlement pool state (§8.7): `{ settled: false }` before the
+ * snapshot, frozen entitlements after. */
+export type VaultSettlement =
+  | { settled: false }
+  | {
+      settled: true;
+      finalNavRaw: string;
+      seniorPoolRaw: string;
+      seniorSupplyRaw: string;
+      juniorPoolRaw: string;
+      juniorSupplyRaw: string;
+      activeJuniorGeneration: number;
+      /** Sum of TvSettlementRedeemed payouts vs the remainder. */
+      redeemedRaw: string;
+      outstandingRaw: string;
+      snapshotAtMs: number;
+    };
+
+type VaultSettlementWire = {
+  settled: boolean;
+  final_nav_raw?: string;
+  senior_pool_raw?: string;
+  senior_supply_raw?: string;
+  junior_pool_raw?: string;
+  junior_supply_raw?: string;
+  active_junior_generation?: number;
+  redeemed_raw?: string;
+  outstanding_raw?: string;
+  snapshot_at_ms?: number;
+};
+
+/** `GET /trading-vaults/:id/settlement` (SO-418). */
+export async function fetchVaultSettlement(vaultId: string): Promise<VaultSettlement> {
+  const res = await fetch(
+    `${API_BASE_URL}/trading-vaults/${encodeURIComponent(vaultId)}/settlement`,
+  );
+  if (!res.ok) {
+    throw new Error(`GET /trading-vaults/:id/settlement failed: ${res.status} ${res.statusText}`);
+  }
+  const w = (await res.json()) as VaultSettlementWire;
+  if (!w.settled) return { settled: false };
+  return {
+    settled: true,
+    finalNavRaw: w.final_nav_raw ?? "0",
+    seniorPoolRaw: w.senior_pool_raw ?? "0",
+    seniorSupplyRaw: w.senior_supply_raw ?? "0",
+    juniorPoolRaw: w.junior_pool_raw ?? "0",
+    juniorSupplyRaw: w.junior_supply_raw ?? "0",
+    activeJuniorGeneration: w.active_junior_generation ?? 0,
+    redeemedRaw: w.redeemed_raw ?? "0",
+    outstandingRaw: w.outstanding_raw ?? "0",
+    snapshotAtMs: w.snapshot_at_ms ?? 0,
+  };
+}
+
+// ═════════════════════════ pending requests (lanes) ═════════════════════════
+
+/** One outstanding withdraw-queue request (SO-418: lane-aware, keyed by the
+ * GLOBAL sequence, with server-computed payability). */
+export type VaultPendingRequest = {
+  /** Global sequence, decimal string — `amend_payout_asset`'s handle. */
+  globalSeq: string;
+  lane: LaneLabel;
+  laneCode: number;
+  positionId: string;
+  tranche: TrancheLabel;
+  trancheCode: number;
+  capitalGeneration: number;
+  recipient: string;
+  /** u128 decimal string, atomic share units. */
+  sharesRaw: string;
+  /** u64 decimal string, accounting-asset smallest units. */
+  basisRaw: string;
+  /** Canonical coin type the recipient asked to be paid in. */
+  payoutCoinType: string;
+  payoutSymbol: string;
+  requestedAtMs: number;
+  payable: boolean;
+  blockedReason: "junior_lane_blocked" | "wiped_generation" | null;
+};
+
+type VaultPendingRequestWire = {
+  seq: string;
+  global_seq?: string;
+  // Lane/payability fields optional for rollout resilience (SO-418 adds
+  // them; an untranched vault's requests all ride the junior lane).
+  lane?: LaneLabel;
+  lane_code?: number;
+  position_id?: string;
+  tranche?: TrancheLabel;
+  tranche_code?: number;
+  capital_generation?: number;
+  recipient: string;
+  shares_raw: string;
+  basis_raw: string;
+  payout_coin_type: string;
+  payout_symbol: string;
+  requested_at_ms: string;
+  payable?: boolean;
+  blocked_reason?: "junior_lane_blocked" | "wiped_generation" | null;
+};
+
+/** `GET /trading-vaults/:id/pending-requests` — ascending by global seq. */
+export async function fetchVaultPendingRequests(
+  vaultId: string,
+): Promise<VaultPendingRequest[]> {
+  const res = await fetch(
+    `${API_BASE_URL}/trading-vaults/${encodeURIComponent(vaultId)}/pending-requests`,
+  );
+  if (!res.ok) {
+    throw new Error(
+      `GET /trading-vaults/:id/pending-requests failed: ${res.status} ${res.statusText}`,
+    );
+  }
+  const body = (await res.json()) as { requests: VaultPendingRequestWire[] };
+  return body.requests.map((r) => ({
+    globalSeq: r.global_seq ?? r.seq,
+    lane: r.lane ?? "junior",
+    laneCode: r.lane_code ?? 1,
+    positionId: r.position_id ?? "",
+    tranche: r.tranche ?? "untranched",
+    trancheCode: r.tranche_code ?? 0,
+    capitalGeneration: r.capital_generation ?? 0,
+    recipient: r.recipient,
+    sharesRaw: r.shares_raw,
+    basisRaw: r.basis_raw,
+    payoutCoinType: r.payout_coin_type,
+    payoutSymbol: r.payout_symbol,
+    requestedAtMs: Number(r.requested_at_ms),
+    payable: r.payable ?? true,
+    blockedReason: r.blocked_reason ?? null,
+  }));
+}
+
+// ═════════════════════════════ display helpers ═════════════════════════════
 
 /**
  * The supported-token catalog entry for a coin type, or null when the asset
@@ -372,4 +837,31 @@ export function tradingVaultTvl(v: TradingVault, decimals: number | null): numbe
   const pps = tradingVaultPps(v);
   if (pps == null || decimals == null) return null;
   return (Number(v.totalSharesRaw) / (SHARE_OFFSET * 10 ** decimals)) * pps;
+}
+
+/** Per-tranche TVL estimate in display accounting-asset units, from the
+ * latest TvCapitalSynced NAV split; null before the first sync. */
+export function trancheTvl(navRaw: string | null, decimals: number | null): number | null {
+  if (navRaw == null || decimals == null) return null;
+  return Number(navRaw) / 10 ** decimals;
+}
+
+/** Human label for a risk state. */
+export function riskStateLabel(s: RiskStateLabel): string {
+  switch (s) {
+    case "healthy":
+      return "Healthy";
+    case "coverage_breach":
+      return "Coverage breach";
+    case "impaired":
+      return "Impaired";
+    case "reset_pending":
+      return "Reset pending";
+  }
+}
+
+/** §8.4b master switch mirrored client-side: risk-off means deployment
+ * stops (quote sessions, releases) while unwinding continues. */
+export function isRiskOff(v: TradingVault): boolean {
+  return v.riskStateCode !== 0 || v.curatorCommitmentBreached;
 }

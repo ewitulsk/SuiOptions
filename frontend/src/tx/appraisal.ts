@@ -1073,7 +1073,41 @@ export type AppraisedDepositParams = {
   protocolConfigId: string;
   /** Deposit amount in smallest units. */
   amountRaw: bigint;
+  /** Tranche wire code: 0 untranched / 1 senior / 2 junior (SO-418). */
+  trancheCode: number;
+  /** The sender — the minted `VaultPosition` NFT is transferred here. */
+  sender: string;
 };
+
+/** `Option<PriceAttestation>` for the deposited asset: `none` for the
+ * accounting asset, the reused composed attestation otherwise. */
+function depositAttOption(
+  tx: Transaction,
+  vaultPkg: string,
+  plan: AppraisalPlan,
+  attestations: Map<string, TransactionResult>,
+): TransactionArgument {
+  const depType = plan.depositAssetType;
+  const attestationType = `${vaultPkg}::price::PriceAttestation`;
+  if (depType === plan.accountingType) {
+    return tx.moveCall({
+      target: "0x1::option::none",
+      typeArguments: [attestationType],
+      arguments: [],
+    });
+  }
+  const composed = attestations.get(depType);
+  if (!composed) {
+    throw new Error(
+      `no attestation composed for deposit asset ${shortType(depType)} — re-plan and retry`,
+    );
+  }
+  return tx.moveCall({
+    target: "0x1::option::some",
+    typeArguments: [attestationType],
+    arguments: [composed],
+  });
+}
 
 /**
  * The full deposit PTB: appraisal legs (with a fresh oracle update when any
@@ -1081,7 +1115,9 @@ export type AppraisedDepositParams = {
  * plan's `depositAssetType` (SO-370 — any allowlisted asset). Accounting
  * deposits pass `none`; a non-accounting deposit reuses the SAME attest
  * result its appraisal composed (attestations are `copy`) wrapped in
- * `option::some`. For a vault holding nothing but its accounting asset this
+ * `option::some`. v2 (SO-418): `deposit` takes the tranche code and RETURNS
+ * a `VaultPosition` NFT, transferred to the sender as the PTB's last
+ * command. For a vault holding nothing but its accounting asset this
  * degenerates to the same PTB `buildTradingVaultDepositTx` emits.
  */
 export async function buildAppraisedDepositTx(p: AppraisedDepositParams): Promise<Transaction> {
@@ -1094,31 +1130,11 @@ export async function buildAppraisedDepositTx(p: AppraisedDepositParams): Promis
     legs,
   });
   const depType = p.plan.depositAssetType;
-  const attestationType = `${vaultPkg}::price::PriceAttestation`;
-  let att: TransactionArgument;
-  if (depType === p.plan.accountingType) {
-    att = tx.moveCall({
-      target: "0x1::option::none",
-      typeArguments: [attestationType],
-      arguments: [],
-    });
-  } else {
-    const composed = attestations.get(depType);
-    if (!composed) {
-      throw new Error(
-        `no attestation composed for deposit asset ${shortType(depType)} — re-plan and retry`,
-      );
-    }
-    att = tx.moveCall({
-      target: "0x1::option::some",
-      typeArguments: [attestationType],
-      arguments: [composed],
-    });
-  }
+  const att = depositAttOption(tx, vaultPkg, p.plan, attestations);
   const funds = tx.add(coinWithBalance({ balance: p.amountRaw, type: depType }));
   // Shared whitelist::Whitelist — the ingress gate (SO-383).
   const whitelistId = requireId(WHITELIST_ID, "whitelistId");
-  tx.moveCall({
+  const position = tx.moveCall({
     target: `${vaultPkg}::vault::deposit`,
     typeArguments: [depType],
     arguments: [
@@ -1128,9 +1144,204 @@ export async function buildAppraisedDepositTx(p: AppraisedDepositParams): Promis
       appraisal,
       funds,
       att,
+      tx.pure.u8(p.trancheCode),
       tx.object(CLOCK_ID),
     ],
   });
+  tx.transferObjects([position], p.sender);
+  return tx;
+}
+
+// ═══════════════ curator commitment escrow (§8.6, SO-418) ═══════════════
+
+export type DepositIntoCommitmentParams = {
+  plan: AppraisalPlan;
+  /** Shared `VaultProtocolConfig` object id. */
+  protocolConfigId: string;
+  /** The curator's owned `CuratorCap` object id. */
+  curatorCapId: string;
+  /** Deposit amount in smallest units of the plan's deposit asset. */
+  amountRaw: bigint;
+};
+
+/**
+ * `vault::deposit_into_commitment<T>` — curator first-loss commitment
+ * funding: identical valuation and share math to a deposit, but the minted
+ * claim lands in the in-vault escrowed commitment position (no return).
+ * Funding the commitment is what cures a commitment breach. Wallet-paid.
+ */
+export async function buildDepositIntoCommitmentTx(
+  p: DepositIntoCommitmentParams,
+): Promise<Transaction> {
+  const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
+  const legs = await fetchLegsForPlan(p.plan);
+
+  const tx = new Transaction();
+  const { appraisal, attestations } = composeAppraisal(tx, p.plan, {
+    protocolConfigId: p.protocolConfigId,
+    legs,
+  });
+  const depType = p.plan.depositAssetType;
+  const att = depositAttOption(tx, vaultPkg, p.plan, attestations);
+  const funds = tx.add(coinWithBalance({ balance: p.amountRaw, type: depType }));
+  const whitelistId = requireId(WHITELIST_ID, "whitelistId");
+  tx.moveCall({
+    target: `${vaultPkg}::vault::deposit_into_commitment`,
+    typeArguments: [depType],
+    arguments: [
+      tx.object(p.plan.vaultId),
+      tx.object(p.protocolConfigId),
+      tx.object(whitelistId),
+      tx.object(p.curatorCapId),
+      appraisal,
+      funds,
+      att,
+      tx.object(CLOCK_ID),
+    ],
+  });
+  return tx;
+}
+
+export type ReleaseCommitmentParams = {
+  plan: AppraisalPlan;
+  /** Shared `VaultProtocolConfig` object id. */
+  protocolConfigId: string;
+  /** The curator's owned `CuratorCap` object id. */
+  curatorCapId: string;
+  /** Shares to split out of the escrow (u128); 0 releases the ENTIRE
+   * escrowed position. */
+  sharesRaw: bigint;
+  /** The curator's wallet — receives the released position NFT. */
+  sender: string;
+};
+
+/**
+ * `vault::release_commitment` — split shares out of the escrowed commitment
+ * into an ordinary transferable position NFT. While Open the release must
+ * leave the remaining marked commitment at or above the floor and is
+ * blocked in any risk-off state. Wallet-paid.
+ */
+export async function buildReleaseCommitmentTx(p: ReleaseCommitmentParams): Promise<Transaction> {
+  const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
+  const legs = await fetchLegsForPlan(p.plan);
+
+  const tx = new Transaction();
+  const { appraisal } = composeAppraisal(tx, p.plan, {
+    protocolConfigId: p.protocolConfigId,
+    legs,
+  });
+  const released = tx.moveCall({
+    target: `${vaultPkg}::vault::release_commitment`,
+    arguments: [
+      tx.object(p.plan.vaultId),
+      tx.object(p.curatorCapId),
+      tx.object(p.protocolConfigId),
+      appraisal,
+      tx.pure.u128(p.sharesRaw),
+      tx.object(CLOCK_ID),
+    ],
+  });
+  tx.transferObjects([released], p.sender);
+  return tx;
+}
+
+// ═══════════════════ junior reset & capital cranks (SO-418) ═══════════════════
+
+export type AppraisedCrankParams = {
+  plan: AppraisalPlan;
+  /** Shared `VaultProtocolConfig` object id. */
+  protocolConfigId: string;
+};
+
+/** One appraisal piped into a `(vault, cfg, appraisal, clock)` target. */
+async function buildAppraisedCrankTx(
+  p: AppraisedCrankParams,
+  fn: "propose_junior_reset" | "snapshot_settlement" | "crank_capital",
+): Promise<Transaction> {
+  const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
+  const legs = await fetchLegsForPlan(p.plan);
+  const tx = new Transaction();
+  const { appraisal } = composeAppraisal(tx, p.plan, {
+    protocolConfigId: p.protocolConfigId,
+    legs,
+  });
+  tx.moveCall({
+    target: `${vaultPkg}::vault::${fn}`,
+    arguments: [
+      tx.object(p.plan.vaultId),
+      tx.object(p.protocolConfigId),
+      appraisal,
+      tx.object(CLOCK_ID),
+    ],
+  });
+  return tx;
+}
+
+/** `vault::propose_junior_reset` — permissionless two-stage reset start
+ * (§8.5): eligibility is objective, checked on-chain against THIS
+ * appraisal. */
+export function buildProposeJuniorResetTx(p: AppraisedCrankParams): Promise<Transaction> {
+  return buildAppraisedCrankTx(p, "propose_junior_reset");
+}
+
+/** `vault::snapshot_settlement` — one-time permissionless terminal
+ * settlement snapshot for a Closed vault (§8.7). */
+export function buildSnapshotSettlementTx(p: AppraisedCrankParams): Promise<Transaction> {
+  return buildAppraisedCrankTx(p, "snapshot_settlement");
+}
+
+/** `vault::crank_capital` — permissionless capital sync: hurdle accrual,
+ * waterfall, risk-state transition, commitment test. */
+export function buildCrankCapitalTx(p: AppraisedCrankParams): Promise<Transaction> {
+  return buildAppraisedCrankTx(p, "crank_capital");
+}
+
+export type ExecuteJuniorResetParams = {
+  plan: AppraisalPlan;
+  /** Shared `VaultProtocolConfig` object id. */
+  protocolConfigId: string;
+  /** Fresh junior capital in ACCOUNTING-asset smallest units — must cover
+   * the recomputed minimum reset deposit. */
+  amountRaw: bigint;
+  /** The recapitalizer — receives the genesis junior position of the new
+   * generation. */
+  sender: string;
+};
+
+/**
+ * `vault::execute_junior_reset<T>` — atomic revalidation and funding
+ * (§8.5.4–6). Permissionless for any issuance-whitelisted user once the
+ * objective conditions, seasoning, notice, and minimum deposit hold. The
+ * deposit must be the accounting asset; the returned genesis junior
+ * position transfers to the sender.
+ */
+export async function buildExecuteJuniorResetTx(
+  p: ExecuteJuniorResetParams,
+): Promise<Transaction> {
+  const vaultPkg = requireId(TRADING_VAULT_PACKAGE_ID, "trading-vault package");
+  const legs = await fetchLegsForPlan(p.plan);
+  const tx = new Transaction();
+  const { appraisal } = composeAppraisal(tx, p.plan, {
+    protocolConfigId: p.protocolConfigId,
+    legs,
+  });
+  const funds = tx.add(
+    coinWithBalance({ balance: p.amountRaw, type: p.plan.accountingType }),
+  );
+  const whitelistId = requireId(WHITELIST_ID, "whitelistId");
+  const position = tx.moveCall({
+    target: `${vaultPkg}::vault::execute_junior_reset`,
+    typeArguments: [p.plan.accountingType],
+    arguments: [
+      tx.object(p.plan.vaultId),
+      tx.object(p.protocolConfigId),
+      tx.object(whitelistId),
+      appraisal,
+      funds,
+      tx.object(CLOCK_ID),
+    ],
+  });
+  tx.transferObjects([position], p.sender);
   return tx;
 }
 
@@ -1184,6 +1395,9 @@ export async function buildReleaseExternalTx(p: ReleaseExternalParams): Promise<
     arguments: [
       tx.object(p.plan.vaultId),
       tx.object(p.curatorCapId),
+      // v2 (SO-418): release_external gained the protocol config — the
+      // release syncs capital state and aborts risk-off.
+      tx.object(p.protocolConfigId),
       appraisal,
       tx.pure.u64(p.amountRaw),
       tx.object(CLOCK_ID),

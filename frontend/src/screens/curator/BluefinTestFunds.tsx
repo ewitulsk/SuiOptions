@@ -75,6 +75,11 @@ export function BluefinTestFunds({
           protocolConfigId: cfgId,
           depositCoinType: vault.accountingAsset,
           amountRaw,
+          // Bluefin-USDC test vaults are untranched; a tranched vault would
+          // take a junior (2) code here. The minted position lands in the
+          // curator's wallet.
+          trancheCode: vault.capitalStructure != null ? 2 : 0,
+          sender: address,
         });
       try {
         await submit(build());
