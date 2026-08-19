@@ -1,9 +1,8 @@
 [package]
-name = "options_adapter"
+name = "vault_v2"
 version = "0.0.1"
 edition = "2024.beta"
 
 [dependencies]
 options_core = { local = "../core" }
-vault_v2 = { local = "../trading-vault-v2" }
 whitelist = { local = "../whitelist" }

@@ -10,9 +10,9 @@ use options_core::admin::{Self, AdminCap};
 use options_core::bucket;
 use options_core::put_bucket;
 
-use trading_vault::price as tv_price;
-use trading_vault::registry as tv_registry;
-use trading_vault::registry::OracleRegistry;
+use vault_v2::price as tv_price;
+use vault_v2::registry as tv_registry;
+use vault_v2::registry::OracleRegistry;
 
 use options_adapter::options_oracle::{Self as oracle, OptionsOracle};
 use options_adapter::vol_book::{Self, VolBook};

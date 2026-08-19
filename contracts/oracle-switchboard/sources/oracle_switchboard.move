@@ -2,7 +2,7 @@
 ///
 /// Structural twin of `oracle_pyth`: it prices two feeds into an
 /// asset→quote cross in RAW smallest-unit terms at
-/// `trading_vault::price::price_scale()`, behind the same guardrails —
+/// `vault_v2::price::price_scale()`, behind the same guardrails —
 /// feed-hash pinning from an admin-managed registry (the caller cannot
 /// substitute a different market), publish-time staleness, and a
 /// positive price. Guardrail parameters are registry state, not caller
@@ -10,7 +10,7 @@
 /// enforces its own attestation-age backstop at consumption.
 ///
 /// The witness (`SwitchboardOracle`) is only ever constructed here, and
-/// `trading_vault::price::attest` requires it to be on the protocol's
+/// `vault_v2::price::attest` requires it to be on the protocol's
 /// `OracleRegistry` allowlist — so publishing this package does nothing
 /// until governance allowlists it, and delisting kills attestations
 /// instantly.
@@ -46,10 +46,10 @@ use switchboard::decimal;
 use switchboard::quote::{Self, Quote, Quotes};
 
 use options_core::admin::AdminCap;
-use trading_vault::price::{Self as vault_price, PriceAttestation};
-use trading_vault::registry::OracleRegistry;
+use vault_v2::price::{Self as vault_price, PriceAttestation};
+use vault_v2::registry::OracleRegistry;
 
-/// Matches `trading_vault::price::PRICE_SCALE` = 10^12; asserted at
+/// Matches `vault_v2::price::PRICE_SCALE` = 10^12; asserted at
 /// attestation time.
 const OUTPUT_SCALE: u8 = 12;
 

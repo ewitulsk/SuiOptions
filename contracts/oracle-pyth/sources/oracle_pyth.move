@@ -1,7 +1,7 @@
 /// The first oracle adapter (design doc §4.1): Pyth → `PriceAttestation`.
 ///
 /// Prices two `PriceInfoObject`s into an asset→quote cross in RAW
-/// smallest-unit terms at `trading_vault::price::price_scale()` — the
+/// smallest-unit terms at `vault_v2::price::price_scale()` — the
 /// same math as `options_vault::oracle::spot_cross` (cross =
 /// asset_usd / quote_usd, rescaled by the decimal difference), with the
 /// same guardrails: feed-ID pinning from an admin-managed registry (the
@@ -12,7 +12,7 @@
 /// consumption.
 ///
 /// The witness (`PythOracle`) is only ever constructed here, and
-/// `trading_vault::price::attest` requires it to be on the protocol's
+/// `vault_v2::price::attest` requires it to be on the protocol's
 /// `OracleRegistry` allowlist — so deploying this package does nothing
 /// until governance allowlists it, and delisting it kills attestations
 /// instantly.
@@ -29,10 +29,10 @@ use pyth::price_identifier;
 use pyth::price_info::{Self, PriceInfoObject};
 
 use options_core::admin::AdminCap;
-use trading_vault::price::{Self as vault_price, PriceAttestation};
-use trading_vault::registry::OracleRegistry;
+use vault_v2::price::{Self as vault_price, PriceAttestation};
+use vault_v2::registry::OracleRegistry;
 
-/// Matches `trading_vault::price::PRICE_SCALE` = 10^12; asserted at
+/// Matches `vault_v2::price::PRICE_SCALE` = 10^12; asserted at
 /// attestation time.
 const OUTPUT_SCALE: u8 = 12;
 

@@ -36,8 +36,8 @@ use sui::vec_set::{Self, VecSet};
 
 use options_core::admin::AdminCap;
 
-use trading_vault::registry::OracleRegistry;
-use trading_vault::vault::{Self, Appraisal, TradingVault};
+use vault_v2::registry::OracleRegistry;
+use vault_v2::vault::{Self, Appraisal, TradingVault};
 
 const DEFAULT_MAX_AGE_MS: u64 = 300_000; // 5 min
 const DEFAULT_MAX_DELTA_BPS: u64 = 2_000; // 20% per update

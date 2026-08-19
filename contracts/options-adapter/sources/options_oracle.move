@@ -44,8 +44,8 @@ use options_core::put_bucket::{Self, PutBucket};
 
 use options_adapter::vol_book::{Self, VolBook};
 
-use trading_vault::price::{Self, PriceAttestation};
-use trading_vault::registry::OracleRegistry;
+use vault_v2::price::{Self, PriceAttestation};
+use vault_v2::registry::OracleRegistry;
 
 const E_MISSING_ATTESTATION: u64 = 1;
 const E_ATT_ASSET_MISMATCH: u64 = 2;
