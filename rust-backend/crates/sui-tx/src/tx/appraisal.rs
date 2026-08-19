@@ -336,6 +336,11 @@ pub async fn discover_holdings(
 
     // Walk the vault's dynamic fields: adapter tags (plain df, value =
     // TypeName) and positions (dof, object_type = the custody struct).
+    // v2 (SO-418) adds `CommitmentKey` dofs — the curator's escrowed
+    // `VaultPosition` — which the key-type filter below skips ON PURPOSE:
+    // a commitment position holds shares, not assets, so it is never an
+    // appraisal leg (contract plan §8.6). `BalanceKey` free-balance dfs
+    // are likewise not walked; free balances come from `asset_types`.
     let mut tags: BTreeMap<ObjectID, String> = BTreeMap::new();
     let mut position_ids: Vec<ObjectID> = Vec::new();
     // gRPC lists the `Field<K, V>` objects; one read of each field object

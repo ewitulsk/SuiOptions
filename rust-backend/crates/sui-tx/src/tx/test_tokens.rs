@@ -141,9 +141,20 @@ pub async fn mint_and_deposit_into_vault(
 
     // begin_appraisal -> deposit. Both take the vault as a shared input;
     // the builder unions the mutability, so the mutable deposit leg wins.
+    // v2: deposit mints a VaultPosition NFT — untranched (tranche 0),
+    // transferred back to the depositing signer.
     let appraisal = crate::tx::trading_vault::build_begin_appraisal(client, &mut pt, refs).await?;
-    crate::tx::trading_vault::build_deposit(client, &mut pt, refs, whitelist_id, appraisal, coin)
-        .await?;
+    crate::tx::trading_vault::build_deposit_and_transfer(
+        client,
+        &mut pt,
+        refs,
+        whitelist_id,
+        appraisal,
+        coin,
+        0,
+        signer.address,
+    )
+    .await?;
 
     submit(client, signer, pt, gas_budget).await
 }

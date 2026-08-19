@@ -596,12 +596,19 @@ pub fn protocol_templates(
     }
 
 
-    // Curated trading vaults (SO-282): wallet-facing flows. Deposits ride
-    // an appraisal whose legs vary with vault holdings — the template
-    // anchors begin_appraisal → deposit and allows the oracle/adapter
-    // appraisal calls in between. Withdrawal requests and closed-stake
-    // distribution are single anchored calls. Curator/session ops are
-    // NOT sponsored (curators run bots with their own gas).
+    // Curated trading vaults (SO-282, v2 since SO-418): wallet-facing
+    // flows. Deposits ride an appraisal whose legs vary with vault
+    // holdings — the template anchors begin_appraisal → deposit and
+    // allows the oracle/adapter appraisal calls in between. v2's deposit
+    // RETURNS a `VaultPosition` NFT the frontend transfers to the
+    // depositor: that trailing `TransferObjects` (and the `tranche_code`
+    // pure arg) is invisible to the matcher by design — plumbing
+    // commands and pure inputs are never pinned. Withdrawal requests
+    // (which now consume an owned position object), position split /
+    // merge / wiped-burn, and settlement-pool exits are single anchored
+    // calls — users exiting a closed vault shouldn't need gas.
+    // Curator/session ops are NOT sponsored (curators run bots with
+    // their own gas).
     if let Some(tvp) = trading_vault {
         let tvt = |module: &str, function: &str| MoveTarget::new(tvp.trading_vault, module, function);
         let begin = tvt("vault", "begin_appraisal");
@@ -724,14 +731,24 @@ pub fn protocol_templates(
             vec![(create, 1)],
         ));
         // request_withdraw<P> and amend_payout_asset<P> carry the payout
-        // asset as their single type argument (SO-370);
-        // enqueue_closed_stake stays type-free.
-        for (name, function, arity) in [
-            ("trading_vault:request_withdraw", "request_withdraw", 1),
-            ("trading_vault:amend_payout_asset", "amend_payout_asset", 1),
-            ("trading_vault:enqueue_closed_stake", "enqueue_closed_stake", 0),
+        // asset as their single type argument (SO-370); v2's
+        // request_withdraw consumes the position as an owned-object
+        // INPUT, which the matcher never sees — same pinned shape.
+        // redeem_settled_position<T> / settle_queued_request<T> pay out
+        // of the frozen settlement pool (accounting asset as the single
+        // type arg); burn_wiped_position and the vault_position split /
+        // merge ops are type-free. enqueue_closed_stake is DELETED in v2
+        // (the settlement pool replaces it) — its shape must not sponsor.
+        for (name, module, function, arity) in [
+            ("trading_vault:request_withdraw", "vault", "request_withdraw", 1),
+            ("trading_vault:amend_payout_asset", "vault", "amend_payout_asset", 1),
+            ("trading_vault:redeem_settled_position", "vault", "redeem_settled_position", 1),
+            ("trading_vault:settle_queued_request", "vault", "settle_queued_request", 1),
+            ("trading_vault:burn_wiped_position", "vault", "burn_wiped_position", 0),
+            ("trading_vault:split_position", "vault_position", "split", 0),
+            ("trading_vault:merge_positions", "vault_position", "merge", 0),
         ] {
-            let target = tvt("vault", function);
+            let target = tvt(module, function);
             templates.push(PtbTemplate::exact_only(
                 name.to_owned(),
                 vec![target.clone()],
@@ -1532,6 +1549,93 @@ mod tests {
             true,
         );
         assert_eq!(match_any(&templates, &dep_x), Some("trading_vault:deposit"));
+    }
+
+    /// SO-418 v2 shapes: deposits mint a `VaultPosition` NFT the frontend
+    /// transfers (a benign trailing `TransferObjects`), split/merge/
+    /// settlement-pool exits are sponsored, and the deleted
+    /// `enqueue_closed_stake` no longer sponsors. These pin exactly what
+    /// the gas station pays for.
+    #[test]
+    fn trading_vault_v2_shapes() {
+        let tv_pkg = ObjectID::from_hex_literal("0x71ad").unwrap();
+        let op_pkg = ObjectID::from_hex_literal("0x0217").unwrap();
+        let templates = protocol_templates(
+            pkg(),
+            None,
+            &[],
+            false,
+            None,
+            None,
+            Some(TradingVaultPkgs {
+                trading_vault: tv_pkg,
+                oracle_pyth: op_pkg,
+                deepbook_adapter: None,
+                options_adapter: None,
+                exchange_adapter: None,
+                equity_oracle: None,
+                pyth: None,
+                switchboard: None,
+            }),
+        );
+        let tvt = |module: &str, function: &str| MoveTarget::new(tv_pkg, module, function);
+
+        // Deposit + trailing TransferObjects of the returned position —
+        // the v2 frontend deposit shape (tranche_code is a pure arg the
+        // matcher never sees).
+        use sui_types::transaction::Argument;
+        let mut b = ProgrammableTransactionBuilder::new();
+        b.programmable_move_call(
+            tv_pkg,
+            Identifier::new("vault").unwrap(),
+            Identifier::new("begin_appraisal").unwrap(),
+            vec![TypeTag::U64],
+            vec![],
+        );
+        b.programmable_move_call(
+            tv_pkg,
+            Identifier::new("vault").unwrap(),
+            Identifier::new("deposit").unwrap(),
+            vec![TypeTag::U64],
+            vec![],
+        );
+        b.command(Command::TransferObjects(
+            vec![Argument::GasCoin],
+            Argument::GasCoin,
+        ));
+        let deposit_transfer = b.finish();
+        assert_eq!(
+            match_any(&templates, &deposit_transfer),
+            Some("trading_vault:deposit"),
+            "the NFT-returning deposit's TransferObjects must sponsor"
+        );
+
+        // Split rides with a trailing transfer of the child position too.
+        let split = build(&[(tvt("vault_position", "split"), 0)], false);
+        assert_eq!(match_any(&templates, &split), Some("trading_vault:split_position"));
+        let merge = build(&[(tvt("vault_position", "merge"), 0)], false);
+        assert_eq!(match_any(&templates, &merge), Some("trading_vault:merge_positions"));
+        let burn = build(&[(tvt("vault", "burn_wiped_position"), 0)], false);
+        assert_eq!(match_any(&templates, &burn), Some("trading_vault:burn_wiped_position"));
+
+        // Settlement-pool exits: accounting asset as the single type arg.
+        let redeem = build(&[(tvt("vault", "redeem_settled_position"), 1)], false);
+        assert_eq!(
+            match_any(&templates, &redeem),
+            Some("trading_vault:redeem_settled_position")
+        );
+        let settle = build(&[(tvt("vault", "settle_queued_request"), 1)], false);
+        assert_eq!(
+            match_any(&templates, &settle),
+            Some("trading_vault:settle_queued_request")
+        );
+        // Wrong arity is refused.
+        let bad = build(&[(tvt("vault", "redeem_settled_position"), 0)], false);
+        assert_eq!(match_any(&templates, &bad), None);
+
+        // The v1 enqueue_closed_stake shape must no longer sponsor.
+        let stale = build(&[(tvt("vault", "enqueue_closed_stake"), 0)], false);
+        assert_eq!(match_any(&templates, &stale), None);
     }
 
     #[test]
