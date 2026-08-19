@@ -18,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 use protocol_types::asset::canonicalize_move_type;
-use protocol_types::ids::ObjectId;
+use protocol_types::ids::{ObjectId, SuiAddress};
 
 /// Live `Vault` view values that the indexer doesn't carry (it materialises
 /// only what events state). All raw on-chain integers, atomic units.
@@ -365,6 +365,193 @@ fn u64_field(v: &Value, name: &str) -> Result<u64> {
     }
 }
 
+// ── VaultPosition NFT live reads (SO-418) ─────────────────────────────────
+//
+// Ownership of `VaultPosition` NFTs is deliberately NOT indexed (transfers
+// emit no events), so both position endpoints read the chain directly: the
+// wallet view via an owned-object query filtered by type, the detail view
+// via a plain object fetch.
+
+/// One live `vault_v2::vault_position::VaultPosition` object.
+#[derive(Debug, Clone)]
+pub struct VaultPositionLive {
+    pub position_id: ObjectId,
+    pub vault_id: ObjectId,
+    /// 0=Untranched 1=Senior 2=Junior.
+    pub tranche: u8,
+    pub shares: u128,
+    pub cost_basis: u64,
+    pub locked_until_ms: u64,
+    pub capital_generation: u64,
+}
+
+/// Page size for the owned-position walk; a wallet holding more pages than
+/// [`MAX_POSITION_PAGES`] loses the tail (logged by the caller via Err).
+const POSITION_PAGE: usize = 50;
+const MAX_POSITION_PAGES: usize = 10;
+
+/// All `VaultPosition` objects owned by `owner`, of exactly
+/// `position_type` (`{pkg}::vault_position::VaultPosition`). Unfiltered by
+/// vault — the caller filters on `vault_id`.
+pub async fn fetch_owned_vault_positions(
+    http: &reqwest::Client,
+    graphql_url: &str,
+    owner: &SuiAddress,
+    position_type: &str,
+) -> Result<Vec<VaultPositionLive>> {
+    const Q: &str = "query($owner: SuiAddress!, $type: String!, $cursor: String) {\
+ address(address: $owner) { objects(filter: { type: $type }, first: 50, after: $cursor) {\
+ pageInfo { hasNextPage endCursor } nodes { address contents { json } } } } }";
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_POSITION_PAGES {
+        let body = json!({
+            "query": Q,
+            "variables": { "owner": owner.to_hex(), "type": position_type, "cursor": cursor },
+        });
+        let parsed = post_graphql(http, graphql_url, &body, "owned vault-positions query").await?;
+        // An unknown address owns nothing — GraphQL still returns the
+        // wrapper, but tolerate a null `address` as empty.
+        let Some(conn) = parsed.pointer("/address/objects").filter(|c| !c.is_null()) else {
+            return Ok(out);
+        };
+        let nodes = conn
+            .get("nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("owned-objects connection has no nodes"))?;
+        for node in nodes {
+            out.push(parse_position_node(node)?);
+        }
+        let has_next = conn
+            .pointer("/pageInfo/hasNextPage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !has_next {
+            return Ok(out);
+        }
+        cursor = conn
+            .pointer("/pageInfo/endCursor")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if cursor.is_none() {
+            return Ok(out);
+        }
+    }
+    // More pages than the walk allows: report the gap rather than serve a
+    // silently-truncated wallet view.
+    Err(anyhow!(
+        "wallet owns more than {} positions",
+        POSITION_PAGE * MAX_POSITION_PAGES
+    ))
+}
+
+/// One node of the owned-objects connection: object id + contents.
+fn parse_position_node(node: &Value) -> Result<VaultPositionLive> {
+    let addr = node
+        .get("address")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("owned object node has no address"))?;
+    let position_id = ObjectId::from_hex(addr).map_err(|e| anyhow!("object id {addr}: {e}"))?;
+    let fields = node
+        .pointer("/contents/json")
+        .filter(|j| !j.is_null())
+        .ok_or_else(|| anyhow!("position {addr} has no contents json"))?;
+    parse_vault_position(position_id, fields)
+}
+
+/// Fetch one object by id and parse it as a `VaultPosition` of exactly
+/// `position_type`. Returns the position plus its owner address (`None`
+/// when the owner isn't a plain address — shared / object-owned / kiosk'd).
+/// `Ok(None)` when the object doesn't exist or isn't a VaultPosition.
+pub async fn fetch_vault_position(
+    http: &reqwest::Client,
+    graphql_url: &str,
+    position_id: &ObjectId,
+    position_type: &str,
+) -> Result<Option<(VaultPositionLive, Option<String>)>> {
+    const Q: &str = "query($addr: SuiAddress!) { object(address: $addr) {\
+ owner { __typename ... on AddressOwner { owner { address } } }\
+ asMoveObject { contents { type { repr } json } } } }";
+    let body = json!({ "query": Q, "variables": { "addr": position_id.to_hex() } });
+    let parsed = post_graphql(http, graphql_url, &body, "vault-position object query").await?;
+    let Some(object) = parsed.get("object").filter(|o| !o.is_null()) else {
+        return Ok(None);
+    };
+    let Some(contents) = object
+        .pointer("/asMoveObject/contents")
+        .filter(|c| !c.is_null())
+    else {
+        return Ok(None); // not a Move object
+    };
+    let repr = contents
+        .pointer("/type/repr")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("object has no type repr"))?;
+    if canonicalize_move_type(repr) != canonicalize_move_type(position_type) {
+        return Ok(None); // wrong type — the endpoint 404s
+    }
+    let fields = contents
+        .get("json")
+        .filter(|j| !j.is_null())
+        .ok_or_else(|| anyhow!("position object has no contents json"))?;
+    let position = parse_vault_position(*position_id, fields)?;
+    let owner = object
+        .pointer("/owner/owner/address")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(Some((position, owner)))
+}
+
+/// Parse a `VaultPosition`'s `contents.json` fields.
+fn parse_vault_position(position_id: ObjectId, fields: &Value) -> Result<VaultPositionLive> {
+    let vault_id_str = field(fields, "vault_id")?
+        .as_str()
+        .ok_or_else(|| anyhow!("vault_id is not a string"))?;
+    Ok(VaultPositionLive {
+        position_id,
+        vault_id: ObjectId::from_hex(vault_id_str)
+            .map_err(|e| anyhow!("vault_id {vault_id_str}: {e}"))?,
+        tranche: parse_tranche(field(fields, "tranche")?)?,
+        shares: u128_field(fields, "shares")?,
+        cost_basis: u64_field(fields, "cost_basis")?,
+        locked_until_ms: u64_field(fields, "locked_until_ms")?,
+        capital_generation: u64_field(fields, "capital_generation")?,
+    })
+}
+
+/// `Tranche` is a Move enum → `{"@variant": "Untranched"|"Senior"|"Junior"}`
+/// (tolerate a bare string). Maps to the wire codes 0/1/2.
+fn parse_tranche(v: &Value) -> Result<u8> {
+    let variant = match v {
+        Value::String(s) => s.as_str(),
+        Value::Object(m) => m
+            .get("@variant")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| anyhow!("tranche object has no @variant: {v}"))?,
+        other => return Err(anyhow!("unrecognized tranche encoding {other}")),
+    };
+    match variant {
+        "Untranched" => Ok(0),
+        "Senior" => Ok(1),
+        "Junior" => Ok(2),
+        other => Err(anyhow!("unknown tranche variant {other}")),
+    }
+}
+
+/// u128 fields cross the wire as decimal strings; tolerate a JSON number.
+fn u128_field(v: &Value, name: &str) -> Result<u128> {
+    match field(v, name)? {
+        Value::String(s) => s
+            .parse()
+            .with_context(|| format!("field {name}: u128 {s:?}")),
+        Value::Number(n) => n
+            .as_u64()
+            .map(u128::from)
+            .ok_or_else(|| anyhow!("field {name}: non-u128 {n}")),
+        other => Err(anyhow!("field {name}: expected u128, got {other}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +694,40 @@ mod tests {
         let types = vec![format!("0x{TBTC}")];
         assert!(parse_balance_keys(&json!({ "b0": { "value": null } }), &types).is_err());
         assert!(parse_balance_keys(&json!({}), &types).is_err());
+    }
+
+    // ── VaultPosition NFT parsing (SO-418) ──────────────────────────────
+
+    /// A `VaultPosition`'s `contents.json` per the shared rendering
+    /// conventions: u64/u128 as strings, ids as hex strings, the `Tranche`
+    /// enum as an `@variant` map.
+    #[test]
+    fn parses_a_vault_position() {
+        let pid = ObjectId::from_hex(&format!("0x{:064x}", 7)).unwrap();
+        let fields = json!({
+            "id": { "id": format!("0x{:064x}", 7) },
+            "vault_id": format!("0x{:064x}", 9),
+            "tranche": { "@variant": "Junior" },
+            "shares": "123000000000",
+            "cost_basis": "123000",
+            "locked_until_ms": "1700000000000",
+            "capital_generation": "2",
+        });
+        let p = parse_vault_position(pid, &fields).unwrap();
+        assert_eq!(p.position_id, pid);
+        assert_eq!(p.vault_id.to_hex(), format!("0x{:064x}", 9));
+        assert_eq!(p.tranche, 2);
+        assert_eq!(p.shares, 123_000_000_000);
+        assert_eq!(p.cost_basis, 123_000);
+        assert_eq!(p.locked_until_ms, 1_700_000_000_000);
+        assert_eq!(p.capital_generation, 2);
+    }
+
+    #[test]
+    fn parses_tranche_variants_and_bare_strings() {
+        assert_eq!(parse_tranche(&json!({ "@variant": "Untranched" })).unwrap(), 0);
+        assert_eq!(parse_tranche(&json!({ "@variant": "Senior" })).unwrap(), 1);
+        assert_eq!(parse_tranche(&json!("Junior")).unwrap(), 2);
+        assert!(parse_tranche(&json!({ "@variant": "Mezzanine" })).is_err());
     }
 }

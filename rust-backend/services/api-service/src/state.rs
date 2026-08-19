@@ -26,6 +26,11 @@ pub struct AppState {
     /// Names the direct-quoting adapter witness on trading-vault views;
     /// `None` on deployments without the adapter.
     pub exchange_adapter_package: Option<String>,
+    /// trading-vault (vault_v2) package id from the token-info snapshot
+    /// (SO-418): names the `{pkg}::vault_position::VaultPosition` type the
+    /// live position reads query by. `None` on deployments without the
+    /// trading-vault package — the position endpoints then 503.
+    pub trading_vault_package: Option<String>,
     /// options_core package id (SO-394): names the `option_coin` types the
     /// `/buckets/spec` endpoint derives. `None` before the any-strike
     /// redeploy — the endpoint then omits `option_coin_type`.
@@ -51,6 +56,7 @@ impl AppState {
         sui_graphql_url: String,
         price_charting_url: Option<String>,
         exchange_adapter_package: Option<String>,
+        trading_vault_package: Option<String>,
         options_package: Option<String>,
         analytics: Option<std::sync::Arc<crate::analytics::lake::Lake>>,
     ) -> Self {
@@ -61,6 +67,7 @@ impl AppState {
             sui_graphql_url,
             price_charting_url: price_charting_url.map(|u| u.trim_end_matches('/').to_string()),
             exchange_adapter_package,
+            trading_vault_package,
             options_package,
             analytics,
             oracle: None,

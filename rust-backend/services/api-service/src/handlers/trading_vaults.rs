@@ -4,22 +4,33 @@
 //!   - `GET /trading-vaults/:id` — one vault + its adapter positions (past
 //!     positions included, `active=false`)
 //!
-//! Event-derived analytics (SO-293):
+//! Event-derived analytics (SO-293, reshaped for trading-vault v2 in
+//! SO-418):
 //!
-//!   - `GET /trading-vaults/:id/pps-history`     — observed pps points from
-//!     TvDeposited / TvWithdrawFulfilled events, ascending by time
-//!   - `GET /trading-vaults/:id/stake/:address`  — one wallet's live stake
-//!     replayed from TvDeposited / TvWithdrawRequested events
+//!   - `GET /trading-vaults/:id/pps-history`     — per-tranche observed pps
+//!     points from TvDeposited / TvWithdrawFulfilled / TvCapitalSynced
+//!     events, ascending by time
 //!   - `GET /trading-vaults/:id/trades`          — curator spot trades from
 //!     TvTakerSwapExecuted events, newest first (SO-313)
 //!   - `GET /trading-vaults/:id/pending-requests` — outstanding withdraw
-//!     queue with per-request payout assets (SO-370)
+//!     queue with lane / position / payability fields (SO-370, SO-418)
+//!   - `GET /trading-vaults/:id/waterfall`       — the §3.4a decomposition
+//!     at the latest capital sync (SO-418)
+//!   - `GET /trading-vaults/:id/settlement`      — terminal settlement pool
+//!     status (SO-418)
+//!
+//! Position NFT reads (SO-418; replaces `stake/:address` — v2 stakes are
+//! transferable `VaultPosition` objects, so ownership is a live chain fact,
+//! not an event-derived one):
+//!
+//!   - `GET /trading-vaults/:id/positions/:address` — a wallet's live
+//!     positions (owned-object query by type, filtered to the vault)
+//!   - `GET /trading-vaults/positions/:positionId`  — one position by id,
+//!     any holder, with its current owner
 //!
 //! All reads are JIT GraphQL queries to the indexer, except the detail
-//! endpoint's `balances[]` — free balances are stated by no event, so they
-//! come from a live Sui object read (`sui_rpc::fetch_vault_balances`) that
-//! degrades to `balances_stale` on failure. Balance-precise NAV still isn't
-//! served here.
+//! endpoint's `balances[]` and the position reads — those are live Sui
+//! reads (`sui_rpc`). Balances degrade to `balances_stale` on failure.
 
 use std::sync::Arc;
 
@@ -52,8 +63,48 @@ const SHARE_OFFSET: u128 = 1_000_000;
 /// Cap on the per-vault event scans backing the analytics endpoints. The
 /// indexer serves the most recent events first, so a vault with more matching
 /// events than this silently loses its OLDEST history (earliest pps points /
-/// earliest stake flows), not the newest.
+/// earliest queue entries), not the newest.
 const EVENT_SCAN_CAP: usize = 5000;
+
+/// Basis-point denominator for the §3.4a waterfall / fee math.
+const BPS: u128 = 10_000;
+
+/// Wire-code labels (OFFCHAIN_BRIEF frozen codes). Unknown codes label as
+/// `unknown` rather than failing a whole response.
+fn tranche_label(code: u8) -> &'static str {
+    match code {
+        0 => "untranched",
+        1 => "senior",
+        2 => "junior",
+        _ => "unknown",
+    }
+}
+
+fn risk_state_label(code: u8) -> &'static str {
+    match code {
+        0 => "healthy",
+        1 => "coverage_breach",
+        2 => "impaired",
+        3 => "reset_pending",
+        _ => "unknown",
+    }
+}
+
+fn lane_label(code: u8) -> &'static str {
+    match code {
+        0 => "senior",
+        _ => "junior",
+    }
+}
+
+fn upside_label(code: u8) -> &'static str {
+    match code {
+        0 => "preferred_only",
+        1 => "capped_participating",
+        2 => "uncapped_participating",
+        _ => "unknown",
+    }
+}
 
 #[derive(Serialize)]
 pub struct TradingVaultDto {
@@ -93,6 +144,75 @@ pub struct TradingVaultDto {
     /// decimal string; SO-304). Null before the first appraisal.
     pub latest_nav_raw: Option<String>,
     pub nav_updated_at_ms: Option<i64>,
+    // ── trading-vault v2 capital structure (SO-418) ──
+    /// Null for untranched vaults.
+    pub capital_structure: Option<CapitalStructureDto>,
+    pub terms_version: i64,
+    /// 0x-hex spec hash; null when absent.
+    pub spec_hash: Option<String>,
+    /// healthy | coverage_breach | impaired | reset_pending.
+    pub risk_state: String,
+    pub risk_state_code: u8,
+    pub curator_commitment_breached: bool,
+    pub senior_shares_raw: String,
+    /// Untranched supply lives here (mirrors capital.move).
+    pub junior_shares_raw: String,
+    pub senior_claim_raw: String,
+    /// Waterfall NAV split from the latest TvCapitalSynced; null before
+    /// the first sync.
+    pub senior_nav_raw: Option<String>,
+    pub junior_nav_raw: Option<String>,
+    /// Per-tranche observed pps (PPS_SCALE-adjusted float + raw string).
+    pub senior_pps: Option<f64>,
+    pub senior_pps_raw: Option<String>,
+    pub junior_pps: Option<f64>,
+    pub junior_pps_raw: Option<String>,
+    /// junior_nav × 1e4 / nav from the latest sync; null before it.
+    pub junior_buffer_bps: Option<i64>,
+    pub impaired_since_ms: Option<i64>,
+    pub active_junior_generation: i64,
+    /// Open junior-reset proposal; null when none.
+    pub reset_proposal: Option<ResetProposalDto>,
+    /// Terminal settlement snapshot taken.
+    pub settled: bool,
+    pub lane_heads: LaneHeadsDto,
+}
+
+/// Immutable senior/junior terms (contract `capital_structure`).
+#[derive(Serialize)]
+pub struct CapitalStructureDto {
+    pub senior_hurdle_bps_annual: i64,
+    pub target_junior_bps: i64,
+    pub maintenance_junior_bps: i64,
+    /// preferred_only | capped_participating | uncapped_participating.
+    pub upside: String,
+    pub residual_participation_bps: i64,
+    pub total_return_cap_bps: i64,
+}
+
+/// Open junior generational reset proposal (disclosure terms).
+#[derive(Serialize)]
+pub struct ResetProposalDto {
+    pub old_generation: i64,
+    pub proposed_at_ms: i64,
+    pub executable_at_ms: i64,
+    pub recorded_nav_raw: String,
+    pub recorded_senior_claim_raw: String,
+    pub recorded_required_deposit_raw: String,
+}
+
+/// Per-lane FIFO cursors: tail = highest requested global_seq + 1, head =
+/// highest fulfilled/settled global_seq + 1.
+#[derive(Serialize)]
+pub struct LaneCursorDto {
+    pub head: i64,
+    pub tail: i64,
+}
+
+#[derive(Serialize)]
+pub struct LaneHeadsDto {
+    pub senior: LaneCursorDto,
+    pub junior: LaneCursorDto,
 }
 
 #[derive(Serialize)]
@@ -273,14 +393,19 @@ pub async fn get_trading_vault(
 // ── event-derived analytics (SO-293) ──────────────────────────────────────
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PpsPointDto {
-    /// Event time (ms since epoch), decimal string.
-    pub timestamp_ms: String,
-    /// 1e12-scaled accounting-asset-per-share, decimal string.
-    pub pps_e12: String,
-    /// `deposit` | `fulfillment` | `appraisal`.
+    /// Event time (ms since epoch).
+    pub timestamp_ms: i64,
+    /// untranched | senior | junior.
+    pub tranche: String,
+    /// PPS_SCALE-adjusted float + 1e12-scaled raw decimal string.
+    pub pps: f64,
+    pub pps_raw: String,
+    /// `deposit` | `withdraw` | `capital_sync`.
     pub source: String,
+    /// True on the first junior point of a new generation (junior PPS
+    /// re-bases to 1.0 at reset execution).
+    pub reset: bool,
 }
 
 #[derive(Serialize)]
@@ -288,25 +413,29 @@ pub struct PpsHistoryResponse {
     pub points: Vec<PpsPointDto>,
 }
 
-/// `GET /trading-vaults/:id/pps-history` — observed pps points, ascending by
-/// time. Each TvDeposited implies pps = value/shares (value, not amount —
-/// the deposit may be a non-accounting asset, SO-370); each
-/// TvWithdrawFulfilled implies pps = value/shares (zero-share / zero-value
-/// events carry no price and are skipped). Both are SHARE_OFFSET-rescaled.
-/// Each TvVaultAppraised implies
-/// pps = total_value/supply, where supply is replayed from the
-/// `total_shares` snapshots on the deposit/fulfillment events — without
-/// these the curve has one point per flow and a vault that only trades
-/// (the desk) never charts at all.
+/// `GET /trading-vaults/:id/pps-history` — per-tranche observed pps points,
+/// ascending by time (SO-418).
+///
+/// Each TvDeposited / TvWithdrawFulfilled implies its tranche's
+/// pps = value/shares (value, not amount — the deposit may be a
+/// non-accounting asset, SO-370; zero-share / zero-value events carry no
+/// price and are skipped), SHARE_OFFSET-rescaled. Each TvCapitalSynced
+/// implies each populated tranche's claim ratio
+/// `(nav_t + 1) / (S_t + OFFSET)` — this replaces the v1 TvVaultAppraised
+/// supply replay: every consumed appraisal now emits a capital sync, so a
+/// vault that only trades still charts.
 pub async fn get_pps_history(
     State(state): State<Arc<AppState>>,
     Path(vault_id): Path<String>,
 ) -> Result<Json<PpsHistoryResponse>, StatusCode> {
     let id = ObjectId::from_hex(&vault_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    // The vault's structure decides whether sync points label as
+    // `untranched` or as per-tranche series.
+    let vault = find_vault(&state, id).await?;
     let events = state
         .indexer
         .recent_events_with_payload(
-            &["TvDeposited", "TvWithdrawFulfilled", "TvVaultAppraised"],
+            &["TvDeposited", "TvWithdrawFulfilled", "TvCapitalSynced"],
             json!({ "vault_id": id.to_hex() }),
             EVENT_SCAN_CAP,
         )
@@ -316,52 +445,98 @@ pub async fn get_pps_history(
             StatusCode::BAD_GATEWAY
         })?;
     Ok(Json(PpsHistoryResponse {
-        points: pps_points(events),
+        points: pps_points(events, vault.structure_code),
     }))
 }
 
-fn pps_points(mut events: Vec<protocol_types::events::IndexedEvent>) -> Vec<PpsPointDto> {
-    // The scan serves newest-first; both the supply replay and the response
-    // contract need chain order.
+/// The tranche claim ratio as an e12 pps: `(nav + 1) × 1e12 × OFFSET /
+/// (shares + OFFSET)` — exactly the §3.3 pricing both mints and claims use,
+/// so sync points land on the same curve as flow points. None on overflow
+/// (degrade to a gap, never a wrong number).
+fn claim_ratio_e12(nav: u128, shares: u128) -> Option<u128> {
+    (nav.checked_add(1)?)
+        .checked_mul(PPS_E12)?
+        .checked_mul(SHARE_OFFSET)
+        .map(|n| n / (shares + SHARE_OFFSET))
+}
+
+fn pps_points(
+    mut events: Vec<protocol_types::events::IndexedEvent>,
+    structure_code: u8,
+) -> Vec<PpsPointDto> {
+    // The scan serves newest-first; the response contract needs chain order.
     events.sort_by_key(|e| e.sequence);
+    let untranched = structure_code == 0;
 
     let mut points = Vec::new();
-    let mut supply: u128 = 0;
+    // Junior generation watermark: a junior point under a HIGHER generation
+    // than the last junior point marks the re-base (`reset: true`).
+    let mut last_junior_gen: Option<u64> = None;
+    let mut push = |ts: i64, tranche: u8, pps_e12: u128, source: &str, generation: u64| {
+        let reset = tranche == 2 && last_junior_gen.is_some_and(|g| generation > g);
+        if tranche == 2 {
+            last_junior_gen = Some(generation);
+        }
+        points.push(PpsPointDto {
+            timestamp_ms: ts,
+            tranche: tranche_label(tranche).to_string(),
+            pps: pps_e12 as f64 / PPS_SCALE,
+            pps_raw: pps_e12.to_string(),
+            source: source.to_string(),
+            reset,
+        });
+    };
     for ev in &events {
-        let (pps_e12, source) = match &ev.event {
+        let ts = ev.timestamp_ms as i64;
+        match &ev.event {
             ChainEvent::TvDeposited(d) => {
-                supply = d.total_shares;
                 if d.shares == 0 {
                     continue;
                 }
-                (
-                    d.value as u128 * PPS_E12 * SHARE_OFFSET / d.shares,
-                    "deposit",
-                )
+                let Some(pps) = (d.value as u128)
+                    .checked_mul(PPS_E12 * SHARE_OFFSET)
+                    .map(|n| n / d.shares)
+                else {
+                    continue;
+                };
+                push(ts, d.tranche, pps, "deposit", d.capital_generation);
             }
             ChainEvent::TvWithdrawFulfilled(f) => {
-                supply = f.total_shares;
                 if f.shares == 0 || f.value == 0 {
                     continue;
                 }
-                (
-                    f.value as u128 * PPS_E12 * SHARE_OFFSET / f.shares,
-                    "fulfillment",
-                )
+                let Some(pps) = (f.value as u128)
+                    .checked_mul(PPS_E12 * SHARE_OFFSET)
+                    .map(|n| n / f.shares)
+                else {
+                    continue;
+                };
+                push(ts, f.tranche, pps, "withdraw", f.capital_generation);
             }
-            // An appraisal consumed by a deposit/fulfillment is emitted
-            // before that event's mint/burn, so the pre-event supply is the
-            // right divisor for its NAV.
-            ChainEvent::TvVaultAppraised(a) if supply != 0 => {
-                (a.total_value * PPS_E12 * SHARE_OFFSET / supply, "appraisal")
+            ChainEvent::TvCapitalSynced(c) => {
+                if untranched {
+                    // The single untranched book lives in the junior fields;
+                    // its NAV is the whole NAV.
+                    if c.junior_shares > 0 {
+                        if let Some(pps) = claim_ratio_e12(c.total_nav, c.junior_shares) {
+                            push(ts, 0, pps, "capital_sync", 0);
+                        }
+                    }
+                    continue;
+                }
+                if c.senior_shares > 0 {
+                    if let Some(pps) = claim_ratio_e12(c.senior_nav, c.senior_shares) {
+                        push(ts, 1, pps, "capital_sync", 0);
+                    }
+                }
+                if c.junior_shares > 0 {
+                    if let Some(pps) = claim_ratio_e12(c.junior_nav, c.junior_shares) {
+                        push(ts, 2, pps, "capital_sync", c.active_junior_generation);
+                    }
+                }
             }
             _ => continue,
-        };
-        points.push(PpsPointDto {
-            timestamp_ms: ev.timestamp_ms.to_string(),
-            pps_e12: pps_e12.to_string(),
-            source: source.to_string(),
-        });
+        }
     }
     points
 }
@@ -439,33 +614,50 @@ pub async fn get_trades(
     Ok(Json(TakerSwapsResponse { trades }))
 }
 
+// ── VaultPosition NFT reads (SO-418; replaces stake/:address) ─────────────
+
+/// One live `VaultPosition` NFT (contract shape).
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StakeResponse {
-    /// Live share balance, decimal string (u128).
-    pub shares: String,
-    /// Accounting-asset cost basis of the live shares, decimal string (u64).
-    pub cost_basis: String,
-    /// shares × latest observed pps / 1e12; null when the vault has no
-    /// observed pps yet.
-    pub estimated_value: Option<String>,
-    /// Lockup expiry from the wallet's most recent deposit; null if the
-    /// wallet never deposited.
-    pub locked_until_ms: Option<String>,
+pub struct VaultPositionDto {
+    pub position_id: String,
+    pub vault_id: String,
+    /// untranched | senior | junior.
+    pub tranche: String,
+    pub tranche_code: u8,
+    pub capital_generation: i64,
+    /// Junior position of a retired generation — permanently zero-value.
+    pub wiped: bool,
+    pub shares_raw: String,
+    pub cost_basis_raw: String,
+    pub locked_until_ms: i64,
+    /// shares × (nav_t + 1) / (S_t + OFFSET) at the latest capital sync;
+    /// null before the first sync. Wiped positions estimate 0.
+    pub estimated_value_raw: Option<String>,
+    /// max(value − basis, 0).
+    pub estimated_profit_raw: Option<String>,
+    /// profit × curator_fee_bps / 1e4 — the embedded fee liability an exit
+    /// would crystallize today.
+    pub estimated_fee_raw: Option<String>,
 }
 
-/// `GET /trading-vaults/:id/stake/:address` — one wallet's live stake,
-/// replayed from the vault's deposit / withdraw-request events. Curator
-/// cap-keyed stakes (`curator_cap != null`) are out of scope — address
-/// stakes only.
-pub async fn get_stake(
-    State(state): State<Arc<AppState>>,
-    Path((vault_id, address)): Path<(String, String)>,
-) -> Result<Json<StakeResponse>, StatusCode> {
-    let id = ObjectId::from_hex(&vault_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let addr = SuiAddress::from_hex(&address).map_err(|_| StatusCode::BAD_REQUEST)?;
-    // The indexer serves the full list only (a handful of vaults); pick ours.
-    let vault = state
+#[derive(Serialize)]
+pub struct VaultPositionsResponse {
+    pub positions: Vec<VaultPositionDto>,
+}
+
+#[derive(Serialize)]
+pub struct VaultPositionDetailResponse {
+    #[serde(flatten)]
+    pub position: VaultPositionDto,
+    /// Current owner address; null when the holder isn't a plain address
+    /// (shared / object-owned / kiosk'd).
+    pub owner: Option<String>,
+}
+
+/// The indexer serves the full vault list only (a handful of vaults); pick
+/// ours or 404.
+async fn find_vault(state: &AppState, id: ObjectId) -> Result<TradingVault, StatusCode> {
+    state
         .indexer
         .trading_vaults()
         .await
@@ -475,63 +667,152 @@ pub async fn get_stake(
         })?
         .into_iter()
         .find(|v| v.vault_id == id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let events = state
-        .indexer
-        .recent_events_with_payload(
-            &["TvDeposited", "TvWithdrawRequested"],
-            json!({ "vault_id": id.to_hex() }),
-            EVENT_SCAN_CAP,
-        )
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "indexer trading-vault events query failed");
-            StatusCode::BAD_GATEWAY
-        })?;
+        .ok_or(StatusCode::NOT_FOUND)
+}
 
-    let mut shares: u128 = 0;
-    let mut cost_basis: u64 = 0;
-    let mut locked_until_ms: Option<u64> = None;
-    for ev in &events {
-        match &ev.event {
-            ChainEvent::TvDeposited(d) if d.depositor == addr && d.curator_cap.is_none() => {
-                shares = shares.saturating_add(d.shares);
-                // `value`, not `amount`: the deposit may be a non-accounting
-                // asset (SO-370); basis is tracked in accounting units.
-                cost_basis = cost_basis.saturating_add(d.value);
-                locked_until_ms = Some(d.locked_until_ms);
-            }
-            ChainEvent::TvWithdrawRequested(w)
-                if w.recipient == addr && w.curator_cap.is_none() =>
-            {
-                shares = shares.saturating_sub(w.shares);
-                cost_basis = cost_basis.saturating_sub(w.basis);
-            }
-            _ => {}
-        }
+/// The `{pkg}::vault_position::VaultPosition` type the live reads query by;
+/// 503 when the deployment has no trading-vault package.
+fn position_type(state: &AppState) -> Result<String, StatusCode> {
+    let pkg = state.trading_vault_package.as_deref().ok_or_else(|| {
+        tracing::warn!("position read refused: no trading_vault package in the token-info snapshot");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
+    Ok(format!("{pkg}::vault_position::VaultPosition"))
+}
+
+/// Build the contract DTO for one live position, enriched with estimates
+/// from the vault's latest tranche ratio.
+fn vault_position_dto(v: &TradingVault, p: &sui_rpc::VaultPositionLive) -> VaultPositionDto {
+    let wiped = p.tranche == 2 && p.capital_generation < v.active_junior_generation;
+    let (value, profit, fee) = if wiped {
+        // A wiped generation is permanently zero-value (§8.5).
+        (Some(0), Some(0), Some(0))
+    } else {
+        // Senior prices off the senior book; junior AND untranched off the
+        // junior fields (the untranched book lives there, and the waterfall
+        // gives untranched vaults junior_nav == NAV).
+        let (nav_t, supply, observed_pps) = match p.tranche {
+            1 => (v.senior_nav, v.senior_shares, v.latest_senior_pps_e12),
+            2 => (v.junior_nav, v.junior_shares, v.latest_junior_pps_e12),
+            _ => (v.junior_nav, v.junior_shares, v.latest_pps_e12),
+        };
+        position_estimates(
+            nav_t,
+            supply,
+            observed_pps,
+            v.curator_fee_bps,
+            p.shares,
+            p.cost_basis,
+        )
+    };
+    VaultPositionDto {
+        position_id: p.position_id.to_hex(),
+        vault_id: p.vault_id.to_hex(),
+        tranche: tranche_label(p.tranche).to_string(),
+        tranche_code: p.tranche,
+        capital_generation: p.capital_generation as i64,
+        wiped,
+        shares_raw: p.shares.to_string(),
+        cost_basis_raw: p.cost_basis.to_string(),
+        locked_until_ms: p.locked_until_ms as i64,
+        estimated_value_raw: value.map(|x: u128| x.to_string()),
+        estimated_profit_raw: profit.map(|x: u128| x.to_string()),
+        estimated_fee_raw: fee.map(|x: u128| x.to_string()),
     }
-    // shares × pps can't realistically overflow u128 (shares ≲ 1e26,
-    // pps ≲ 1e15), but degrade to null rather than a wrong number if it does.
-    // pps is SHARE_OFFSET-rescaled (shares carry the 1e6 virtual offset), so
-    // the divisor carries it too.
-    let estimated_value = vault
-        .latest_pps_e12
-        .and_then(|pps| shares.checked_mul(pps))
-        .map(|v| (v / (PPS_E12 * SHARE_OFFSET)).to_string());
-    Ok(Json(StakeResponse {
-        shares: shares.to_string(),
-        cost_basis: cost_basis.to_string(),
-        estimated_value,
-        locked_until_ms: locked_until_ms.map(|v| v.to_string()),
+}
+
+/// Estimate (value, profit, fee) for a live position from its tranche's
+/// latest ratio: `value = shares × (nav_t + 1) / (S_t + OFFSET)` where
+/// `nav_t`/`S_t` come from the latest TvCapitalSynced (indexer). Before the
+/// first sync, falls back to the tranche's observed pps; all-null when
+/// neither exists (or on overflow — degrade, never a wrong number).
+fn position_estimates(
+    nav_t: Option<u128>,
+    supply: u128,
+    observed_pps: Option<u128>,
+    curator_fee_bps: u64,
+    shares: u128,
+    basis: u64,
+) -> (Option<u128>, Option<u128>, Option<u128>) {
+    let value = match nav_t {
+        Some(nav) => shares
+            .checked_mul(nav.saturating_add(1))
+            .map(|n| n / (supply + SHARE_OFFSET)),
+        None => observed_pps
+            .and_then(|pps| shares.checked_mul(pps))
+            .map(|n| n / (PPS_E12 * SHARE_OFFSET)),
+    };
+    let Some(value) = value else {
+        return (None, None, None);
+    };
+    let profit = value.saturating_sub(basis as u128);
+    let fee = profit.saturating_mul(curator_fee_bps as u128) / BPS;
+    (Some(value), Some(profit), Some(fee))
+}
+
+/// `GET /trading-vaults/:id/positions/:address` — the wallet's live
+/// `VaultPosition` NFTs in this vault, straight off chain (transfers emit
+/// no events, so ownership can't be indexed).
+pub async fn get_wallet_positions(
+    State(state): State<Arc<AppState>>,
+    Path((vault_id, address)): Path<(String, String)>,
+) -> Result<Json<VaultPositionsResponse>, StatusCode> {
+    let id = ObjectId::from_hex(&vault_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let addr = SuiAddress::from_hex(&address).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let ty = position_type(&state)?;
+    let vault = find_vault(&state, id).await?;
+    let owned =
+        sui_rpc::fetch_owned_vault_positions(&state.http, &state.sui_graphql_url, &addr, &ty)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, wallet = %address, "owned vault-positions read failed");
+                StatusCode::BAD_GATEWAY
+            })?;
+    Ok(Json(VaultPositionsResponse {
+        positions: owned
+            .iter()
+            .filter(|p| p.vault_id == id)
+            .map(|p| vault_position_dto(&vault, p))
+            .collect(),
+    }))
+}
+
+/// `GET /trading-vaults/positions/:positionId` — one position by id, for
+/// ANY holder (positions are transferable; the detail page must render one
+/// you just bought). 404 when the object doesn't exist or isn't a
+/// `VaultPosition`.
+pub async fn get_position(
+    State(state): State<Arc<AppState>>,
+    Path(position_id): Path<String>,
+) -> Result<Json<VaultPositionDetailResponse>, StatusCode> {
+    let pid = ObjectId::from_hex(&position_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let ty = position_type(&state)?;
+    let (position, owner) =
+        sui_rpc::fetch_vault_position(&state.http, &state.sui_graphql_url, &pid, &ty)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, position = %position_id, "vault-position read failed");
+                StatusCode::BAD_GATEWAY
+            })?
+            .ok_or(StatusCode::NOT_FOUND)?;
+    let vault = find_vault(&state, position.vault_id).await?;
+    Ok(Json(VaultPositionDetailResponse {
+        position: vault_position_dto(&vault, &position),
+        owner,
     }))
 }
 
 /// One not-yet-fulfilled withdraw request, replayed from the vault's
-/// request / amend / fulfil events (SO-370).
+/// request / amend / fulfil / settle events (SO-370, SO-418).
+///
+/// Serialization note: the pre-v2 fields keep their camelCase wire names;
+/// the v2 additions are pinned snake_case by the WS-3 DTO contract, hence
+/// the explicit renames.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRequestDto {
-    /// The request's queue sequence number, decimal string.
+    /// The request's queue sequence number, decimal string (the vault-wide
+    /// global sequence; `global_seq` aliases it per the v2 contract).
     pub seq: String,
     pub recipient: String,
     /// Escrowed shares, decimal string (u128).
@@ -544,6 +825,26 @@ pub struct PendingRequestDto {
     /// Catalog symbol, falling back to the coin type when unknown.
     pub payout_symbol: String,
     pub requested_at_ms: String,
+    // ── v2 additions (SO-418), snake_case per the WS-3 contract ──
+    #[serde(rename = "global_seq")]
+    pub global_seq: String,
+    /// senior | junior lane label.
+    pub lane: String,
+    #[serde(rename = "lane_code")]
+    pub lane_code: u8,
+    /// The consumed `VaultPosition`.
+    #[serde(rename = "position_id")]
+    pub position_id: String,
+    /// untranched | senior | junior.
+    pub tranche: String,
+    #[serde(rename = "tranche_code")]
+    pub tranche_code: u8,
+    #[serde(rename = "capital_generation")]
+    pub capital_generation: i64,
+    /// Whether fulfillment could pay this request right now.
+    pub payable: bool,
+    #[serde(rename = "blocked_reason")]
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -552,15 +853,18 @@ pub struct PendingRequestsResponse {
 }
 
 /// `GET /trading-vaults/:id/pending-requests` — the vault's outstanding
-/// withdraw queue with each request's payout asset, ascending by seq.
-/// Replayed from the event log like `/pps-history`: requests have no
-/// materialised view, and a pending request's payout asset can change via
-/// TvPayoutAssetAmended.
+/// withdraw queue with each request's payout asset and lane/payability
+/// state, ascending by global_seq. Replayed from the event log like
+/// `/pps-history`: requests have no materialised view, a pending request's
+/// payout asset can change via TvPayoutAssetAmended, and after settlement
+/// queued requests drain via TvSettlementRedeemed instead of fulfillment.
 pub async fn get_pending_requests(
     State(state): State<Arc<AppState>>,
     Path(vault_id): Path<String>,
 ) -> Result<Json<PendingRequestsResponse>, StatusCode> {
     let id = ObjectId::from_hex(&vault_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    // Payability needs the vault's risk state + active junior generation.
+    let vault = find_vault(&state, id).await?;
     let events = state
         .indexer
         .recent_events_with_payload(
@@ -568,6 +872,7 @@ pub async fn get_pending_requests(
                 "TvWithdrawRequested",
                 "TvPayoutAssetAmended",
                 "TvWithdrawFulfilled",
+                "TvSettlementRedeemed",
             ],
             json!({ "vault_id": id.to_hex() }),
             EVENT_SCAN_CAP,
@@ -582,8 +887,10 @@ pub async fn get_pending_requests(
         .map(|r| {
             let coin_type = r.payout_asset.to_canonical();
             let meta = state.catalog.lookup(r.payout_asset.as_str());
+            let (payable, blocked_reason) =
+                request_payability(vault.risk_state, vault.active_junior_generation, &r);
             PendingRequestDto {
-                seq: r.seq.to_string(),
+                seq: r.global_seq.to_string(),
                 recipient: r.recipient.to_hex(),
                 shares_raw: r.shares.to_string(),
                 basis_raw: r.basis.to_string(),
@@ -592,6 +899,15 @@ pub async fn get_pending_requests(
                     .unwrap_or_else(|| coin_type.clone()),
                 payout_coin_type: coin_type,
                 requested_at_ms: r.requested_at_ms.to_string(),
+                global_seq: r.global_seq.to_string(),
+                lane: lane_label(r.lane).to_string(),
+                lane_code: r.lane,
+                position_id: r.position_id.to_hex(),
+                tranche: tranche_label(r.tranche).to_string(),
+                tranche_code: r.tranche,
+                capital_generation: r.capital_generation as i64,
+                payable,
+                blocked_reason: blocked_reason.map(str::to_string),
             }
         })
         .collect();
@@ -599,17 +915,41 @@ pub async fn get_pending_requests(
 }
 
 struct PendingRequest {
-    seq: u64,
+    global_seq: u64,
+    lane: u8,
+    position_id: ObjectId,
     recipient: SuiAddress,
+    tranche: u8,
+    capital_generation: u64,
     shares: u128,
     basis: u64,
     payout_asset: protocol_types::asset::AssetType,
     requested_at_ms: u64,
 }
 
+/// Whether fulfillment could pay this request right now (§7 action
+/// matrix): a wiped-generation junior request settles at zero
+/// (`wiped_generation`), and the junior lane is blocked while the vault is
+/// risk-state blocked (`junior_lane_blocked`). The commitment-breach flag
+/// does NOT block the junior lane (spec §7).
+fn request_payability(
+    risk_state: u8,
+    active_junior_generation: u64,
+    r: &PendingRequest,
+) -> (bool, Option<&'static str>) {
+    if r.tranche == 2 && r.capital_generation < active_junior_generation {
+        return (false, Some("wiped_generation"));
+    }
+    if r.lane == 1 && risk_state != 0 {
+        return (false, Some("junior_lane_blocked"));
+    }
+    (true, None)
+}
+
 /// Replay the withdraw queue: a request enters at TvWithdrawRequested, its
 /// payout asset follows the latest TvPayoutAssetAmended, and it leaves at
-/// TvWithdrawFulfilled. Returns the survivors, ascending by seq.
+/// TvWithdrawFulfilled — or, post-settlement, at TvSettlementRedeemed with
+/// `from_queue`. Returns the survivors, ascending by global_seq.
 fn pending_requests(mut events: Vec<protocol_types::events::IndexedEvent>) -> Vec<PendingRequest> {
     // The scan serves newest-first; the replay needs chain order.
     events.sort_by_key(|e| e.sequence);
@@ -619,10 +959,14 @@ fn pending_requests(mut events: Vec<protocol_types::events::IndexedEvent>) -> Ve
         match ev.event {
             ChainEvent::TvWithdrawRequested(w) => {
                 open.insert(
-                    w.seq,
+                    w.global_seq,
                     PendingRequest {
-                        seq: w.seq,
+                        global_seq: w.global_seq,
+                        lane: w.lane,
+                        position_id: w.position_id,
                         recipient: w.recipient,
+                        tranche: w.tranche,
+                        capital_generation: w.capital_generation,
                         shares: w.shares,
                         basis: w.basis,
                         payout_asset: w.payout_asset,
@@ -631,17 +975,205 @@ fn pending_requests(mut events: Vec<protocol_types::events::IndexedEvent>) -> Ve
                 );
             }
             ChainEvent::TvPayoutAssetAmended(a) => {
+                // Rust keeps the v1 `seq` field name; semantically this is
+                // the global sequence (WS-0 flag).
                 if let Some(r) = open.get_mut(&a.seq) {
                     r.payout_asset = a.payout_asset;
                 }
             }
             ChainEvent::TvWithdrawFulfilled(f) => {
-                open.remove(&f.seq);
+                open.remove(&f.global_seq);
+            }
+            ChainEvent::TvSettlementRedeemed(s) if s.from_queue => {
+                open.remove(&s.global_seq);
             }
             _ => {}
         }
     }
     open.into_values().collect()
+}
+
+// ── §3.4a waterfall + terminal settlement (SO-418) ────────────────────────
+
+#[derive(Serialize)]
+pub struct WaterfallResponse {
+    pub nav_raw: String,
+    pub senior_claim_raw: String,
+    /// Senior principal without hurdle (the CappedParticipating cap
+    /// reference); null for untranched vaults.
+    pub senior_principal_basis_raw: Option<String>,
+    /// Server-derived §3.4a decomposition (u128 floor math).
+    pub preferred_raw: String,
+    pub participation_raw: String,
+    /// The on-chain waterfall split from the latest TvCapitalSynced.
+    pub senior_nav_raw: String,
+    pub junior_nav_raw: String,
+    /// junior_nav × 1e4 / nav, floor; null at zero NAV.
+    pub junior_buffer_bps: Option<i64>,
+    pub target_junior_bps: i64,
+    pub maintenance_junior_bps: i64,
+    pub upside: String,
+    pub residual_participation_bps: i64,
+    pub total_return_cap_bps: i64,
+    pub risk_state: String,
+    pub risk_state_code: u8,
+    pub senior_shares_raw: String,
+    pub junior_shares_raw: String,
+    pub updated_at_ms: i64,
+}
+
+/// The §3.4a decomposition: `(preferred, participation)` from
+/// `(NAV, C, P)` and the upside mode. Exact spec formula, u128
+/// intermediates, floor division.
+fn derive_waterfall(
+    nav: u128,
+    senior_claim: u128,
+    principal_basis: u128,
+    upside_code: u8,
+    participation_bps: u64,
+    cap_bps: u64,
+) -> (u128, u128) {
+    let preferred = nav.min(senior_claim);
+    let residual = nav - preferred;
+    let participation = match upside_code {
+        // PreferredOnly.
+        0 => 0,
+        // CappedParticipating: cap binds on total senior return relative
+        // to principal basis.
+        1 => {
+            let share = residual.saturating_mul(participation_bps as u128) / BPS;
+            let cap = (principal_basis.saturating_mul(cap_bps as u128) / BPS)
+                .saturating_sub(preferred);
+            share.min(cap)
+        }
+        // UncappedParticipating.
+        _ => residual.saturating_mul(participation_bps as u128) / BPS,
+    };
+    (preferred, participation)
+}
+
+/// `GET /trading-vaults/:id/waterfall` — the §3.4a decomposition at the
+/// latest capital sync. 404 until the first TvCapitalSynced (nothing to
+/// decompose before an appraisal-driven sync).
+pub async fn get_waterfall(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<WaterfallResponse>, StatusCode> {
+    let id = ObjectId::from_hex(&vault_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let vault = find_vault(&state, id).await?;
+    // The newest TvCapitalSynced IS the latest waterfall run; its timestamp
+    // dates the response.
+    let events = state
+        .indexer
+        .recent_events_with_payload(
+            &["TvCapitalSynced"],
+            json!({ "vault_id": id.to_hex() }),
+            1,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer capital-sync events query failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+    let Some(latest) = events.last() else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    let ChainEvent::TvCapitalSynced(sync) = &latest.event else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    // P comes from the vault row (the sync event doesn't carry it); it can
+    // run slightly ahead of the sync, which only tightens the derived cap.
+    let (preferred, participation) = derive_waterfall(
+        sync.total_nav,
+        sync.senior_claim,
+        vault.senior_principal_basis,
+        vault.upside_code,
+        vault.residual_participation_bps,
+        vault.total_return_cap_bps,
+    );
+    Ok(Json(WaterfallResponse {
+        nav_raw: sync.total_nav.to_string(),
+        senior_claim_raw: sync.senior_claim.to_string(),
+        senior_principal_basis_raw: (vault.structure_code != 0)
+            .then(|| vault.senior_principal_basis.to_string()),
+        preferred_raw: preferred.to_string(),
+        participation_raw: participation.to_string(),
+        senior_nav_raw: sync.senior_nav.to_string(),
+        junior_nav_raw: sync.junior_nav.to_string(),
+        junior_buffer_bps: junior_buffer_bps(Some(sync.junior_nav), Some(sync.total_nav)),
+        target_junior_bps: vault.target_junior_bps as i64,
+        maintenance_junior_bps: vault.maintenance_junior_bps as i64,
+        upside: upside_label(vault.upside_code).to_string(),
+        residual_participation_bps: vault.residual_participation_bps as i64,
+        total_return_cap_bps: vault.total_return_cap_bps as i64,
+        risk_state: risk_state_label(sync.risk_state).to_string(),
+        risk_state_code: sync.risk_state,
+        senior_shares_raw: sync.senior_shares.to_string(),
+        junior_shares_raw: sync.junior_shares.to_string(),
+        updated_at_ms: latest.timestamp_ms as i64,
+    }))
+}
+
+/// `GET /trading-vaults/:id/settlement` — the terminal settlement pool.
+/// `{"settled": false}` (all other fields omitted) before the snapshot.
+#[derive(Serialize)]
+pub struct SettlementResponse {
+    pub settled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_nav_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub senior_pool_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub senior_supply_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub junior_pool_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub junior_supply_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_junior_generation: Option<i64>,
+    /// Σ entitlement drawn from the pools (TvSettlementRedeemed sum).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redeemed_raw: Option<String>,
+    /// senior_pool + junior_pool − redeemed: perpetual claims outstanding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outstanding_raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_at_ms: Option<i64>,
+}
+
+pub async fn get_settlement(
+    State(state): State<Arc<AppState>>,
+    Path(vault_id): Path<String>,
+) -> Result<Json<SettlementResponse>, StatusCode> {
+    let id = ObjectId::from_hex(&vault_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let v = find_vault(&state, id).await?;
+    if !v.settled {
+        return Ok(Json(SettlementResponse {
+            settled: false,
+            final_nav_raw: None,
+            senior_pool_raw: None,
+            senior_supply_raw: None,
+            junior_pool_raw: None,
+            junior_supply_raw: None,
+            active_junior_generation: None,
+            redeemed_raw: None,
+            outstanding_raw: None,
+            snapshot_at_ms: None,
+        }));
+    }
+    let pools = v.senior_pool.unwrap_or(0) as u128 + v.junior_pool.unwrap_or(0) as u128;
+    Ok(Json(SettlementResponse {
+        settled: true,
+        final_nav_raw: v.settlement_final_nav.map(|n| n.to_string()),
+        senior_pool_raw: v.senior_pool.map(|n| n.to_string()),
+        senior_supply_raw: v.senior_supply.map(|n| n.to_string()),
+        junior_pool_raw: v.junior_pool.map(|n| n.to_string()),
+        junior_supply_raw: v.junior_supply.map(|n| n.to_string()),
+        active_junior_generation: Some(v.active_junior_generation as i64),
+        redeemed_raw: Some(v.settlement_redeemed.to_string()),
+        outstanding_raw: Some(pools.saturating_sub(v.settlement_redeemed).to_string()),
+        snapshot_at_ms: v.settlement_snapshot_at_ms.map(|t| t as i64),
+    }))
 }
 
 /// Replay the quote-adapter set for one witness: the latest add/remove wins.
@@ -697,18 +1229,85 @@ fn trading_vault_dto(state: &AppState, v: &TradingVault) -> TradingVaultDto {
         external_equity_updated_at_ms: v.external_equity_updated_at_ms.map(|t| t.to_string()),
         latest_nav_raw: v.latest_nav.map(|n| n.to_string()),
         nav_updated_at_ms: v.nav_updated_at_ms.map(|t| t as i64),
+        capital_structure: (v.structure_code != 0).then(|| CapitalStructureDto {
+            senior_hurdle_bps_annual: v.senior_hurdle_bps_annual as i64,
+            target_junior_bps: v.target_junior_bps as i64,
+            maintenance_junior_bps: v.maintenance_junior_bps as i64,
+            upside: upside_label(v.upside_code).to_string(),
+            residual_participation_bps: v.residual_participation_bps as i64,
+            total_return_cap_bps: v.total_return_cap_bps as i64,
+        }),
+        terms_version: v.terms_version as i64,
+        spec_hash: v.spec_hash.clone(),
+        risk_state: risk_state_label(v.risk_state).to_string(),
+        risk_state_code: v.risk_state,
+        curator_commitment_breached: v.curator_commitment_breached,
+        senior_shares_raw: v.senior_shares.to_string(),
+        junior_shares_raw: v.junior_shares.to_string(),
+        senior_claim_raw: v.senior_claim.to_string(),
+        senior_nav_raw: v.senior_nav.map(|n| n.to_string()),
+        junior_nav_raw: v.junior_nav.map(|n| n.to_string()),
+        senior_pps: v.latest_senior_pps_e12.map(|p| p as f64 / PPS_SCALE),
+        senior_pps_raw: v.latest_senior_pps_e12.map(|p| p.to_string()),
+        junior_pps: v.latest_junior_pps_e12.map(|p| p as f64 / PPS_SCALE),
+        junior_pps_raw: v.latest_junior_pps_e12.map(|p| p.to_string()),
+        junior_buffer_bps: junior_buffer_bps(v.junior_nav, v.latest_nav),
+        impaired_since_ms: v.impaired_since_ms.map(|t| t as i64),
+        active_junior_generation: v.active_junior_generation as i64,
+        reset_proposal: reset_proposal_dto(v),
+        settled: v.settled,
+        lane_heads: LaneHeadsDto {
+            senior: LaneCursorDto {
+                head: v.senior_lane_head as i64,
+                tail: v.senior_lane_tail as i64,
+            },
+            junior: LaneCursorDto {
+                head: v.junior_lane_head as i64,
+                tail: v.junior_lane_tail as i64,
+            },
+        },
     }
+}
+
+/// `junior_nav × 1e4 / nav`, floor; null before the first sync or at
+/// zero NAV.
+fn junior_buffer_bps(junior_nav: Option<u128>, nav: Option<u128>) -> Option<i64> {
+    let junior = junior_nav?;
+    let nav = nav?;
+    if nav == 0 {
+        return None;
+    }
+    Some((junior.saturating_mul(BPS) / nav) as i64)
+}
+
+/// The reset proposal is stored across six nullable columns; a proposal
+/// exists iff they're all set (the indexer writes them atomically).
+fn reset_proposal_dto(v: &TradingVault) -> Option<ResetProposalDto> {
+    Some(ResetProposalDto {
+        old_generation: v.reset_old_generation? as i64,
+        proposed_at_ms: v.reset_proposed_at_ms? as i64,
+        executable_at_ms: v.reset_executable_at_ms? as i64,
+        recorded_nav_raw: v.reset_recorded_nav?.to_string(),
+        recorded_senior_claim_raw: v.reset_recorded_senior_claim?.to_string(),
+        recorded_required_deposit_raw: v.reset_recorded_required_deposit?.to_string(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol_types::asset::AssetType;
     use protocol_types::events::{
-        IndexedEvent, TvDeposited, TvVaultAppraised, TvWithdrawFulfilled,
+        IndexedEvent, TvCapitalSynced, TvDeposited, TvSettlementRedeemed, TvWithdrawFulfilled,
+        TvWithdrawRequested,
     };
 
     fn oid(n: u8) -> ObjectId {
         ObjectId::from_hex(&format!("0x{:064x}", n)).unwrap()
+    }
+
+    fn addr(n: u8) -> SuiAddress {
+        SuiAddress::from_hex(&format!("0x{:064x}", n)).unwrap()
     }
 
     fn ev(sequence: u64, event: ChainEvent) -> IndexedEvent {
@@ -719,104 +1318,171 @@ mod tests {
         }
     }
 
-    /// Newest-first input (the scan's order) must come back as an ascending
-    /// curve, with appraisals priced against the replayed share supply.
-    /// Shares carry the Move-side SHARE_OFFSET (×1e6): a genesis deposit of
-    /// V accounting units mints V×1e6 shares, and pps still reads 1e12.
-    #[test]
-    fn pps_points_replays_supply_across_event_kinds() {
-        let vault_id = oid(1);
-        let depositor = SuiAddress::from_hex(&format!("0x{:064x}", 2)).unwrap();
-        let tusdc = protocol_types::asset::AssetType::new("9b::tusdc::TUSDC");
-        let deposit = ChainEvent::TvDeposited(TvDeposited {
+    fn deposit(vault_id: ObjectId, tranche: u8, generation: u64, value: u64) -> ChainEvent {
+        ChainEvent::TvDeposited(TvDeposited {
             vault_id,
-            depositor,
-            curator_cap: None,
-            asset: tusdc.clone(),
-            amount: 1_000_000,
-            value: 1_000_000,
-            shares: 1_000_000 * SHARE_OFFSET,
-            total_shares: 1_000_000 * SHARE_OFFSET,
+            depositor: addr(2),
+            commitment_position: None,
+            position_id: oid(20),
+            tranche,
+            capital_generation: generation,
+            asset: AssetType::new("9b::tusdc::TUSDC"),
+            amount: value,
+            value,
+            shares: value as u128 * SHARE_OFFSET,
+            tranche_shares: value as u128 * SHARE_OFFSET,
             locked_until_ms: 0,
-        });
-        // NAV grew 2% with no flows: pps only observable via the appraisal.
-        let appraised = ChainEvent::TvVaultAppraised(TvVaultAppraised {
-            vault_id,
-            total_value: 1_020_000,
-            position_total: 0,
-        });
-        let fulfilled = ChainEvent::TvWithdrawFulfilled(TvWithdrawFulfilled {
-            vault_id,
-            seq: 0,
-            recipient: depositor,
-            shares: 500_000 * SHARE_OFFSET,
-            value: 510_000,
-            basis: 500_000,
-            profit: 10_000,
-            gross_fee: 0,
-            protocol_cut: 0,
-            curator_net: 0,
-            curator_shares_minted: 0,
-            payout: 510_000,
-            payout_asset: tusdc,
-            payout_units: 510_000,
-            price: PPS_E12,
-            total_shares: 500_000 * SHARE_OFFSET,
-        });
-        // Pre-supply appraisal (sequence 0) carries no price and is dropped.
-        let orphan = ChainEvent::TvVaultAppraised(TvVaultAppraised {
-            vault_id,
-            total_value: 999,
-            position_total: 0,
-        });
+        })
+    }
 
-        let newest_first = vec![
-            ev(3, fulfilled),
-            ev(2, appraised),
-            ev(1, deposit),
-            ev(0, orphan),
-        ];
-        let points = pps_points(newest_first);
+    fn sync(
+        vault_id: ObjectId,
+        total_nav: u128,
+        senior_nav: u128,
+        junior_nav: u128,
+        senior_shares: u128,
+        junior_shares: u128,
+        generation: u64,
+    ) -> ChainEvent {
+        ChainEvent::TvCapitalSynced(TvCapitalSynced {
+            vault_id,
+            total_nav,
+            senior_nav,
+            junior_nav,
+            senior_claim: senior_nav,
+            senior_shares,
+            junior_shares,
+            risk_state: 0,
+            active_junior_generation: generation,
+            curator_commitment_breached: false,
+        })
+    }
 
-        let got: Vec<(&str, &str)> = points
+    /// Newest-first input (the scan's order) must come back as an ascending
+    /// per-tranche curve: flow points price at value/shares, sync points at
+    /// the tranche claim ratio, and a generation bump marks the first junior
+    /// point of the new generation as `reset`.
+    #[test]
+    fn pps_points_labels_tranches_and_marks_resets() {
+        let vault_id = oid(1);
+        // Genesis junior deposit of 1_000_000 → 1e12 observed.
+        let d_junior = deposit(vault_id, 2, 0, 1_000_000);
+        let d_senior = deposit(vault_id, 1, 0, 500_000);
+        // Sync: senior flat, junior +2%.
+        let s1 = sync(
+            vault_id,
+            1_520_000,
+            500_000,
+            1_020_000,
+            500_000 * SHARE_OFFSET as u128,
+            1_000_000 * SHARE_OFFSET as u128,
+            0,
+        );
+        // Post-reset sync: junior generation bumped, re-based to ~1.0.
+        let s2 = sync(
+            vault_id,
+            700_000,
+            500_000,
+            200_000,
+            500_000 * SHARE_OFFSET as u128,
+            200_000 * SHARE_OFFSET as u128,
+            1,
+        );
+
+        let newest_first = vec![ev(3, s2), ev(2, s1), ev(1, d_senior), ev(0, d_junior)];
+        let points = pps_points(newest_first, 1);
+
+        let got: Vec<(&str, &str, &str, bool)> = points
             .iter()
-            .map(|p| (p.source.as_str(), p.pps_e12.as_str()))
+            .map(|p| {
+                (
+                    p.tranche.as_str(),
+                    p.source.as_str(),
+                    p.pps_raw.as_str(),
+                    p.reset,
+                )
+            })
             .collect();
         assert_eq!(
             got,
             vec![
-                ("deposit", "1000000000000"),
-                ("appraisal", "1020000000000"),
-                ("fulfillment", "1020000000000"),
+                ("junior", "deposit", "1000000000000", false),
+                ("senior", "deposit", "1000000000000", false),
+                // Claim ratio (nav+1)/(S+O): exactly 1e12 when nav = S/O
+                // (the +1/+O virtual offsets cancel), floor-rounded on the
+                // +2% junior mark.
+                ("senior", "capital_sync", "1000000000000", false),
+                ("junior", "capital_sync", "1019999980000", false),
+                ("senior", "capital_sync", "1000000000000", false),
+                ("junior", "capital_sync", "1000000000000", true),
             ],
         );
-        let times: Vec<&str> = points.iter().map(|p| p.timestamp_ms.as_str()).collect();
-        assert_eq!(times, vec!["1001", "1002", "1003"]);
+        let times: Vec<i64> = points.iter().map(|p| p.timestamp_ms).collect();
+        assert_eq!(times, vec![1_000, 1_001, 1_002, 1_002, 1_003, 1_003]);
+    }
+
+    /// An untranched vault (structure 0) labels its single series
+    /// `untranched`, pricing sync points off total NAV over the junior-held
+    /// supply.
+    #[test]
+    fn pps_points_labels_untranched_series() {
+        let vault_id = oid(1);
+        let d = deposit(vault_id, 0, 0, 1_000_000);
+        let s = sync(
+            vault_id,
+            1_020_000,
+            0,
+            0, // tranched split fields unused by the untranched path
+            0,
+            1_000_000 * SHARE_OFFSET as u128,
+            0,
+        );
+        let points = pps_points(vec![ev(1, s), ev(0, d)], 0);
+        let got: Vec<(&str, &str)> = points
+            .iter()
+            .map(|p| (p.tranche.as_str(), p.source.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("untranched", "deposit"), ("untranched", "capital_sync")],
+        );
+        assert_eq!(points[1].pps_raw, "1019999980000");
+        assert!(!points.iter().any(|p| p.reset));
+    }
+
+    fn request(
+        vault_id: ObjectId,
+        global_seq: u64,
+        lane: u8,
+        tranche: u8,
+        generation: u64,
+        at: u64,
+    ) -> ChainEvent {
+        ChainEvent::TvWithdrawRequested(TvWithdrawRequested {
+            vault_id,
+            global_seq,
+            lane,
+            position_id: oid(30),
+            recipient: addr(2),
+            tranche,
+            capital_generation: generation,
+            shares: 100 * SHARE_OFFSET,
+            basis: 100,
+            payout_asset: AssetType::new("9b::tusdc::TUSDC"),
+            requested_at_ms: at,
+        })
     }
 
     /// The queue replay keeps unfulfilled requests, applies the latest
-    /// payout-asset amendment, and drops fulfilled seqs (SO-370).
+    /// payout-asset amendment, and drops both fulfilled and
+    /// settlement-redeemed global_seqs (SO-370, SO-418).
     #[test]
     fn pending_requests_replays_the_withdraw_queue() {
-        use protocol_types::asset::AssetType;
-        use protocol_types::events::{TvPayoutAssetAmended, TvWithdrawRequested};
+        use protocol_types::events::TvPayoutAssetAmended;
 
         let vault_id = oid(1);
-        let recipient = SuiAddress::from_hex(&format!("0x{:064x}", 2)).unwrap();
         let tusdc = AssetType::new("9b::tusdc::TUSDC");
         let tbtc = AssetType::new("9b::tbtc::TBTC");
-        let request = |seq: u64, at: u64| {
-            ChainEvent::TvWithdrawRequested(TvWithdrawRequested {
-                vault_id,
-                seq,
-                recipient,
-                curator_cap: None,
-                shares: 100 * SHARE_OFFSET,
-                basis: 100,
-                payout_asset: tusdc.clone(),
-                requested_at_ms: at,
-            })
-        };
         let amend = ChainEvent::TvPayoutAssetAmended(TvPayoutAssetAmended {
             vault_id,
             seq: 1,
@@ -824,8 +1490,11 @@ mod tests {
         });
         let fulfilled = ChainEvent::TvWithdrawFulfilled(TvWithdrawFulfilled {
             vault_id,
-            seq: 0,
-            recipient,
+            global_seq: 0,
+            lane: 0,
+            recipient: addr(2),
+            tranche: 1,
+            capital_generation: 0,
             shares: 100 * SHARE_OFFSET,
             value: 100,
             basis: 100,
@@ -838,20 +1507,136 @@ mod tests {
             payout_asset: tusdc.clone(),
             payout_units: 100,
             price: PPS_E12,
-            total_shares: 100 * SHARE_OFFSET,
+            tranche_shares: 100 * SHARE_OFFSET,
+        });
+        let settled = ChainEvent::TvSettlementRedeemed(TvSettlementRedeemed {
+            vault_id,
+            position_id: oid(30),
+            from_queue: true,
+            global_seq: 2,
+            recipient: addr(2),
+            tranche: 2,
+            capital_generation: 0,
+            shares: 100 * SHARE_OFFSET,
+            entitlement: 90,
+            basis: 100,
+            gross_fee: 0,
+            protocol_cut: 0,
+            curator_net: 0,
+            payout: 90,
         });
 
         // Newest-first input, as the scan serves it.
         let events = vec![
-            ev(3, fulfilled),
-            ev(2, amend),
-            ev(1, request(1, 2_000)),
-            ev(0, request(0, 1_000)),
+            ev(5, settled),
+            ev(4, fulfilled),
+            ev(3, amend),
+            ev(2, request(vault_id, 2, 1, 2, 0, 3_000)),
+            ev(1, request(vault_id, 1, 1, 2, 0, 2_000)),
+            ev(0, request(vault_id, 0, 0, 1, 0, 1_000)),
         ];
         let pending = pending_requests(events);
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].seq, 1);
+        assert_eq!(pending[0].global_seq, 1);
+        assert_eq!(pending[0].lane, 1);
+        assert_eq!(pending[0].tranche, 2);
         assert_eq!(pending[0].payout_asset, tbtc);
         assert_eq!(pending[0].requested_at_ms, 2_000);
+    }
+
+    /// §7 action matrix: a wiped junior request settles at zero; the junior
+    /// lane is blocked in any non-Healthy risk state; senior always flows.
+    #[test]
+    fn request_payability_follows_the_action_matrix() {
+        let jr = |generation| PendingRequest {
+            global_seq: 1,
+            lane: 1,
+            position_id: oid(30),
+            recipient: addr(2),
+            tranche: 2,
+            capital_generation: generation,
+            shares: 1,
+            basis: 1,
+            payout_asset: AssetType::new("9b::tusdc::TUSDC"),
+            requested_at_ms: 0,
+        };
+        let sr = PendingRequest {
+            lane: 0,
+            tranche: 1,
+            ..jr(0)
+        };
+        // Healthy: everything pays.
+        assert_eq!(request_payability(0, 0, &jr(0)), (true, None));
+        assert_eq!(request_payability(0, 0, &sr), (true, None));
+        // Wiped generation loses even while Healthy (post-reset).
+        assert_eq!(
+            request_payability(0, 1, &jr(0)),
+            (false, Some("wiped_generation"))
+        );
+        // CoverageBreach blocks the junior lane only.
+        assert_eq!(
+            request_payability(1, 0, &jr(0)),
+            (false, Some("junior_lane_blocked"))
+        );
+        assert_eq!(request_payability(1, 0, &sr), (true, None));
+    }
+
+    /// Spec §3 worked examples: NAV 1,000,000 / C 400,000 / P 400,000.
+    #[test]
+    fn derive_waterfall_matches_the_spec_worked_examples() {
+        // PreferredOnly ⇒ (400,000 / 600,000).
+        assert_eq!(
+            derive_waterfall(1_000_000, 400_000, 400_000, 0, 0, 0),
+            (400_000, 0)
+        );
+        // Uncapped 30% ⇒ participation 180,000 (senior 580,000).
+        assert_eq!(
+            derive_waterfall(1_000_000, 400_000, 400_000, 2, 3_000, 0),
+            (400_000, 180_000)
+        );
+        // Capped 50% with 120% cap and C accrued to 410,000 ⇒
+        // min(295,000, 480,000−410,000) = 70,000 (senior 480,000).
+        assert_eq!(
+            derive_waterfall(1_000_000, 410_000, 400_000, 1, 5_000, 12_000),
+            (410_000, 70_000)
+        );
+        // Boundary: NAV < C ⇒ (NAV, 0) in every mode.
+        assert_eq!(
+            derive_waterfall(300_000, 400_000, 400_000, 2, 3_000, 0),
+            (300_000, 0)
+        );
+        // Boundary: NAV 0 ⇒ (0, 0).
+        assert_eq!(derive_waterfall(0, 400_000, 400_000, 1, 5_000, 12_000), (0, 0));
+    }
+
+    /// Estimates use the claim ratio `shares × (nav+1) / (S+O)`, fall back
+    /// to observed pps before the first sync, and go null with neither.
+    #[test]
+    fn position_estimates_price_from_the_tranche_ratio() {
+        let shares = 100_000 * SHARE_OFFSET; // 100k units at genesis pricing
+        let supply = 1_000_000 * SHARE_OFFSET;
+        // Tranche NAV grew 2%: 100k of shares → ~102k value (floor division
+        // over the +1/+O virtual offsets shaves the last unit), profit
+        // value−basis, fee 10% of profit (floor).
+        let (v, p, f) = position_estimates(Some(1_020_000), supply, None, 1_000, shares, 100_000);
+        assert_eq!(v, Some(101_999));
+        assert_eq!(p, Some(1_999));
+        assert_eq!(f, Some(199));
+        // No sync yet: observed pps 1e12 prices at par; recovery below basis
+        // is never charged.
+        let (v, p, f) = position_estimates(None, supply, Some(PPS_E12), 1_000, shares, 120_000);
+        assert_eq!(v, Some(100_000));
+        assert_eq!(p, Some(0));
+        assert_eq!(f, Some(0));
+        // Neither ratio → null estimates.
+        assert_eq!(position_estimates(None, supply, None, 1_000, shares, 0), (None, None, None));
+    }
+
+    #[test]
+    fn junior_buffer_bps_floors_and_guards_zero_nav() {
+        assert_eq!(junior_buffer_bps(Some(250_000), Some(1_000_000)), Some(2_500));
+        assert_eq!(junior_buffer_bps(Some(1), Some(0)), None);
+        assert_eq!(junior_buffer_bps(None, Some(1)), None);
+        assert_eq!(junior_buffer_bps(Some(1), None), None);
     }
 }
