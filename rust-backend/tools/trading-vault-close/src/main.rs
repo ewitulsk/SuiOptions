@@ -1,4 +1,5 @@
-//! Close stale curated trading vaults on a live network (SO-361).
+//! Close stale curated trading vaults on a live network (SO-361; v2
+//! semantics since SO-418).
 //!
 //! `trading-vault-smoke --fill_bid` leaves its $1 vault open by design, and
 //! interrupted runs strand more — each holding one DeepBookCustody position
@@ -11,9 +12,19 @@
 //!   force sessions unlock in Closing) → retire_pool → eject_empty_custody →
 //!   finalize_close
 //!
+//! v2: a Closed vault is not done until it is SETTLED (§8.7) — after
+//! `finalize_close` the tool triggers the one-time `snapshot_settlement`
+//! (cash-only appraisal; closure already drained everything but the
+//! accounting asset) and then drains any outstanding queued withdraw
+//! requests via the permissionless `settle_queued_request`. Wallet-held
+//! `VaultPosition` NFTs redeem against the frozen pool at any later time
+//! (`redeem_settled_position`) — this tool does not chase them. Vaults
+//! already Closed but unsettled are picked up and settled too.
+//!
 //! Safety rails: only vaults where this wallet is creator AND current curator,
 //! whose every position is a DeepBookCustody (the live desk vault holds a
-//! VaultMm position, so it can never match), and whose share supply is at
+//! VaultMm position, so it can never match), and whose PER-TRANCHE share
+//! supply (book senior AND junior — v2 has no single total_shares) is at
 //! most --max-shares (default $10 raw). Dry-run by default; pass --execute
 //! to submit.
 //!
@@ -86,7 +97,17 @@ fn dirs_home() -> PathBuf {
 struct Ids {
     trading_vault_pkg: ObjectID,
     deepbook_adapter_pkg: ObjectID,
+    options_adapter_pkg: Option<ObjectID>,
+    exchange_adapter_pkg: Option<ObjectID>,
     integration_registry_id: ObjectID,
+    // v2 settlement (SO-418): snapshot consumes an appraisal and the
+    // queued-request drain pays through the treasury.
+    protocol_config_id: ObjectID,
+    oracle_registry_id: ObjectID,
+    vol_book_id: Option<ObjectID>,
+    equity_oracle_pkg: Option<ObjectID>,
+    equity_book_id: Option<ObjectID>,
+    treasury_id: ObjectID,
 }
 
 fn resolve_ids(cli: &Cli) -> Result<Ids> {
@@ -106,7 +127,15 @@ fn resolve_ids(cli: &Cli) -> Result<Ids> {
     Ok(Ids {
         trading_vault_pkg: tv.package()?,
         deepbook_adapter_pkg: dba.package()?,
+        options_adapter_pkg: pi.options_adapter.as_ref().map(|p| p.package()).transpose()?,
+        exchange_adapter_pkg: pi.exchange_adapter.as_ref().map(|p| p.package()).transpose()?,
         integration_registry_id: objs.integration_registry()?,
+        protocol_config_id: objs.vault_protocol_config()?,
+        oracle_registry_id: objs.oracle_registry()?,
+        vol_book_id: objs.vol_book()?,
+        equity_oracle_pkg: pi.equity_oracle.as_ref().map(|p| p.package()).transpose()?,
+        equity_book_id: objs.equity_book()?,
+        treasury_id: net.treasury()?,
     })
 }
 
@@ -114,7 +143,6 @@ fn resolve_ids(cli: &Cli) -> Result<Ids> {
 struct StaleVault {
     vault_id: ObjectID,
     cap_id: ObjectID,
-    shares: u128,
     /// `None` when the vault has no position left (already ejected).
     custody_id: Option<ObjectID>,
 }
@@ -135,9 +163,12 @@ async fn gql(url: &str, query: &str, vars: serde_json::Value) -> Result<serde_js
 
 async fn enumerate_stale(cli: &Cli, me: SuiAddress) -> Result<Vec<StaleVault>> {
     let me_hex = me.to_string();
+    // v2: no single totalShares — the per-tranche share rail is enforced
+    // against the on-chain book in `verify_on_chain`, so the indexer is
+    // only used for enumeration here.
     let resp = gql(
         &cli.indexer_graphql,
-        "{ tradingVaults { vaultId state creator curator curatorCapId totalSharesRaw } }",
+        "{ tradingVaults { vaultId state creator curator curatorCapId } }",
         serde_json::json!({}),
     )
     .await?;
@@ -149,7 +180,9 @@ async fn enumerate_stale(cli: &Cli, me: SuiAddress) -> Result<Vec<StaleVault>> {
     let mut out = Vec::new();
     for v in vaults {
         let get = |k: &str| v.pointer(&format!("/{k}")).and_then(|x| x.as_str());
-        if get("state") != Some("open") {
+        // v2: "closed" vaults are still in scope until settled (§8.7);
+        // "closing" covers interrupted earlier runs.
+        if !matches!(get("state"), Some("open" | "closing" | "closed")) {
             continue;
         }
         let (Some(vid), Some(creator), Some(curator), Some(cap)) =
@@ -158,11 +191,6 @@ async fn enumerate_stale(cli: &Cli, me: SuiAddress) -> Result<Vec<StaleVault>> {
             continue;
         };
         if creator != me_hex || curator != me_hex {
-            continue;
-        }
-        let shares: u128 = get("totalSharesRaw").unwrap_or("0").parse().unwrap_or(u128::MAX);
-        if shares > cli.max_shares {
-            println!("  skip {vid}: {shares} shares > --max-shares (the live desk vault?)");
             continue;
         }
         let ps = gql(
@@ -199,7 +227,6 @@ async fn enumerate_stale(cli: &Cli, me: SuiAddress) -> Result<Vec<StaleVault>> {
         out.push(StaleVault {
             vault_id: ObjectID::from_hex_literal(vid)?,
             cap_id: ObjectID::from_hex_literal(cap)?,
-            shares,
             custody_id,
         });
     }
@@ -219,11 +246,21 @@ fn enum_variant(v: &serde_json::Value) -> Option<&str> {
     v.as_str().or_else(|| v.pointer("/@variant").and_then(|x| x.as_str()))
 }
 
+struct Plan {
+    state: String,
+    custody: Option<CustodySnapshot>,
+    senior_shares: u128,
+    junior_shares: u128,
+    settled: bool,
+}
+
 async fn verify_on_chain(
     client: &ChainClient,
+    ids: &Ids,
     me: SuiAddress,
+    max_shares: u128,
     v: &StaleVault,
-) -> Result<Option<(String, Option<CustodySnapshot>)>> {
+) -> Result<Option<Plan>> {
     let (_, vault_json) = client.get_object_json(v.vault_id).await?;
     let vault_json = vault_json.ok_or_else(|| anyhow!("vault {} unreadable", v.vault_id))?;
     let state = vault_json
@@ -231,11 +268,35 @@ async fn verify_on_chain(
         .and_then(enum_variant)
         .ok_or_else(|| anyhow!("vault {} has no readable state", v.vault_id))?
         .to_string();
-    if state == "Closed" {
+    let settled =
+        dev_inspect_bool(client, me, ids.trading_vault_pkg, v.vault_id, "is_settled", &[]).await?;
+    if state == "Closed" && settled {
+        // v2 done-state: Closed AND snapshot taken. Any queued requests
+        // are drained by `settle_vault` right after the snapshot, and
+        // wallet-held positions redeem permissionlessly at any time —
+        // nothing left for this tool.
         return Ok(None);
     }
     if vault_json.pointer("/creator").and_then(|x| x.as_str()) != Some(&me.to_string()) {
         bail!("vault {} on-chain creator is not the signer", v.vault_id);
+    }
+    // v2 per-tranche share rail (there is no single total_shares): both
+    // book supplies must be under --max-shares. An untranched vault keeps
+    // its whole supply in `junior_shares`.
+    let book_shares = |field: &str| -> Result<u128> {
+        vault_json
+            .pointer(&format!("/book/{field}"))
+            .and_then(|x| x.as_str().and_then(|s| s.parse().ok()).or_else(|| x.as_u64().map(u128::from)))
+            .ok_or_else(|| anyhow!("vault {} has no readable book.{field}", v.vault_id))
+    };
+    let senior_shares = book_shares("senior_shares")?;
+    let junior_shares = book_shares("junior_shares")?;
+    if senior_shares > max_shares || junior_shares > max_shares {
+        bail!(
+            "vault {} book ({senior_shares} senior / {junior_shares} junior shares) exceeds \
+             --max-shares (the live desk vault?)",
+            v.vault_id
+        );
     }
 
     // The cap must be a CuratorCap owned by the signer.
@@ -301,7 +362,37 @@ async fn verify_on_chain(
             Some(CustodySnapshot { assets, pool })
         }
     };
-    Ok(Some((state, custody)))
+    Ok(Some(Plan { state, custody, senior_shares, junior_shares, settled }))
+}
+
+/// Dev-inspect a no-arg-beyond-vault `vault::<function>` returning bool.
+async fn dev_inspect_bool(
+    client: &ChainClient,
+    sender: SuiAddress,
+    trading_vault_pkg: ObjectID,
+    vault_id: ObjectID,
+    function: &str,
+    extra_pure_u64: &[u64],
+) -> Result<bool> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(shared_object_arg(client, vault_id, false).await?)?;
+    let mut args = vec![vault];
+    for v in extra_pure_u64 {
+        args.push(pt.pure(v)?);
+    }
+    pt.programmable_move_call(
+        trading_vault_pkg,
+        Identifier::new("vault").unwrap(),
+        Identifier::new(function).unwrap(),
+        vec![],
+        args,
+    );
+    let res = client
+        .dev_inspect_ptb(sender, pt)
+        .await
+        .with_context(|| format!("dev-inspecting vault::{function}"))?;
+    sui_tx::chain::decode_return_value::<bool>(&res, 0)
+        .with_context(|| format!("decoding vault::{function}"))
 }
 
 /// Everything for one vault in a single atomic PTB: partial progress is
@@ -408,6 +499,109 @@ async fn close_vault(
     Ok(())
 }
 
+/// Defensive bound on the queued-request scan: smoke vaults hold a
+/// handful of requests at most; anything past this is not ours to drain.
+const SEQ_SCAN_CAP: u64 = 256;
+
+/// v2 §8.7: take the one-time settlement snapshot (unless already taken)
+/// and drain every outstanding queued withdraw request from the frozen
+/// pool. `finalize_close` already asserted only the accounting asset
+/// remains, so the snapshot appraisal is cash-only — no oracle legs.
+/// Wallet-held positions stay redeemable permissionlessly forever; this
+/// tool doesn't chase them.
+async fn settle_vault(
+    client: &ChainClient,
+    signer: &Signer,
+    ids: &Ids,
+    cli: &Cli,
+    v: &StaleVault,
+    already_settled: bool,
+) -> Result<()> {
+    let holdings = sui_tx::tx::appraisal::discover_holdings(client, v.vault_id).await?;
+    let deposit_type = holdings.deposit_type.clone();
+    let tv_refs = sui_tx::tx::trading_vault::TradingVaultRefs {
+        package: ids.trading_vault_pkg,
+        vault_id: v.vault_id,
+        protocol_config_id: ids.protocol_config_id,
+        deposit_type: &deposit_type,
+    };
+
+    if !already_settled {
+        let refs = sui_tx::tx::appraisal::AppraisalRefs {
+            trading_vault_pkg: ids.trading_vault_pkg,
+            deepbook_adapter_pkg: Some(ids.deepbook_adapter_pkg),
+            options_adapter_pkg: ids.options_adapter_pkg,
+            exchange_adapter_pkg: ids.exchange_adapter_pkg,
+            vault_id: v.vault_id,
+            protocol_config_id: ids.protocol_config_id,
+            oracle_registry_id: ids.oracle_registry_id,
+            equity_oracle_pkg: ids.equity_oracle_pkg,
+            equity_book_id: ids.equity_book_id,
+            vol_book_id: ids.vol_book_id,
+        };
+        let mut pt = ProgrammableTransactionBuilder::new();
+        let (appraisal, _) = sui_tx::tx::appraisal::compose_appraisal(
+            client,
+            &mut pt,
+            &refs,
+            &holdings,
+            None,
+            &std::collections::BTreeMap::new(),
+            &[],
+        )
+        .await?;
+        sui_tx::tx::trading_vault::build_snapshot_settlement(client, &mut pt, &tv_refs, appraisal)
+            .await?;
+        submit_ptb(client, signer, pt, cli.gas_budget, "close::snapshot_settlement").await?;
+        println!("    ✔ settlement snapshot taken");
+    }
+
+    // Outstanding queued requests settle permissionlessly, in any order,
+    // once NAV is frozen. The requests table is keyed by global sequence;
+    // scan the (tiny) sequence space with `has_request`.
+    let (_, json) = client.get_object_json(v.vault_id).await?;
+    let json = json.ok_or_else(|| anyhow!("vault {} unreadable", v.vault_id))?;
+    let next_seq = json
+        .pointer("/next_global_seq")
+        .and_then(|x| x.as_str().and_then(|s| s.parse::<u64>().ok()).or_else(|| x.as_u64()))
+        .ok_or_else(|| anyhow!("vault {} has no readable next_global_seq", v.vault_id))?;
+    if next_seq > SEQ_SCAN_CAP {
+        bail!("vault {} has {next_seq} sequences — beyond the smoke-vault scan cap", v.vault_id);
+    }
+    let mut outstanding = Vec::new();
+    for seq in 0..next_seq {
+        if dev_inspect_bool(
+            client,
+            signer.address,
+            ids.trading_vault_pkg,
+            v.vault_id,
+            "has_request",
+            &[seq],
+        )
+        .await?
+        {
+            outstanding.push(seq);
+        }
+    }
+    if outstanding.is_empty() {
+        return Ok(());
+    }
+    let mut pt = ProgrammableTransactionBuilder::new();
+    for seq in &outstanding {
+        sui_tx::tx::trading_vault::build_settle_queued_request(
+            client,
+            &mut pt,
+            &tv_refs,
+            ids.treasury_id,
+            *seq,
+        )
+        .await?;
+    }
+    submit_ptb(client, signer, pt, cli.gas_budget, "close::settle_queued_requests").await?;
+    println!("    ✔ settled {} queued request(s)", outstanding.len());
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -426,10 +620,10 @@ async fn main() -> Result<()> {
 
     let (mut closed, mut skipped, mut failed) = (0u32, 0u32, 0u32);
     for v in &stale {
-        let plan = match verify_on_chain(&client, signer.address, v).await {
+        let plan = match verify_on_chain(&client, &ids, signer.address, cli.max_shares, v).await {
             Ok(Some(p)) => p,
             Ok(None) => {
-                println!("  {}: already Closed on-chain — skipping", v.vault_id);
+                println!("  {}: already Closed and settled on-chain — skipping", v.vault_id);
                 skipped += 1;
                 continue;
             }
@@ -439,8 +633,7 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
-        let (state, custody) = plan;
-        let desc = match &custody {
+        let desc = match &plan.custody {
             Some(c) => format!(
                 "custody: {} asset(s){}",
                 c.assets.len(),
@@ -451,13 +644,25 @@ async fn main() -> Result<()> {
             ),
             None => "no position".into(),
         };
-        println!("  {} [{state}, {} shares] — {desc}", v.vault_id, v.shares);
+        println!(
+            "  {} [{}, {}s/{}j shares] — {desc}",
+            v.vault_id, plan.state, plan.senior_shares, plan.junior_shares
+        );
         if !cli.execute {
             continue;
         }
-        match close_vault(&client, &signer, &ids, &cli, v, &state, custody.as_ref()).await {
+        let result = async {
+            if plan.state != "Closed" {
+                close_vault(&client, &signer, &ids, &cli, v, &plan.state, plan.custody.as_ref())
+                    .await?;
+            }
+            // v2: Closed is not done — settle (§8.7).
+            settle_vault(&client, &signer, &ids, &cli, v, plan.settled).await
+        }
+        .await;
+        match result {
             Ok(()) => {
-                println!("    ✔ closed");
+                println!("    ✔ closed + settled");
                 closed += 1;
             }
             Err(e) => {

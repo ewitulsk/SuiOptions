@@ -26,6 +26,26 @@ use protocol_types::OracleProvider;
 use crate::json_store::TokenSpec;
 use crate::signer::Signer;
 
+/// v2 terms provenance (SO-418, offchain plan §WS-7 / contract plan
+/// §9.5.6): the version of docs/trading-vault-v2/spec.md this deployment
+/// ships under, recorded in `tradingVaultObjects` and served via
+/// token-info so vault creators bind their `create_vault` terms to it.
+pub const TERMS_VERSION: u64 = 1;
+
+/// The exact spec document, embedded at COMPILE time. Deploys run
+/// `cargo run` from the repo checkout, so the binary's copy is the
+/// checkout's copy — no runtime path resolution to get wrong, and moving
+/// the file is a compile error instead of a silent ceremony failure.
+const SPEC_MD: &[u8] = include_bytes!("../../../../docs/trading-vault-v2/spec.md");
+
+/// Lowercase hex sha256 of the spec document — the `spec_hash` every v2
+/// vault stores at creation (spec.md preamble) and the value recorded in
+/// deployments.json.
+pub fn spec_hash_hex() -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(SPEC_MD))
+}
+
 /// The shared objects the trading-vault family's inits create, recorded
 /// into deployments.json so services stop re-deriving them from publish
 /// digests.
