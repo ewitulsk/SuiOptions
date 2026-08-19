@@ -140,14 +140,28 @@ async fn refresh_watched(
         }
     }
 
+    // Option-coin bases (SO-416 discovered markets) are never in the token
+    // catalog; their decimals are the UNDERLYING's (option coins mint with
+    // the underlying's decimals), resolved by decoding the coin type back
+    // to its bucket spec against the core package.
+    let core_package = snapshot.package_info.package_id.clone();
+
     let mut map = HashMap::new();
     for m in &resp.markets {
         // Market types are already canonical (the orderbook canonicalizes
         // at load), but normalize defensively.
         let base = canonicalize_move_type(&m.base).unwrap_or_else(|_| m.base.clone());
         let quote = canonicalize_move_type(&m.quote).unwrap_or_else(|_| m.quote.clone());
+        let base_meta: Option<(String, u8)> = by_type.get(&base).cloned().or_else(|| {
+            let spec =
+                protocol_types::bucket_spec::decode_option_coin_type(&core_package, &base)?;
+            let underlying = canonicalize_move_type(&spec.asset).ok()?;
+            by_type
+                .get(&underlying)
+                .map(|(_, dec)| (m.base.clone(), *dec))
+        });
         let (Some((base_ct, base_dec)), Some((quote_ct, quote_dec))) =
-            (by_type.get(&base), by_type.get(&quote))
+            (base_meta.as_ref(), by_type.get(&quote))
         else {
             warn!(market = %m.symbol, "market tokens missing from token-info catalog; not charting");
             continue;

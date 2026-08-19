@@ -109,6 +109,11 @@ pub struct PackageInfo {
     /// domain and stay bound to the package that created them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exchange: Option<ExchangeRecord>,
+    /// Permissionless option-market listing leaf (SO-416); republishes
+    /// with the exchange it links against — its ListingCap is minted by
+    /// the exchange's init and parked in the ceremony.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exchange_listing: Option<ExchangeListingRecord>,
     /// mm-bot's shared `QuoteSigner` object for this deployment, created
     /// by `--deploy-mm-collateral` right after the core republish. Reset
     /// to None on every fresh protocol publish — the object's Move type
@@ -167,6 +172,22 @@ pub struct WhitelistRecord {
     /// Shared `Whitelist` object — the gate arg every ingress entry takes.
     pub whitelist_id: String,
     /// Owned `whitelist::AdminCap` (deployer wallet).
+    pub admin_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+}
+
+/// The published exchange-listing package (contracts/exchange-listing/,
+/// SO-416): the leaf that parks the exchange `ListingCap` in its shared
+/// `ListingAuthority` so option markets list permissionlessly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeListingRecord {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    /// Shared `ListingAuthority` (parked ListingCap + dedup + defaults).
+    pub listing_authority_id: String,
+    /// Owned `exchange_listing::AdminCap` (deployer wallet).
     pub admin_cap_id: String,
     pub publish_digest: String,
     pub deployed_at: String,

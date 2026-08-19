@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 exchange-types = { workspace = true }
+protocol-types = { workspace = true }
 exchange-signing = { workspace = true }
 exchange-book = { workspace = true }
 exchange-router = { workspace = true }

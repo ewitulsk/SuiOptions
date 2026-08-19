@@ -1,4 +1,6 @@
-// Price chart for a bucket's DeepBook pool (SO-157).
+// Price chart for a bucket's exchange market (SO-157, SO-416 — the market's
+// registry id is passed as `poolId`; price-charting keys exchange markets
+// under it).
 //
 // TradingView Lightweight Charts (v5, open source) fed by the
 // price-charting service: REST history + live WS updates via `useBars`.

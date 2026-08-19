@@ -4,9 +4,11 @@
 //! per-(wallet, bucket) **FIFO cost-lot ledger**. Acquisitions push lots,
 //! disposals consume them oldest-first and accrue realized PnL:
 //!
-//! - Acquire: `WriteExecuted` (RFQ mint, cost = gross premium) and DeepBook
-//!   `OrderFilled` buys (cost = quote + settlement-denominated taker/maker fee).
-//! - Dispose: DeepBook `OrderFilled` sells (proceeds = quote − fee), `Exercised`
+//! - Acquire: `WriteExecuted` (RFQ mint, cost = gross premium), DeepBook
+//!   `OrderFilled` buys (cost = quote + settlement-denominated taker/maker fee),
+//!   and in-house `ExchangeOptionFill` buys (fee shrinks the base received;
+//!   cost = quote paid, SO-416).
+//! - Dispose: DeepBook / exchange sells (proceeds = quote − fee), `Exercised`
 //!   (proceeds marked at the option-pool price at exercise time via
 //!   price-charting), `ExpiredOptionBurned` (proceeds = 0, a realized loss).
 //!
@@ -18,7 +20,8 @@
 //!
 //! DeepBook fills are attributed by BalanceManager id — the frontend passes its
 //! own `bm`, so no BM→owner table is needed (a BM id only ever appears as a
-//! fill participant in the event log).
+//! fill participant in the event log). In-house exchange fills carry wallet
+//! addresses directly (no BM), so they're pulled by the wallet itself.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -52,7 +55,7 @@ pub struct LotDto {
     pub amount: f64,
     /// Cost basis attributed to `amount` (settlement display units, e.g. USDC).
     pub cost: f64,
-    /// `rfq` | `deepbook` — provenance, for the card's row label.
+    /// `rfq` | `deepbook` | `exchange` — provenance, for the card's row label.
     pub source: &'static str,
     pub acquired_at_ms: i64,
 }
@@ -192,12 +195,27 @@ pub async fn dashboard_pnl(
         })?,
         None => Vec::new(),
     };
+    // In-house exchange fills (SO-416): no BalanceManager — the wallet itself
+    // is the fill participant (maker or taker).
+    let exchange_fills = state
+        .indexer
+        .exchange_option_fills_for_address(wallet)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "indexer exchange fills query failed");
+            StatusCode::BAD_GATEWAY
+        })?;
 
     // Merge into one sequence-ordered stream so FIFO sees true chain order.
-    let mut stream: Vec<IndexedEvent> = Vec::with_capacity(wallet_events.len() + fills.len());
+    // Dedup by sequence: exchange fills also fan out to the wallet as
+    // participants, so they can arrive via `wallet_events` too.
+    let mut stream: Vec<IndexedEvent> =
+        Vec::with_capacity(wallet_events.len() + fills.len() + exchange_fills.len());
     stream.extend(wallet_events);
     stream.extend(fills);
+    stream.extend(exchange_fills);
     stream.sort_by_key(|e| e.sequence);
+    stream.dedup_by_key(|e| e.sequence);
 
     // Pre-price exercises (one price-charting lookup each) before the sync fold.
     let mut exercise_marks: HashMap<u64, Option<f64>> = HashMap::new();
@@ -354,6 +372,45 @@ fn classify(
                     Action::Dispose {
                         amount_raw,
                         proceeds: Proceeds::SettlementRaw((f.quote_quantity as f64 - fee).max(0.0)),
+                    },
+                ))
+            }
+        }
+        // In-house exchange fill (SO-416): wallet addresses directly, quote-
+        // denominated fees withheld from each side's proceeds.
+        ChainEvent::ExchangeOptionFill(f) => {
+            let is_taker = f.taker == *wallet;
+            let is_maker = f.maker == *wallet;
+            if !is_taker && !is_maker {
+                return None;
+            }
+            // Bought = received base: maker_sold_base ⇒ taker bought.
+            let user_bought = if is_taker {
+                f.maker_sold_base
+            } else {
+                !f.maker_sold_base
+            };
+            // Fees are withheld from each party's PROCEEDS on-chain, so
+            // their denomination follows the side: a buyer's fee is in the
+            // BASE received (shrinks the acquired amount), a seller's in
+            // the quote (shrinks the proceeds).
+            let fee = if is_taker { f.taker_fee } else { f.maker_fee } as f64;
+            if user_bought {
+                Some((
+                    f.bucket_id,
+                    Action::Acquire {
+                        amount_raw: (f.base_amount as f64 - fee).max(0.0),
+                        cost_raw: f.quote_amount as f64,
+                        source: "exchange",
+                        ts: f.timestamp_ms as i64,
+                    },
+                ))
+            } else {
+                Some((
+                    f.bucket_id,
+                    Action::Dispose {
+                        amount_raw: f.base_amount as f64,
+                        proceeds: Proceeds::SettlementRaw((f.quote_amount as f64 - fee).max(0.0)),
                     },
                 ))
             }

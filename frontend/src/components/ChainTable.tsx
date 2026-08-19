@@ -9,13 +9,19 @@
 // panels) to avoid a devInspect-per-strike storm.
 
 import type { Bucket, Series } from "../api/client";
-import { midFromBook, poolRefFor, useOrderBook } from "../api/deepbook";
+import {
+  midFromBook,
+  toDisplayBook,
+  useExchangeBook,
+  useExchangeMarketFor,
+} from "../api/orderbook";
 import { useOptionMetrics } from "../api/optionMetrics";
 import { formatPrice } from "../format";
 import type { Strike } from "../types";
 
-// Slow poll for the off-screen breadth of the chain. The selected pool is also
-// observed by the ticket/center at the default 3s, so it stays fresh regardless.
+// Slow poll for the off-screen breadth of the chain. The selected market is
+// also observed by the ticket/center at the default 3s, so it stays fresh
+// regardless.
 const ROW_BOOK_MS = 15_000;
 const ROW_METRICS_MS = 15_000;
 
@@ -34,11 +40,17 @@ type RowProps = {
 };
 
 function ChainRow({ bucket, series, spot, mark, selected, onSelect }: RowProps) {
-  const pool = poolRefFor(bucket, series);
-  const book = useOrderBook(pool, null, ROW_BOOK_MS);
-  const bid = book.data?.bids[0]?.price ?? null;
-  const ask = book.data?.asks[0]?.price ?? null;
-  const mid = midFromBook(book.data);
+  const { market } = useExchangeMarketFor(bucket);
+  const bookQ = useExchangeBook(market?.registryId ?? null, 8, ROW_BOOK_MS);
+  const book = toDisplayBook(
+    bookQ.data,
+    market,
+    series.asset_decimals ?? 8,
+    series.settlement_decimals ?? 6,
+  );
+  const bid = book?.bids[0]?.price ?? null;
+  const ask = book?.asks[0]?.price ?? null;
+  const mid = midFromBook(book);
   const markPrice = mid ?? (mark > 0 ? mark : null);
 
   const metrics = useOptionMetrics({

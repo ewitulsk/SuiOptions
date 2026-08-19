@@ -5,29 +5,29 @@
 //!      bucket, net them via `vault_mm::close_offset_position` (put twin
 //!      for puts) — frees collateral at zero market impact, so it beats
 //!      every other rung.
-//!   1. **Resale** (taker only): if the option pool's best bid ≥ model
-//!      fair − a small vol-pt concession, sell into it. Wallet-held coins
-//!      go through the coin-based `swap_exact_base_for_quote`; VAULT-held
-//!      coins through one curator PTB = `vault_mm::release_coin_to_balances`
-//!      (coin-custody positions → free balances) +
-//!      `deepbook_adapter::taker_swap_base_for_quote` (min_out from model
-//!      fair − concession).
-//!   2. **Hold** — the default; gamma scalping monetizes.
-//!   3. **Exercise** when optimal — `forgone_carry > remaining_time_value
+//!   1. **Hold** — the default; gamma scalping monetizes. RESALE is no
+//!      longer a rung here: the listings engine (SO-416,
+//!      `desk::listings`) rests standing ASKS on the in-house exchange
+//!      and its matching engine executes resales whenever a bid crosses,
+//!      replacing the retired per-option DeepBook taker swap.
+//!   2. **Exercise** when optimal — `forgone_carry > remaining_time_value
 //!      × carry_mult` or near-expiry ITM. Wallet coins: wallet cash first,
-//!      else FLASH-EXERCISE via the DeepBook flash-loan PTB
+//!      else FLASH-EXERCISE via the DeepBook flash-loan PTB against the
+//!      UNDERLYING/SETTLEMENT spot pool
 //!      (`sui_tx::tx::deepbook::flash_exercise_call`). VAULT coin-custody
 //!      positions: `vault_mm::exercise_call_coin` (vault free settlement
 //!      pays the strike) — skipped when the vault's free settlement
 //!      doesn't cover it (the flash fallback is wallet-only).
 //!
-//! Puts: resale (wallet + vault) and offset closes work; put EXERCISE is
-//! TODO(SO-299) — held puts otherwise hold to expiry.
+//! Puts: offset closes work; put EXERCISE is TODO(SO-299) — held puts
+//! otherwise hold to expiry (their resale channel is the listings
+//! engine's resting asks).
 //!
-//! Vault free-balance coins (auction-win redemptions) resale fine but
-//! cannot be exercised: `exercise_call_coin` takes a coin-custody
-//! POSITION and there is no re-custody entry — they hold to expiry when
-//! exercise is the chosen rung.
+//! Vault free-balance coins (auction-win redemptions) cannot be
+//! exercised: `exercise_call_coin` takes a coin-custody POSITION and
+//! there is no re-custody entry — they hold to expiry when exercise is
+//! the chosen rung. Units the listings engine has committed to resting
+//! asks ([`Book::listed_units`]) are excluded from the vault leg.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -45,7 +45,7 @@ use sui_types::transaction::Argument;
 
 use pyth_client::{PriceCache, PriceFeedId};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
-use sui_tx::tx::deepbook::{flash_exercise_call, top_of_book, DeepBookHandles, FlashExerciseCallParams};
+use sui_tx::tx::deepbook::{flash_exercise_call, DeepBookHandles, FlashExerciseCallParams};
 use sui_tx::tx::{clock_arg, owned_object_arg, shared_object_arg, submit_ptb};
 
 use crate::pricing::{compute_spot_from_cache, Staleness};
@@ -63,10 +63,8 @@ pub struct ExitsConfig {
     pub enabled: bool,
     pub tick_secs: u64,
     /// Step 0: net written positions against same-bucket VaultMm coin
-    /// custody (`close_offset_*`) before any resale/exercise.
+    /// custody (`close_offset_*`) before any exercise.
     pub offset_close_enabled: bool,
-    /// Resale concession off model fair, vol points.
-    pub concession_volpts: f64,
     /// Exercise when `forgone_carry > remaining_time_value × this`.
     /// 00-plan: 1.1.
     pub carry_mult: f64,
@@ -87,7 +85,6 @@ impl Default for ExitsConfig {
             enabled: true,
             tick_secs: 300,
             offset_close_enabled: true,
-            concession_volpts: 1.0,
             carry_mult: 1.1,
             near_expiry_hours: 24.0,
             max_slice: 1_000_000_000,
@@ -100,8 +97,6 @@ impl Default for ExitsConfig {
 /// What the ladder decided for one holding this tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitAction {
-    /// Sell into the option pool's standing bid (taker).
-    Resale,
     Hold,
     /// Exercise funded from wallet settlement cash.
     ExerciseCash,
@@ -109,8 +104,9 @@ pub enum ExitAction {
     FlashExercise,
 }
 
-/// Pure ladder decision for one held option. Puts only ever resale or
-/// hold — put exercise is TODO(SO-299).
+/// Pure ladder decision for one held option. Puts only ever hold — put
+/// exercise is TODO(SO-299). (Resale is not decided here: the listings
+/// engine keeps a standing ask resting on the exchange instead.)
 #[allow(clippy::too_many_arguments)]
 pub fn decide_exit(
     cfg: &ExitsConfig,
@@ -119,27 +115,16 @@ pub fn decide_exit(
     spot: f64,
     strike: f64,
     expiry_ms: u64,
-    best_bid_per_unit: Option<f64>,
     wallet_cash: u64,
     strike_cost: u64,
     now_ms: u64,
 ) -> ExitAction {
     let t = (expiry_ms.saturating_sub(now_ms)) as f64 / 1000.0 / 86_400.0 / 365.0;
     let (sigma, _) = model.sigma(spot, strike, t);
-    // (1) resale: standing bid ≥ fair − concession (vol pts → price via
-    // vega).
-    if let Some(bid) = best_bid_per_unit {
-        let fair = model.fair_per_unit(is_put, spot, strike, t, sigma);
-        let vega = model.greeks_per_unit(is_put, spot, strike, t, sigma).vega;
-        let concession = vega * cfg.concession_volpts / 100.0;
-        if bid >= fair - concession && bid > 0.0 {
-            return ExitAction::Resale;
-        }
-    }
     if is_put {
         return ExitAction::Hold; // TODO(SO-299): put exercise.
     }
-    // (3) exercise when optimal: forgone carry beats remaining time value
+    // Exercise when optimal: forgone carry beats remaining time value
     // with margin, or near-expiry ITM.
     let itm = spot > strike;
     let near_expiry = (expiry_ms.saturating_sub(now_ms)) as f64 / 3_600_000.0
@@ -154,7 +139,7 @@ pub fn decide_exit(
             ExitAction::FlashExercise
         };
     }
-    // (2) default: hold and scalp.
+    // Default: hold and scalp (resting exchange asks handle resale).
     ExitAction::Hold
 }
 
@@ -181,17 +166,14 @@ pub struct ExitsParams {
     pub staleness: Staleness,
     pub handles: Option<DeepBookHandles>,
     /// The deployment's DEEP token type (swap fee legs). Required for the
-    /// wallet resale/flash paths; `None` disables them.
+    /// wallet flash-exercise path; `None` disables it.
     pub deep_coin_type: Option<String>,
     pub core_package: ObjectID,
     /// All wallet-side exit proceeds land here (vault-only mandate).
     pub vault_address: sui_types::base_types::SuiAddress,
     /// Curator-session refs — `None` disables the vault-custody paths
-    /// (offset closes, vault resale, vault exercise).
+    /// (offset closes, vault exercise).
     pub curator: Option<CuratorRefs>,
-    /// deepbook_adapter package + PoolAllowlist (vault resale leg).
-    pub deepbook_adapter_package: Option<ObjectID>,
-    pub pool_allowlist: Option<ObjectID>,
 }
 
 pub fn spawn_exits(p: ExitsParams) {
@@ -268,28 +250,6 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             }
         }
 
-        // Option-pool best bid (per unit, settlement-raw per
-        // underlying-raw): DeepBook raw price is quote-per-base × 1e9.
-        let best_bid = match (&h.pool_id, &p.handles) {
-            (Some(pool), Some(handles)) => {
-                match ObjectID::from_hex_literal(pool) {
-                    Ok(pool_id) => top_of_book(
-                        &wrap.client,
-                        wrap.signer.address,
-                        handles.package,
-                        pool_id,
-                        &h.option_coin_type,
-                        &h.settlement_coin_type,
-                    )
-                    .await
-                    .ok()
-                    .and_then(|t| t.best_bid_raw)
-                    .map(|raw| raw as f64 / 1e9),
-                    Err(_) => None,
-                }
-            }
-            _ => None,
-        };
         let wallet_cash = match sui_types::parse_sui_struct_tag(&p.settlement_coin_type) {
             Ok(tag) => wrap
                 .client
@@ -307,13 +267,11 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             spot,
             h.strike_scaled(),
             h.expiry_ms,
-            best_bid,
             wallet_cash,
             cost_wallet,
             now,
         );
         metrics::counter!("mm_desk_exit_decisions_total", "action" => match action {
-            ExitAction::Resale => "resale",
             ExitAction::Hold => "hold",
             ExitAction::ExerciseCash => "exercise_cash",
             ExitAction::FlashExercise => "flash_exercise",
@@ -326,7 +284,6 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
         // Wallet leg (float coins: auction remnants / staged exits).
         if h.amount_wallet > 0 {
             let res = match action {
-                ExitAction::Resale => resell(p, wrap, &h, best_bid.unwrap_or(0.0)).await,
                 ExitAction::ExerciseCash => exercise_cash(p, wrap, &h, h.amount_wallet).await,
                 ExitAction::FlashExercise => flash_exercise(p, wrap, &h, spot).await,
                 ExitAction::Hold => unreachable!(),
@@ -342,10 +299,15 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             }
         }
 
-        // Vault leg (free-balance coins + coin-custody positions).
-        let vault_units = h.amount_vault.saturating_add(h.amount_coin_positions());
-        if vault_units == 0 {
-            continue;
+        // Vault leg (coin-custody positions), minus whatever the listings
+        // engine has committed to resting exchange asks.
+        let listed = p.book.read().listed_units(&h.bucket_id);
+        let vault_units = h
+            .amount_vault
+            .saturating_add(h.amount_coin_positions())
+            .saturating_sub(listed);
+        if vault_units == 0 || h.is_put {
+            continue; // puts never pick exercise today
         }
         let Some(refs) = p.curator.as_ref() else {
             tracing::info!(
@@ -356,16 +318,7 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             );
             continue;
         };
-        let res = match action {
-            ExitAction::Resale => vault_resell(p, wrap, refs, &p.models[mi], &h, spot, now).await,
-            ExitAction::ExerciseCash | ExitAction::FlashExercise => {
-                if h.is_put {
-                    continue; // unreachable today (puts never pick exercise)
-                }
-                vault_exercise(p, wrap, refs, &h).await
-            }
-            ExitAction::Hold => unreachable!(),
-        };
+        let res = vault_exercise(p, wrap, refs, &h).await;
         if let Err(e) = res {
             tracing::error!(
                 alert_id = ALERT_ID,
@@ -441,70 +394,6 @@ async fn offset_close(
         amount,
         digest = %sui_tx::tx::tx_digest(&resp),
         "offset-closed written position against held coins (collateral → vault)"
-    );
-    Ok(())
-}
-
-/// Vault resale, one curator PTB: `release_coin_to_balances` for every
-/// coin-custody position, then one `taker_swap_base_for_quote` selling
-/// the whole vault-held amount (freed positions + free balances) into
-/// the option pool. `min_out` binds at model fair − concession.
-async fn vault_resell(
-    p: &ExitsParams,
-    wrap: &SuiClientWrapper,
-    refs: &CuratorRefs,
-    model: &MarketModel,
-    h: &Holding,
-    spot: f64,
-    now_ms: u64,
-) -> Result<()> {
-    let adapter = p.deepbook_adapter_package.context("no deepbook_adapter package")?;
-    let allowlist = p.pool_allowlist.context("no pool allowlist")?;
-    let pool = ObjectID::from_hex_literal(h.pool_id.as_deref().context("no option pool")?)?;
-    let amount = h.amount_vault.saturating_add(h.amount_coin_positions());
-    // Floor at model fair − concession (the resale trigger), total raw.
-    let t = (h.expiry_ms.saturating_sub(now_ms)) as f64 / 1000.0 / 86_400.0 / 365.0;
-    let k = h.strike_scaled();
-    let (sigma, _) = model.sigma(spot, k, t);
-    let fair = model.fair_per_unit(h.is_put, spot, k, t, sigma);
-    let vega = model.greeks_per_unit(h.is_put, spot, k, t, sigma).vega;
-    let concession = vega * p.cfg.concession_volpts / 100.0;
-    let min_out = ((fair - concession).max(0.0) * amount as f64) as u64;
-
-    let mut pt = ProgrammableTransactionBuilder::new();
-    let (vault, cap, reg) = curator_args(wrap, refs, &mut pt).await?;
-    let option_tag = TypeTag::from_str(&h.option_coin_type)?;
-    for cp in &h.coin_positions {
-        let coin_position_id = pt.pure(&ObjectID::new(*cp.position_id.as_bytes()))?;
-        pt.programmable_move_call(
-            refs.trading_vault_package,
-            Identifier::new("vault_mm").unwrap(),
-            Identifier::new("release_coin_to_balances").unwrap(),
-            vec![option_tag.clone()],
-            vec![vault, cap, reg, coin_position_id],
-        );
-    }
-    let list = pt.obj(shared_object_arg(&wrap.client, allowlist, false).await?)?;
-    let pool_arg = pt.obj(shared_object_arg(&wrap.client, pool, true).await?)?;
-    let amount_arg = pt.pure(&amount)?;
-    let min_out_arg = pt.pure(&min_out)?;
-    let clock = clock_arg(&mut pt)?;
-    pt.programmable_move_call(
-        adapter,
-        Identifier::new("deepbook_adapter").unwrap(),
-        Identifier::new("taker_swap_base_for_quote").unwrap(),
-        vec![option_tag, TypeTag::from_str(&h.settlement_coin_type)?],
-        vec![vault, cap, reg, list, pool_arg, amount_arg, min_out_arg, clock],
-    );
-    let resp =
-        submit_ptb(&wrap.client, &wrap.signer, pt, p.cfg.gas_budget, "desk vault resale").await?;
-    tracing::info!(
-        bucket = %h.bucket_id.to_hex(),
-        amount,
-        min_out,
-        released_positions = h.coin_positions.len(),
-        digest = %sui_tx::tx::tx_digest(&resp),
-        "resold vault-held option coins into pool bid (proceeds stay in vault)"
     );
     Ok(())
 }
@@ -587,38 +476,6 @@ async fn vault_exercise(
 }
 
 // ── wallet legs (float coins) ──────────────────────────────────────────
-
-/// Taker-sell wallet-held option coins into the pool's standing bid via
-/// the coin-based `swap_exact_base_for_quote` (no BalanceManager needed).
-async fn resell(p: &ExitsParams, wrap: &SuiClientWrapper, h: &Holding, bid_per_unit: f64) -> Result<()> {
-    let handles = p.handles.as_ref().context("no deepbook handles")?;
-    let deep = p.deep_coin_type.as_deref().context("no deep coin type")?;
-    let pool = ObjectID::from_hex_literal(h.pool_id.as_deref().unwrap_or_default())?;
-    // Accept up to 2% below the observed bid (partial-depth safety).
-    let min_out = ((bid_per_unit * h.amount_wallet as f64) * 0.98) as u64;
-    let resp = sui_tx::tx::deepbook::swap_base_for_quote(
-        &wrap.client,
-        &wrap.signer,
-        handles.package,
-        pool,
-        &h.option_coin_type,
-        &h.settlement_coin_type,
-        deep,
-        h.amount_wallet,
-        min_out,
-        p.vault_address,
-        p.cfg.gas_budget,
-    )
-    .await?;
-    tracing::info!(
-        bucket = %h.bucket_id.to_hex(),
-        amount = h.amount_wallet,
-        min_out,
-        digest = %sui_tx::tx::tx_digest(&resp),
-        "resold option coins into pool bid (proceeds → vault)"
-    );
-    Ok(())
-}
 
 /// Exercise funded from wallet cash: gather strike cost → `bucket::exercise`
 /// → underlying to the vault.

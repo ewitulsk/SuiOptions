@@ -125,9 +125,13 @@ pub struct BucketDto {
     /// DeepBook pool trading this bucket's call coin (SO-153). `null` until
     /// a venue is created on-chain.
     pub deepbook_pool_id: Option<String>,
-    /// Whether the DeepBook trade panel should be live: a pool exists, the
-    /// bucket isn't cleaned, and it hasn't expired. `invalidated` does NOT
-    /// gate this — invalidation freezes new mints, not secondary trading.
+    /// In-house exchange market (SettlementRegistry) trading this bucket's
+    /// option coin (SO-416). `null` until a market is listed on-chain.
+    pub exchange_market_id: Option<String>,
+    /// Whether the secondary-market trade panel should be live: a venue
+    /// exists (exchange market or, legacy, a DeepBook pool), the bucket
+    /// isn't cleaned, and it hasn't expired. `invalidated` does NOT gate
+    /// this — invalidation freezes new mints, not secondary trading.
     pub tradeable: bool,
     /// Write/RFQ liveness (SO-394): not cleaned, not expired, not
     /// invalidated. A pool-less any-strike bucket is RFQ-tradeable from
@@ -278,7 +282,10 @@ pub struct BucketDetailDto {
     pub option_kind: String,
     /// DeepBook pool for this bucket (SO-153); `null` if none.
     pub deepbook_pool_id: Option<String>,
-    /// Pool exists, bucket not cleaned, not expired (see `/buckets`).
+    /// In-house exchange market for this bucket (SO-416); `null` if none.
+    pub exchange_market_id: Option<String>,
+    /// Venue exists (exchange market or DeepBook pool), bucket not cleaned,
+    /// not expired (see `/buckets`).
     pub tradeable: bool,
     /// See `/buckets`: write/RFQ liveness (pool-less buckets included).
     pub rfq_tradeable: bool,
@@ -353,16 +360,23 @@ fn detail_dto_from(b: &IndexerBucket, catalog: &TokenCatalog, now_ms: i64) -> Bu
         option_coin_type: b.call_type.to_canonical(),
         option_kind: b.option_kind.clone(),
         deepbook_pool_id: b.deepbook_pool_id.as_ref().map(|p| p.to_hex()),
-        tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
+        exchange_market_id: b.exchange_market_id.as_ref().map(|m| m.to_hex()),
+        tradeable: is_tradeable(has_venue(b), b.cleaned, b.expiry_ms, now_ms),
         rfq_tradeable: is_rfq_tradeable(b.cleaned, b.invalidated, b.expiry_ms, now_ms),
-        pool_tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
+        pool_tradeable: is_tradeable(has_venue(b), b.cleaned, b.expiry_ms, now_ms),
     }
+}
+
+/// A secondary-market venue exists: an in-house exchange market (SO-416,
+/// preferred) or a legacy DeepBook pool.
+fn has_venue(b: &IndexerBucket) -> bool {
+    b.exchange_market_id.is_some() || b.deepbook_pool_id.is_some()
 }
 
 /// SO-153 tradeable gate. `invalidated` intentionally absent — it freezes
 /// new mints, not secondary-market transfers of already-minted coins.
-fn is_tradeable(has_pool: bool, cleaned: bool, expiry_ms: u64, now_ms: i64) -> bool {
-    has_pool && !cleaned && (expiry_ms as i64) > now_ms
+fn is_tradeable(has_venue: bool, cleaned: bool, expiry_ms: u64, now_ms: i64) -> bool {
+    has_venue && !cleaned && (expiry_ms as i64) > now_ms
 }
 
 /// Write/RFQ liveness (SO-394): the mint path is open — no pool required.
@@ -730,7 +744,8 @@ fn append_synthetic_strikes(
             fill_pct: Some(0.0),
             invalidated: false,
             deepbook_pool_id: None,
-            // A strike that doesn't exist yet has no pool and no secondary
+            exchange_market_id: None,
+            // A strike that doesn't exist yet has no venue and no secondary
             // market, but the mint path is open the moment it's created —
             // which is exactly what `rfq_tradeable` gates.
             tradeable: false,
@@ -772,6 +787,7 @@ fn into_local_bucket(b: indexer_graphql::Bucket) -> (protocol_types::ids::Object
             invalidated: b.invalidated,
             option_kind: b.option_kind,
             deepbook_pool_id: b.deepbook_pool_id.map(|p| p.to_hex()),
+            exchange_market_id: b.exchange_market_id.map(|m| m.to_hex()),
         },
     )
 }
@@ -874,9 +890,20 @@ fn dto_from(
         fill_pct,
         invalidated: b.invalidated,
         deepbook_pool_id: b.deepbook_pool_id.clone(),
-        tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
+        exchange_market_id: b.exchange_market_id.clone(),
+        tradeable: is_tradeable(
+            b.exchange_market_id.is_some() || b.deepbook_pool_id.is_some(),
+            b.cleaned,
+            b.expiry_ms,
+            now_ms,
+        ),
         rfq_tradeable: is_rfq_tradeable(b.cleaned, b.invalidated, b.expiry_ms, now_ms),
-        pool_tradeable: is_tradeable(b.deepbook_pool_id.is_some(), b.cleaned, b.expiry_ms, now_ms),
+        pool_tradeable: is_tradeable(
+            b.exchange_market_id.is_some() || b.deepbook_pool_id.is_some(),
+            b.cleaned,
+            b.expiry_ms,
+            now_ms,
+        ),
     }
 }
 
@@ -943,6 +970,7 @@ mod tests {
             invalidated: false,
             option_kind: "call".to_string(),
             deepbook_pool_id: None,
+            exchange_market_id: None,
         }
     }
 
@@ -1046,6 +1074,7 @@ mod tests {
             invalidated: false,
             option_kind: "call".to_string(),
             deepbook_pool_id: None,
+            exchange_market_id: None,
         };
         let s = group_into_series(vec![(ObjectId::new([0xff; 32]), b)], &cat, NOW_MS);
         // 150 * 10^(6-9-0) = 0.15
@@ -1076,6 +1105,7 @@ mod tests {
             invalidated: false,
             option_kind: "call".to_string(),
             deepbook_pool_id: None,
+            exchange_market_id: None,
         };
         let s = group_into_series(vec![(ObjectId::new([0xfe; 32]), b)], &cat, NOW_MS);
         // 15_000 * 10^(6 - 6 - 5) = 0.15 USD
@@ -1115,6 +1145,7 @@ mod tests {
             invalidated: false,
             option_kind: "call".to_string(),
             deepbook_pool_id: None,
+            exchange_market_id: None,
         };
         let s = group_into_series(vec![(ObjectId::new([0x11; 32]), b)], &cat, NOW_MS);
         assert_eq!(s[0].asset_coin_type, format!("0x{raw}::tbtc::TBTC"));
@@ -1175,6 +1206,7 @@ mod tests {
             invalidated: false,
             option_kind: "call".to_string(),
             deepbook_pool_id: None,
+            exchange_market_id: None,
         }
     }
 

@@ -11,6 +11,7 @@ import { type ReactNode } from "react";
 
 import type { Bucket, Series } from "../api/client";
 import { useCallTokenLots } from "../api/useCallTokenLots";
+import { useExchangeMarketFor } from "../api/orderbook";
 import { useOptionMetrics } from "../api/optionMetrics";
 import { usePositionEconomics, useDayChange } from "../api/positionEconomics";
 import { formatPrice } from "../format";
@@ -68,7 +69,9 @@ export function BuyDetailTabs({ bucket, series, spot, mid, wallet, tab, onTabCha
   const lotsQuery = useCallTokenLots(wallet);
   const lots = lotsQuery.data ?? [];
   const econ = usePositionEconomics(lots, bucket.bucket_id, mid);
-  const day = useDayChange(bucket.deepbook_pool_id, econ.qty, mid);
+  // price-charting keys exchange markets by their registry id (SO-416).
+  const { market } = useExchangeMarketFor(bucket);
+  const day = useDayChange(market?.registryId ?? null, econ.qty, mid);
 
   const m = metrics.data;
   const greekLoading = metrics.isFetching && !m;

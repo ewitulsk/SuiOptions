@@ -1,4 +1,3 @@
-import { DeepBookMarkets } from "../components/DeepBookMarkets";
 import { IndexerProgressBar } from "../components/IndexerProgressBar";
 import { LiveBuckets } from "../components/LiveBuckets";
 import { useQuotingStatus } from "../api/useQuotingStatus";
@@ -20,7 +19,6 @@ export function Debug() {
 
         <IndexerProgressBar />
         <LiveBuckets />
-        <DeepBookMarkets />
       </div>
     </div>
   );

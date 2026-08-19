@@ -146,6 +146,39 @@ fn resolve_deepbook_fill(
     ))
 }
 
+/// Promote a decoded exchange `FillEvent` into a `ChainEvent` if its registry
+/// is one of OUR option-market listings; `None` for fills on spot markets
+/// (SO-416). A same-checkpoint `OptionMarketListed` is visible via
+/// `local_markets`.
+fn resolve_exchange_fill(
+    store: &Store,
+    local_markets: &std::collections::HashMap<
+        protocol_types::ids::ObjectId,
+        protocol_types::ids::ObjectId,
+    >,
+    partial: event_types::ExchangeFillPartial,
+) -> Option<protocol_types::events::ChainEvent> {
+    let bucket_id = local_markets
+        .get(&partial.registry)
+        .copied()
+        .or_else(|| store.bucket_by_exchange_registry(&partial.registry))?;
+    Some(protocol_types::events::ChainEvent::ExchangeOptionFill(
+        protocol_types::events::ExchangeOptionFill {
+            registry: partial.registry,
+            bucket_id,
+            digest: format!("0x{}", hex::encode(&partial.digest)),
+            maker: partial.maker,
+            taker: partial.taker,
+            base_amount: partial.base_amount,
+            quote_amount: partial.quote_amount,
+            maker_fee: partial.maker_fee,
+            taker_fee: partial.taker_fee,
+            maker_sold_base: partial.maker_sold_base,
+            timestamp_ms: partial.timestamp_ms,
+        },
+    ))
+}
+
 #[async_trait]
 impl Worker for ProtocolEventWorker {
     type Result = ();
@@ -169,6 +202,13 @@ impl Worker for ProtocolEventWorker {
         // Pools created earlier in THIS checkpoint, so a same-checkpoint
         // OrderFilled can resolve its bucket (SO-209). pool_id → bucket_id.
         let mut local_pools: std::collections::HashMap<
+            protocol_types::ids::ObjectId,
+            protocol_types::ids::ObjectId,
+        > = Default::default();
+        // Exchange option markets listed earlier in THIS checkpoint, so a
+        // same-checkpoint FillEvent can resolve its bucket (SO-416).
+        // registry → bucket_id.
+        let mut local_markets: std::collections::HashMap<
             protocol_types::ids::ObjectId,
             protocol_types::ids::ObjectId,
         > = Default::default();
@@ -199,6 +239,11 @@ impl Worker for ProtocolEventWorker {
                                 b.call_type.to_canonical(),
                                 (b.bucket_id, b.settlement_type.clone()),
                             );
+                        }
+                        if let protocol_types::events::ChainEvent::OptionMarketListed(m) = &parsed {
+                            // A FillEvent later in this checkpoint resolves
+                            // its bucket via this map (SO-416).
+                            local_markets.insert(m.registry, m.bucket);
                         }
                         metrics::counter!(
                             "indexer_events_decoded_total",
@@ -287,6 +332,7 @@ impl Worker for ProtocolEventWorker {
                             .increment(1);
                             decoded.push((ev, tx_digest.clone(), idx as i32));
                         }
+                        continue;
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -295,6 +341,39 @@ impl Worker for ProtocolEventWorker {
                             tx = %tx_digest,
                             event_type = %type_str,
                             "failed to decode DeepBook OrderFilled; skipping"
+                        );
+                        continue;
+                    }
+                }
+                // …or an in-house exchange FillEvent on one of our option
+                // markets (SO-416). Fills on spot markets resolve to None.
+                match event_types::parse_exchange_fill(&self.types, &type_str, &event.contents) {
+                    Ok(Some(partial)) => {
+                        if let Some(ev) =
+                            resolve_exchange_fill(&self.store, &local_markets, partial)
+                        {
+                            debug!(
+                                checkpoint = seq,
+                                tx = %tx_digest,
+                                event_idx = idx,
+                                event = ?ev,
+                                "picked up exchange fill on an option market"
+                            );
+                            metrics::counter!(
+                                "indexer_events_decoded_total",
+                                "event_type" => event_type_tag(&ev),
+                            )
+                            .increment(1);
+                            decoded.push((ev, tx_digest.clone(), idx as i32));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!(
+                            error = %e,
+                            tx = %tx_digest,
+                            event_type = %type_str,
+                            "failed to decode exchange FillEvent; skipping"
                         );
                     }
                 }
@@ -341,7 +420,7 @@ mod tests {
     #[test]
     fn dispatch_round_trips_a_bucket_created_event_into_store() {
         let types = EventTypes::for_packages(
-            event_types::PackageIds { core: "0xabc", auction: Some("0xa1"), rfq: Some("0xf1"), vault: Some("0xe1"), trading_vault: None, deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: None },
+            event_types::PackageIds { core: "0xabc", auction: Some("0xa1"), rfq: Some("0xf1"), vault: Some("0xe1"), trading_vault: None, deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: None, exchange_listing: None, exchange: None },
             None,
         );
         let store = Store::new();

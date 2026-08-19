@@ -13,6 +13,8 @@ diesel::table! {
         current_fee_bps -> Int8,
         enabled         -> Bool,
         listed_at       -> Timestamptz,
+        source          -> Text,
+        paused          -> Bool,
     }
 }
 

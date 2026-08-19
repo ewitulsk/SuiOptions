@@ -10,11 +10,13 @@
 
 pub mod auctions;
 pub mod book;
+pub mod exchange_client;
 pub mod exits;
 pub mod guards;
 pub mod hedge;
 pub mod history;
 pub mod limits;
+pub mod listings;
 pub mod model;
 pub mod monitors;
 pub mod provision;
@@ -76,6 +78,9 @@ pub struct DeskConfig {
     pub hedge: hedge::HedgeConfig,
     pub auctions: auctions::AuctionsConfig,
     pub exits: exits::ExitsConfig,
+    /// `[desk.listings]` — resting-ask exits on the in-house exchange
+    /// (SO-416).
+    pub listings: listings::ListingsConfig,
     pub monitors: monitors::MonitorsConfig,
     /// `[desk.provision]` — create a vault when there is none to adopt.
     pub provision: provision::ProvisionConfig,
@@ -101,6 +106,7 @@ impl Default for DeskConfig {
             hedge: hedge::HedgeConfig::default(),
             auctions: auctions::AuctionsConfig::default(),
             exits: exits::ExitsConfig::default(),
+            listings: listings::ListingsConfig::default(),
             monitors: monitors::MonitorsConfig::default(),
             provision: provision::ProvisionConfig::default(),
             history: history::HistoryConfig::default(),
@@ -323,6 +329,9 @@ pub struct DeskShared {
     pub spots: RwLock<HashMap<String, SpotSnapshot>>,
     /// Last stress-suite result (per-scenario drawdowns + the gate).
     pub stress: RwLock<Option<StressSnapshot>>,
+    /// Per-bucket resting exchange asks (the listings engine writes;
+    /// `/desk/state` reads) — SO-416.
+    pub listings: RwLock<HashMap<protocol_types::ids::ObjectId, listings::ListingSnapshot>>,
 }
 
 impl DeskShared {
@@ -436,7 +445,9 @@ impl Desk {
     }
 
     /// Held long units in the same series (strike/expiry/kind) available
-    /// to cover a proposed write.
+    /// to cover a proposed write. Units resting as exchange asks
+    /// (SO-416) are excluded — they may sell at any moment, so they
+    /// cannot double as cover.
     fn cover_available(&self, inputs: &RfqInputs) -> u64 {
         let book = self.book.read();
         book.holdings
@@ -447,7 +458,7 @@ impl Desk {
                     && h.strike_scale == inputs.strike_scale
                     && h.expiry_ms == inputs.expiry_ms
             })
-            .map(|h| h.amount())
+            .map(|h| h.amount().saturating_sub(book.listed_units(&h.bucket_id)))
             .sum()
     }
 }
@@ -493,14 +504,18 @@ pub struct DeskParams {
     /// options_adapter package — vault-funded auction bids disabled
     /// when absent.
     pub options_adapter_package: Option<ObjectID>,
-    /// deepbook_adapter package — vault-custody resale disabled when
-    /// absent.
-    pub deepbook_adapter_package: Option<ObjectID>,
-    /// Shared `IntegrationRegistry` / `PoolAllowlist` (token-info
-    /// `trading_vault_objects`). Curator-session flows need both.
+    /// exchange_adapter package — exchange listings (direct escrow)
+    /// disabled when absent.
+    pub exchange_adapter_package: Option<ObjectID>,
+    /// exchange_listing package + shared `ListingAuthority` —
+    /// permissionless option-market listing (SO-416); with them absent
+    /// the listings engine only serves markets that already exist.
+    pub exchange_listing_package: Option<ObjectID>,
+    pub exchange_listing_authority: Option<ObjectID>,
+    /// Shared `IntegrationRegistry` (token-info `trading_vault_objects`).
+    /// Curator-session flows need it.
     pub integration_registry: Option<ObjectID>,
-    pub pool_allowlist: Option<ObjectID>,
-    /// DeepBook deployment — resale/flash exits disabled when absent.
+    /// DeepBook deployment — flash-exercise exits disabled when absent.
     pub deepbook: Option<DeepBookHandles>,
     /// The deployment's DEEP token type (token-info `deep_coin_type`).
     pub deep_coin_type: Option<String>,
@@ -626,6 +641,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         marks: RwLock::new(HashMap::new()),
         spots: RwLock::new(HashMap::new()),
         stress: RwLock::new(None),
+        listings: RwLock::new(HashMap::new()),
     });
 
     let mut hedge_venues: Vec<Arc<dyn hedge::HedgeVenue>> = Vec::new();
@@ -750,7 +766,8 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         }
     }
 
-    // Exit ladder.
+    // Exit ladder (offset close / hold / exercise; resale is the
+    // listings engine's resting asks).
     exits::spawn_exits(exits::ExitsParams {
         cfg: p.cfg.exits.clone(),
         secrets: p.secrets.clone(),
@@ -768,8 +785,24 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         core_package: p.core_package,
         vault_address,
         curator: curator_refs,
-        deepbook_adapter_package: p.deepbook_adapter_package,
-        pool_allowlist: p.pool_allowlist,
+    });
+
+    // Exchange listings (SO-416): rest asks for the desk's option
+    // inventory on the in-house exchange; the exchange's matching engine
+    // executes the resales.
+    listings::spawn_listings(listings::ListingsParams {
+        cfg: p.cfg.listings.clone(),
+        refresh_secs: p.cfg.refresh_secs,
+        secrets: p.secrets.clone(),
+        network: p.network,
+        book: Arc::clone(&book),
+        shared: Arc::clone(&shared),
+        curator: curator_refs,
+        vault_protocol_config: p.vault_protocol_config,
+        exchange_adapter_package: p.exchange_adapter_package,
+        exchange_listing_package: p.exchange_listing_package,
+        exchange_listing_authority: p.exchange_listing_authority,
+        indexer_url: p.indexer_url.clone(),
     });
 
     // `/desk/state` reads the same roster the monitors watch.

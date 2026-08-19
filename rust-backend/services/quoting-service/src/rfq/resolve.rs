@@ -167,6 +167,7 @@ mod tests {
             invalidated: false,
             option_kind: "call".into(),
             deepbook_pool_id: None,
+            exchange_market_id: None,
         }
     }
 }

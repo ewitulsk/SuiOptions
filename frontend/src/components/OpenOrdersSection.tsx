@@ -1,23 +1,29 @@
-// Open orders for a bucket's DeepBook pool (SO-236). Lifted out of TradePanel so
-// it can live as the "orders" tab in BuyDetailTabs. Self-contained: it owns the
-// BalanceManager / open-order reads and the cancel / withdraw PTBs.
+// Open exchange orders for a bucket's market (SO-236/SO-416). Lives as the
+// "orders" tab in BuyDetailTabs. Self-contained: it owns the open-order read,
+// the signed soft-cancel (a personal-message DELETE to the orderbook — no
+// transaction), and the maker-escrow withdraw PTBs.
 import { optionCoinType } from "../api/client";
 
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCurrentAccount } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignPersonalMessage } from "@mysten/dapp-kit";
+import { normalizeStructTag } from "@mysten/sui/utils";
 
 import type { Bucket, Series } from "../api/client";
 import { posthog } from "../lib/posthog";
 import {
-  useBalanceManager,
-  useBmBalances,
-  useOpenOrders,
-  useOpenOrderDetails,
-  type PoolRef,
-} from "../api/deepbook";
+  cancelOrder,
+  toBigint,
+  useEscrowBalances,
+  useExchangeMarketFor,
+  useOpenExchangeOrders,
+  type AccountOrder,
+} from "../api/orderbook";
+import { useExchangeBalanceManager } from "../api/exchangeAccount";
+import { useSuiNetwork } from "../lib/suiGrpc";
 import { formatPrice } from "../format";
-import { buildCancelAllTx, buildCancelOrderTx, buildWithdrawAllTx } from "../tx/deepbook";
+import { buildCancelMessage, digestFromHex, splitWalletSignature } from "../tx/exchangeOrders";
+import { buildEscrowWithdrawTx } from "../tx/exchangeEscrow";
 import { useSubmitTransaction } from "../tx/submit";
 
 type Props = {
@@ -39,42 +45,37 @@ export function OpenOrdersSection({ bucket, series }: Props) {
   const account = useCurrentAccount();
   const submitTx = useSubmitTransaction();
   const queryClient = useQueryClient();
+  const network = useSuiNetwork();
+  const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
   const baseDec = series.asset_decimals ?? 8;
   const quoteDec = series.settlement_decimals ?? 6;
-  const pool: PoolRef | null = bucket.deepbook_pool_id
-    ? {
-        poolId: bucket.deepbook_pool_id,
-        baseCoinType: optionCoinType(bucket),
-        quoteCoinType: series.settlement_coin_type,
-        baseDecimals: baseDec,
-        quoteDecimals: quoteDec,
-      }
-    : null;
+  const baseType = normalizeStructTag(optionCoinType(bucket));
+  const quoteType = normalizeStructTag(series.settlement_coin_type);
 
+  const { market } = useExchangeMarketFor(bucket);
   const addr = account?.address ?? null;
-  const bm = useBalanceManager(addr);
-  const openOrders = useOpenOrders(pool, bm.data ?? null, addr);
-  const orderDetails = useOpenOrderDetails(pool, openOrders.data, addr);
-  const bmBalances = useBmBalances(pool, bm.data ?? null, addr);
+  const orders = useOpenExchangeOrders(addr);
+  const bm = useExchangeBalanceManager(addr, network);
+  const escrow = useEscrowBalances(bm.data ?? null);
 
   const run = async (
     label: string,
-    build: () => Parameters<typeof submitTx>[0],
+    action: () => Promise<unknown>,
     event?: { name: string; props?: Record<string, unknown> },
   ) => {
     setBusy(true);
     setNote(null);
     try {
-      await submitTx(build());
+      await action();
       if (event) posthog.capture(event.name, { ...event.props, wallet_address: addr });
       setNote(`${label} submitted`);
       for (const key of [
-        "deepbook-open-orders",
-        "deepbook-open-order-details",
-        "deepbook-bm-balances",
+        "exchange-open-orders",
+        "exchange-book",
+        "exchange-escrow-balances",
         "coin-balance",
       ]) {
         queryClient.invalidateQueries({ queryKey: [key] });
@@ -87,57 +88,94 @@ export function OpenOrdersSection({ bucket, series }: Props) {
     }
   };
 
-  if (!pool || !bm.data) {
-    return <div className="panel__sub">enable trading to see open orders</div>;
+  if (!market) {
+    return <div className="panel__sub">no exchange market listed for this strike yet</div>;
+  }
+  if (!addr) {
+    return <div className="panel__sub">connect a wallet to see open orders</div>;
   }
 
-  const bmId = bm.data;
-  const bmBase = bmBalances.data?.baseRaw ?? 0n;
-  const bmQuote = bmBalances.data?.quoteRaw ?? 0n;
+  const open = (orders.data ?? []).filter(
+    (o) => o.order.registryId === market.registryId && o.status === "OPEN",
+  );
   const settle = series.settlement_symbol;
-  const poolRef = {
-    poolId: pool.poolId,
-    bmId,
-    baseCoinType: pool.baseCoinType,
-    quoteCoinType: pool.quoteCoinType,
+  const count = open.length;
+
+  /** Side / price / remaining base, derived from the signed order terms. */
+  const rowView = (o: AccountOrder) => {
+    const isBid = normalizeStructTag(o.order.makerToken) === quoteType;
+    const baseRaw = toBigint(isBid ? o.order.takerAmount : o.order.makerAmount);
+    const quoteRaw = toBigint(isBid ? o.order.makerAmount : o.order.takerAmount);
+    const base = Number(baseRaw) / 10 ** baseDec;
+    const price = base > 0 ? Number(quoteRaw) / 10 ** quoteDec / base : 0;
+    // filledTaker accrues in TAKER-token units.
+    const filledTaker = Number(toBigint(o.filledTaker));
+    const takerTotal = Number(toBigint(o.order.takerAmount));
+    const fillFrac = takerTotal > 0 ? filledTaker / takerTotal : 0;
+    const remaining = base * Math.max(0, 1 - fillFrac);
+    return { isBid, price, remaining };
   };
-  const count = openOrders.data?.length ?? 0;
+
+  const cancel = (o: AccountOrder) =>
+    void run(
+      "cancel",
+      async () => {
+        const message = buildCancelMessage(digestFromHex(o.digest));
+        const { signature } = await signPersonalMessage({ message });
+        const sig = splitWalletSignature(signature);
+        await cancelOrder(o.digest, {
+          scheme: sig.scheme,
+          signature: sig.signature,
+          publicKey: sig.publicKey,
+        });
+      },
+      {
+        name: "exchange_order_cancelled",
+        props: { order_digest: o.digest, market_id: market.registryId },
+      },
+    );
+
+  const escrowBase = escrow.data?.[baseType] ?? 0n;
+  const escrowQuote = escrow.data?.[quoteType] ?? 0n;
+
+  const withdraw = (coinType: string, amount: bigint, label: string) =>
+    void run(
+      `withdraw ${label}`,
+      () =>
+        submitTx(
+          buildEscrowWithdrawTx({ bmId: bm.data!, coinType, amount, recipient: addr }),
+        ),
+      { name: "exchange_escrow_withdrawn", props: { coin_type: coinType } },
+    );
 
   return (
     <div style={{ fontSize: 13 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <span style={{ opacity: 0.8 }}>open orders ({count})</span>
-        <span style={{ display: "flex", gap: 6 }}>
-          {count > 0 && (
-            <button
-              disabled={busy}
-              onClick={() =>
-                void run("cancel all", () => buildCancelAllTx(poolRef), {
-                  name: "deepbook_order_cancelled",
-                  props: { scope: "all", pool_id: pool.poolId },
-                })
-              }
-              style={ctrlBtn}
-            >
-              cancel all
-            </button>
-          )}
-          {(bmBase > 0n || bmQuote > 0n) && addr && (
-            <button
-              disabled={busy}
-              onClick={() =>
-                void run(
-                  "withdraw",
-                  () => buildWithdrawAllTx({ ...poolRef, recipient: addr }),
-                  { name: "deepbook_funds_withdrawn", props: { pool_id: pool.poolId } },
-                )
-              }
-              style={ctrlBtn}
-            >
-              withdraw all
-            </button>
-          )}
-        </span>
+        {bm.data && (escrowBase > 0n || escrowQuote > 0n) && (
+          <span style={{ display: "flex", gap: 6 }}>
+            {escrowQuote > 0n && (
+              <button
+                disabled={busy}
+                onClick={() => withdraw(quoteType, escrowQuote, settle)}
+                style={ctrlBtn}
+                title="Withdraw settlement escrow back to your wallet"
+              >
+                withdraw {formatPrice(Number(escrowQuote) / 10 ** quoteDec)} {settle}
+              </button>
+            )}
+            {escrowBase > 0n && (
+              <button
+                disabled={busy}
+                onClick={() => withdraw(baseType, escrowBase, "options")}
+                style={ctrlBtn}
+                title="Withdraw option-coin escrow back to your wallet"
+              >
+                withdraw {Number(escrowBase) / 10 ** baseDec} options
+              </button>
+            )}
+          </span>
+        )}
       </div>
 
       {count === 0 ? (
@@ -150,32 +188,27 @@ export function OpenOrdersSection({ bucket, series }: Props) {
             <span style={{ flex: 1, textAlign: "right" }}>price ({settle})</span>
             <span style={{ flex: "0 0 52px" }} />
           </div>
-          {(openOrders.data ?? []).map((id) => {
-            const d = orderDetails.data?.find((o) => o.orderId === id);
+          {open.map((o) => {
+            const d = rowView(o);
             return (
-              <div key={id} style={{ display: "flex", alignItems: "center", marginTop: 4 }}>
+              <div key={o.digest} style={{ display: "flex", alignItems: "center", marginTop: 4 }}>
                 <span
                   style={{
                     flex: "0 0 44px",
                     fontWeight: 600,
-                    color: d ? (d.isBid ? "var(--aqua-up, #1fbf75)" : "var(--aqua-down, #e15d6b)") : "inherit",
+                    color: d.isBid ? "var(--aqua-up, #1fbf75)" : "var(--aqua-down, #e15d6b)",
                   }}
                 >
-                  {d ? (d.isBid ? "buy" : "sell") : "—"}
+                  {d.isBid ? "buy" : "sell"}
                 </span>
                 <span style={{ flex: 1, textAlign: "right" }}>
-                  {d ? d.remaining.toLocaleString(undefined, { maximumFractionDigits: 6 }) : "…"}
+                  {d.remaining.toLocaleString(undefined, { maximumFractionDigits: 6 })}
                 </span>
-                <span style={{ flex: 1, textAlign: "right" }}>{d ? formatPrice(d.price) : "…"}</span>
+                <span style={{ flex: 1, textAlign: "right" }}>{formatPrice(d.price)}</span>
                 <span style={{ flex: "0 0 52px", textAlign: "right" }}>
                   <button
                     disabled={busy}
-                    onClick={() =>
-                      void run("cancel", () => buildCancelOrderTx({ ...poolRef, orderId: BigInt(id) }), {
-                        name: "deepbook_order_cancelled",
-                        props: { scope: "single", order_id: id, pool_id: pool.poolId },
-                      })
-                    }
+                    onClick={() => cancel(o)}
                     style={{ fontSize: 11, cursor: "pointer", background: "transparent", border: "none", color: "var(--aqua-down, #e15d6b)" }}
                   >
                     cancel

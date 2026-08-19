@@ -24,7 +24,7 @@ use protocol_types::events::{
     AuctionBid, AuctionCreated, AuctionSettled,
     AuctionUnfilled, BucketCleaned, BucketCreated, BucketInvalidated, BucketRevalidated,
     ChainEvent, CollateralizedWrite, EquityPosted, Exercised, ExpiredOptionBurned, FeeUpdated,
-    InstantWithdraw, OffsetClosed,
+    InstantWithdraw, OffsetClosed, OptionMarketListed,
     PutBucketCleaned, PutBucketCreated, PutBucketInvalidated, PutBucketRevalidated,
     PutCollateralizedWrite, PutExercised, PutExpiredOptionBurned, PutRedeemed, PutRfqCreated,
     PutRfqExpiredUnsold, PutRfqSettled, PutSpreadClosed, PutSpreadExercised, PutSpreadRedeemed,
@@ -80,6 +80,10 @@ pub struct PackageIds<'a> {
     pub exchange_adapter: Option<&'a str>,
     /// equity_oracle (SO-299), optional like `trading_vault`.
     pub equity_oracle: Option<&'a str>,
+    /// exchange_listing (SO-415/416), optional like `trading_vault`.
+    pub exchange_listing: Option<&'a str>,
+    /// exchange (in-house orderbook, SO-416), optional like `trading_vault`.
+    pub exchange: Option<&'a str>,
 }
 
 /// All the event type strings the indexer subscribes to, derived from the
@@ -218,6 +222,12 @@ pub struct EventTypes {
     pub put_spread_closed: String,
     pub put_spread_redeemed: String,
     pub vol_posted: String,
+    // In-house exchange secondary market (SO-416).
+    pub option_market_listed: String,
+    /// The exchange's `settlement::FillEvent`. Not dispatched to a
+    /// `ChainEvent` directly — the worker resolves registry → bucket via
+    /// [`parse_exchange_fill`] and promotes or drops it.
+    pub exchange_fill: String,
 }
 
 impl EventTypes {
@@ -270,6 +280,14 @@ impl EventTypes {
         let vb = |name: &str| match pkgs.options_adapter {
             Some(pkg) => format!("{pkg}::vol_book::{name}"),
             None => format!("unset::vol_book::{name}"),
+        };
+        let el = |name: &str| match pkgs.exchange_listing {
+            Some(pkg) => format!("{pkg}::exchange_listing::{name}"),
+            None => format!("unset::exchange_listing::{name}"),
+        };
+        let exch = |name: &str| match pkgs.exchange {
+            Some(pkg) => format!("{pkg}::settlement::{name}"),
+            None => format!("unset::settlement::{name}"),
         };
         Self {
             bucket_created: core("BucketCreated"),
@@ -384,10 +402,12 @@ impl EventTypes {
             put_spread_closed: core("PutSpreadClosed"),
             put_spread_redeemed: core("PutSpreadRedeemed"),
             vol_posted: vb("VolPosted"),
+            option_market_listed: el("OptionMarketListed"),
+            exchange_fill: exch("FillEvent"),
         }
     }
 
-    pub fn all_strings(&self) -> [&str; 105] {
+    pub fn all_strings(&self) -> [&str; 107] {
         [
             &self.bucket_created,
             &self.write_executed,
@@ -494,6 +514,8 @@ impl EventTypes {
             &self.put_spread_closed,
             &self.put_spread_redeemed,
             &self.vol_posted,
+            &self.option_market_listed,
+            &self.exchange_fill,
         ]
     }
 }
@@ -722,6 +744,8 @@ pub fn dispatch(types: &EventTypes, type_str: &str, contents: &[u8]) -> Result<O
         decode!(TvExternalReturned, TvExternalReturned)
     } else if type_str == types.equity_posted {
         decode!(EquityPosted, EquityPosted)
+    } else if type_str == types.option_market_listed {
+        decode!(OptionMarketListed, OptionMarketListed)
     } else {
         Ok(None)
     }
@@ -882,6 +906,78 @@ pub fn parse_deepbook_order_filled(
     }))
 }
 
+/// Exchange `settlement::FillEvent` decoded but not yet tied to a bucket
+/// (SO-416). The worker resolves `registry` against known option-market
+/// listings and either promotes it into `ChainEvent::ExchangeOptionFill` or
+/// drops it (a fill on a spot market).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExchangeFillPartial {
+    pub registry: ObjectId,
+    pub digest: Vec<u8>,
+    pub maker: SuiAddress,
+    pub taker: SuiAddress,
+    pub base_amount: u64,
+    pub quote_amount: u64,
+    pub maker_fee_bps: u64,
+    pub taker_fee_bps: u64,
+    pub maker_fee: u64,
+    pub taker_fee: u64,
+    pub maker_sold_base: bool,
+    pub taker_token_filled_total: u64,
+    pub timestamp_ms: u64,
+}
+
+/// Raw BCS mirror of the exchange's `settlement::FillEvent` payload. Field
+/// order matches `contracts/exchange/sources/settlement.move`. Non-generic,
+/// so an exact type-string match suffices.
+#[derive(Debug, Deserialize)]
+struct RawExchangeFill {
+    registry: ObjectId,
+    digest: Vec<u8>,
+    maker: SuiAddress,
+    taker: SuiAddress,
+    base_amount: u64,
+    quote_amount: u64,
+    maker_fee_bps: u64,
+    taker_fee_bps: u64,
+    maker_fee: u64,
+    taker_fee: u64,
+    maker_sold_base: bool,
+    taker_token_filled_total: u64,
+    timestamp_ms: u64,
+}
+
+/// Try to parse `type_str` + `contents` as an exchange `FillEvent`.
+/// `Ok(None)` if the type doesn't match; `Err` if it matches but the BCS
+/// payload is malformed.
+pub fn parse_exchange_fill(
+    types: &EventTypes,
+    type_str: &str,
+    contents: &[u8],
+) -> Result<Option<ExchangeFillPartial>> {
+    if type_str != types.exchange_fill {
+        return Ok(None);
+    }
+    let raw: RawExchangeFill = bcs::from_bytes(contents).with_context(|| {
+        format!("bcs decode of exchange FillEvent ({} bytes)", contents.len())
+    })?;
+    Ok(Some(ExchangeFillPartial {
+        registry: raw.registry,
+        digest: raw.digest,
+        maker: raw.maker,
+        taker: raw.taker,
+        base_amount: raw.base_amount,
+        quote_amount: raw.quote_amount,
+        maker_fee_bps: raw.maker_fee_bps,
+        taker_fee_bps: raw.taker_fee_bps,
+        maker_fee: raw.maker_fee,
+        taker_fee: raw.taker_fee,
+        maker_sold_base: raw.maker_sold_base,
+        taker_token_filled_total: raw.taker_token_filled_total,
+        timestamp_ms: raw.timestamp_ms,
+    }))
+}
+
 /// Split `A, B<C, D>, E` at top-level commas only (coin types are usually
 /// concrete, but a depth counter keeps nested generics from breaking us).
 fn split_top_level_generics(s: &str) -> Vec<String> {
@@ -927,7 +1023,7 @@ mod tests {
         "0xfb28c4cbc6865bd1c897d26aecbe1f8792d1509a20ffec692c800660cbec6982";
 
     fn pkgs() -> PackageIds<'static> {
-        PackageIds { core: PKG, auction: Some(AUCTION_PKG), rfq: Some(RFQ_PKG), vault: Some(VAULT_PKG), trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG) }
+        PackageIds { core: PKG, auction: Some(AUCTION_PKG), rfq: Some(RFQ_PKG), vault: Some(VAULT_PKG), trading_vault: Some(TV_PKG), deepbook_adapter: None, options_adapter: None, exchange_adapter: None, equity_oracle: Some(EQUITY_ORACLE_PKG), exchange_listing: None, exchange: None }
     }
 
     fn types() -> EventTypes {

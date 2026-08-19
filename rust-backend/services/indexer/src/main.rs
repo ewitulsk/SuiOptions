@@ -76,6 +76,10 @@ async fn main() -> Result<()> {
     let options_adapter_package_id = snapshot.options_adapter().map(|p| p.package_id.clone());
     let exchange_adapter_package_id = snapshot.exchange_adapter().map(|p| p.package_id.clone());
     let equity_oracle_package_id = snapshot.equity_oracle().map(|p| p.package_id.clone());
+    // In-house exchange + permissionless listing packages (SO-416): optional
+    // like the adapters — absent deployments just don't subscribe.
+    let exchange_package_id = snapshot.exchange().map(|p| p.package_id.clone());
+    let exchange_listing_package_id = snapshot.exchange_listing().map(|p| p.package_id.clone());
     info!(
         network = %cfg.network,
         core_package_id = %core_package_id,
@@ -212,6 +216,8 @@ async fn main() -> Result<()> {
             options_adapter: options_adapter_package_id.as_deref(),
             exchange_adapter: exchange_adapter_package_id.as_deref(),
             equity_oracle: equity_oracle_package_id.as_deref(),
+            exchange_listing: exchange_listing_package_id.as_deref(),
+            exchange: exchange_package_id.as_deref(),
         },
         deepbook_original.as_deref(),
         Arc::clone(&progress_state),

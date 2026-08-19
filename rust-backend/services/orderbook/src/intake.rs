@@ -13,6 +13,7 @@ use serde::Serialize;
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum IntakeErrorCode {
     UnknownMarket,
+    MarketPaused,
     TokenMismatch,
     ZeroAmount,
     AmountRange,
@@ -112,8 +113,13 @@ pub async fn intake_order(
     let market = state
         .market(&signed.registry_id)
         .ok_or_else(|| reject(IntakeErrorCode::UnknownMarket, "unknown registry"))?;
+    // Mirror of the on-chain pause flag: reject at the door instead of
+    // letting crossing orders burn settlement attempts against EPaused.
+    if state.is_paused(&signed.registry_id) {
+        return Err(reject(IntakeErrorCode::MarketPaused, "market is paused"));
+    }
     let now = now_ms();
-    let (digest, side, price_ticks) = validate_stateless(market, signed, &state.intake, now)?;
+    let (digest, side, price_ticks) = validate_stateless(&market, signed, &state.intake, now)?;
     let o = &signed.order;
 
     // delegated signer authorization (§4.3): derived address must be the

@@ -115,22 +115,58 @@ impl Config {
             .with_context(|| format!("env {} in {}", self.env, self.deployments))?;
         let exchange = dep.exchange()?.clone();
         let mut markets = Vec::new();
+        // One malformed listing must never take the venue down (it would
+        // crash-loop the whole service, all markets included): skip + warn.
         for (symbol, m) in &exchange.markets {
-            markets.push(exchange_types::Market {
-                symbol: symbol.clone(),
-                registry_id: exchange_types::SuiAddress::parse(&m.registry_id)
-                    .map_err(|e| anyhow!("market {symbol}: {e}"))?,
-                base: exchange_types::canonicalize_move_type(&m.base)
-                    .map_err(|e| anyhow!("market {symbol}: {e}"))?,
-                quote: exchange_types::canonicalize_move_type(&m.quote)
-                    .map_err(|e| anyhow!("market {symbol}: {e}"))?,
-                tick_size: m.tick_size,
-                min_size: m.min_size,
-                lot_size: m.lot_size,
-                current_fee_bps: m.fee_bps,
-            });
+            let parsed = (|| -> Result<exchange_types::Market> {
+                Ok(exchange_types::Market {
+                    symbol: symbol.clone(),
+                    registry_id: exchange_types::SuiAddress::parse(&m.registry_id)
+                        .map_err(|e| anyhow!("market {symbol}: {e}"))?,
+                    base: exchange_types::canonicalize_move_type(&m.base)
+                        .map_err(|e| anyhow!("market {symbol}: {e}"))?,
+                    quote: exchange_types::canonicalize_move_type(&m.quote)
+                        .map_err(|e| anyhow!("market {symbol}: {e}"))?,
+                    tick_size: m.tick_size,
+                    min_size: m.min_size,
+                    lot_size: m.lot_size,
+                    current_fee_bps: m.fee_bps,
+                })
+            })();
+            match parsed {
+                Ok(m) => markets.push(m),
+                Err(e) => {
+                    tracing::warn!(market = %symbol, error = %e, "skipping malformed deployments market");
+                }
+            }
         }
         Ok((exchange, markets))
+    }
+
+    /// Token catalog for discovered-market symbol/decimals derivation
+    /// (SO-416), plus the core package id for option-coin decoding.
+    pub fn load_catalog(
+        &self,
+    ) -> Result<(Option<String>, Vec<crate::discovery::CatalogToken>)> {
+        let all = deployments::Deployments::load(Path::new(&self.deployments))
+            .with_context(|| format!("loading {}", self.deployments))?;
+        let dep = all
+            .for_env(&self.env)
+            .with_context(|| format!("env {} in {}", self.env, self.deployments))?;
+        let mut tokens = Vec::new();
+        for (symbol, spec) in &dep.token_info {
+            match exchange_types::canonicalize_move_type(&spec.coin_type) {
+                Ok(canonical) => tokens.push(crate::discovery::CatalogToken {
+                    canonical,
+                    symbol: symbol.clone(),
+                    decimals: spec.decimals,
+                }),
+                Err(e) => {
+                    tracing::warn!(token = %symbol, error = %e, "skipping malformed catalog token");
+                }
+            }
+        }
+        Ok((Some(dep.package_info.package_id.clone()), tokens))
     }
 
     /// The standalone ingress whitelist record (SO-384): the shared

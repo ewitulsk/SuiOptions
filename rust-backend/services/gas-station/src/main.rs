@@ -70,13 +70,26 @@ async fn main() -> Result<()> {
         }
     }
 
-    // DeepBook PTBs (SO-154) sponsor only where token-info reports a
-    // deployment; calls target the upgraded package id.
-    let deepbook = snapshot
-        .deepbook()
-        .map(|d| d.package())
-        .transpose()
-        .context("deepbook package id from token-info")?;
+    // Hybrid-exchange PTBs (SO-416: the options secondary market) sponsor
+    // only where token-info reports the exchange deployment; the adapter
+    // and listing leaves extend the shapes when present.
+    let exchange = match snapshot.exchange() {
+        Some(ex) => Some(sui_tx::tx::template::ExchangeSponsorPkgs {
+            exchange: ObjectID::from_hex_literal(&ex.package_id)
+                .context("exchange package id from token-info")?,
+            adapter: snapshot
+                .exchange_adapter()
+                .map(|p| p.package())
+                .transpose()
+                .context("exchange_adapter package id")?,
+            listing: snapshot
+                .exchange_listing()
+                .map(|p| p.package())
+                .transpose()
+                .context("exchange_listing package id")?,
+        }),
+        None => None,
+    };
 
     // CCTP bridge PTBs sponsor only where Circle's TokenMessengerMinter is
     // configured for this network; the burn calls Circle directly.
@@ -144,7 +157,7 @@ async fn main() -> Result<()> {
         vault_pkg,
         &test_tokens,
         allow_faucet,
-        deepbook,
+        exchange,
         cctp,
         trading_vault,
     );
@@ -154,7 +167,7 @@ async fn main() -> Result<()> {
         network = %cfg.network,
         sponsor = %sui.signer.address,
         templates = templates.len(),
-        deepbook = deepbook.is_some(),
+        exchange = exchange.is_some(),
         legacy_vault = vault_pkg.is_some(),
         faucet_tokens = test_tokens.len(),
         threshold_mist = cfg.min_balance_threshold_mist,

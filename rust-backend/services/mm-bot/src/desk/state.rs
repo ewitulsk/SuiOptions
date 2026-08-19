@@ -51,6 +51,8 @@ pub struct DeskStateDto {
     pub funding_rate_annual: f64,
     pub stress: Option<StressDto>,
     pub holdings: Vec<HoldingDto>,
+    /// Resting exchange asks, one per listed holding (SO-416).
+    pub listings: Vec<ListingDto>,
     pub written: Vec<WrittenDto>,
     pub reservations: ReservationsDto,
     pub pnl: PnlDto,
@@ -188,10 +190,29 @@ pub struct HoldingDto {
     pub amount_wallet: u64,
     pub amount_coin_positions: u64,
     pub amount: u64,
-    /// The bucket's DeepBook option pool (resale venue), when one exists.
-    pub pool_id: Option<String>,
+    /// Units committed to a resting exchange ask (SO-416).
+    pub listed_units: u64,
     /// `None` when the market/spot was unavailable last tick.
     pub mark: Option<MarkDto>,
+}
+
+/// One holding's resting exchange ask (the listings engine, SO-416).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingDto {
+    pub bucket_id: String,
+    /// The exchange market's `SettlementRegistry` id.
+    pub market_registry_id: String,
+    pub market_symbol: String,
+    /// Resting order digest (orderbook primary key).
+    pub digest: String,
+    pub price_ticks: u64,
+    /// Quote raw units per base raw unit.
+    pub price_per_unit: f64,
+    /// Base (underlying raw) units resting.
+    pub size_units: u64,
+    pub order_expiry_ms: u64,
+    pub at_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -301,6 +322,7 @@ pub struct ConfigEchoDto {
     pub monitors: MonitorsConfig,
     pub auctions_enabled: bool,
     pub exits_enabled: bool,
+    pub listings_enabled: bool,
 }
 
 // ── snapshot builder ───────────────────────────────────────────────────
@@ -330,9 +352,14 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
     // Book reads + net greeks off the refresher's per-unit marks.
     let per_unit: HashMap<protocol_types::ids::ObjectId, Greeks> =
         marks.iter().map(|(id, m)| (*id, m.greeks)).collect();
-    let (holdings, written, reservations, pnl, naked_written_units, by_expiry, total_greeks) = {
+    let (holdings, written, reservations, pnl, naked_written_units, by_expiry, total_greeks, listed_by_bucket) = {
         let b = desk.book.read();
         let (by_expiry, total) = b.net_greeks(&per_unit);
+        let listed: HashMap<protocol_types::ids::ObjectId, u64> = b
+            .holdings
+            .iter()
+            .map(|h| (h.bucket_id, b.listed_units(&h.bucket_id)))
+            .collect();
         (
             b.holdings.clone(),
             b.written.clone(),
@@ -341,6 +368,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             b.naked_written_units(),
             by_expiry,
             total,
+            listed,
         )
     };
 
@@ -371,10 +399,28 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             amount_wallet: h.amount_wallet,
             amount_coin_positions: h.amount_coin_positions(),
             amount: h.amount(),
-            pool_id: h.pool_id.clone(),
+            listed_units: listed_by_bucket.get(&h.bucket_id).copied().unwrap_or(0),
             mark: mark_dto(&h.bucket_id, h.amount()),
         })
         .collect();
+    let mut listings_dto: Vec<ListingDto> = desk
+        .shared
+        .listings
+        .read()
+        .iter()
+        .map(|(bucket, l)| ListingDto {
+            bucket_id: format!("0x{}", bucket.to_hex()),
+            market_registry_id: l.market_registry_id.clone(),
+            market_symbol: l.market_symbol.clone(),
+            digest: l.digest.clone(),
+            price_ticks: l.price_ticks,
+            price_per_unit: l.price_per_unit,
+            size_units: l.size_units,
+            order_expiry_ms: l.order_expiry_ms,
+            at_ms: l.at_ms,
+        })
+        .collect();
+    listings_dto.sort_by(|a, b| a.bucket_id.cmp(&b.bucket_id));
     let written_dto: Vec<WrittenDto> = written
         .iter()
         .map(|w| WrittenDto {
@@ -528,6 +574,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
         funding_rate_annual,
         stress: stress.map(StressDto::from),
         holdings: holdings_dto,
+        listings: listings_dto,
         written: written_dto,
         reservations: ReservationsDto {
             count: reservations.len(),
@@ -559,6 +606,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             monitors: desk.cfg.monitors,
             auctions_enabled: desk.cfg.auctions.enabled,
             exits_enabled: desk.cfg.exits.enabled,
+            listings_enabled: desk.cfg.listings.enabled,
         },
     }
 }
@@ -634,7 +682,7 @@ mod tests {
             amount_wallet: 2,
             amount_coin_positions: 3,
             amount: 6,
-            pool_id: None,
+            listed_units: 0,
             mark: Some(MarkDto {
                 mark_per_unit: 0.5,
                 value: 3.0,

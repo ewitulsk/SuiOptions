@@ -82,7 +82,7 @@ pub async fn markets(State(state): State<Arc<AppState>>) -> ApiResult {
             "adapterPackageId": d.adapter_package,
             "integrationRegistryId": d.integration_registry_id,
         })),
-        "markets": state.markets,
+        "markets": state.markets_snapshot(),
     })))
 }
 
@@ -378,7 +378,7 @@ pub async fn routes(
         .map_err(|e| ApiError::bad("BAD_TOKEN", e.to_string()))?;
 
     let mut all_ladders = Vec::new();
-    for m in &state.markets {
+    for m in &state.markets_snapshot() {
         if let Some(book) = state.book(&m.registry_id) {
             all_ladders.extend(ladders_for_market(m, &book.lock()));
         }

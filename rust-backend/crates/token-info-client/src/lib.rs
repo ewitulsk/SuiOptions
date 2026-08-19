@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 use tracing::{info, warn};
 
-pub use deployments::{TradingVaultObjectsInfo, DeepBookInfo, PackageInfo, SubPackageInfo, TestTokens, TokenInfo, WhitelistInfo};
+pub use deployments::{TradingVaultObjectsInfo, DeepBookInfo, ExchangeInfo, ExchangeListingInfo, PackageInfo, SubPackageInfo, TestTokens, TokenInfo, WhitelistInfo};
 
 /// One supported-token catalog entry as served by `GET /tokens`.
 ///
@@ -188,6 +188,16 @@ impl Snapshot {
     /// Hybrid-exchange adapter for the trading vault (SO-370).
     pub fn exchange_adapter(&self) -> Option<&SubPackageInfo> {
         self.package_info.exchange_adapter.as_ref()
+    }
+
+    /// Hybrid-exchange settlement package record (markets, package id).
+    pub fn exchange(&self) -> Option<&ExchangeInfo> {
+        self.package_info.exchange.as_ref()
+    }
+
+    /// Permissionless option-market listing package (SO-416).
+    pub fn exchange_listing(&self) -> Option<&ExchangeListingInfo> {
+        self.package_info.exchange_listing.as_ref()
     }
 
     /// Keeper-attested equity oracle for trading-vault external accounts
@@ -484,6 +494,7 @@ mod tests {
                 trading_vault_objects: None,
                 quote_signer_id: None,
                 exchange: None,
+                exchange_listing: None,
                 whitelist: None,
             bucket_registry_id: None,
             },

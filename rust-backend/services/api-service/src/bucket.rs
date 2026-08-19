@@ -20,4 +20,7 @@ pub struct Bucket {
     /// DeepBook pool trading this bucket's call coin (SO-153), hex object
     /// id. `None` until a venue is created.
     pub deepbook_pool_id: Option<String>,
+    /// In-house exchange market (SettlementRegistry) trading this bucket's
+    /// option coin (SO-416), hex object id. `None` until a market is listed.
+    pub exchange_market_id: Option<String>,
 }

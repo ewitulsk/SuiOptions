@@ -25,6 +25,12 @@ api-service-client = { workspace = true }
 indexer-graphql = { workspace = true }
 move-publish   = { workspace = true }
 
+# Exchange listings (SO-416): the desk rests asks on the in-house exchange.
+exchange-types   = { workspace = true }
+exchange-signing = { workspace = true }
+base64           = { workspace = true }
+thiserror        = { workspace = true }
+
 # Sui SDK (used directly for derive token recipient from secret key).
 sui-types = { workspace = true }
 # Live RfqAuction object reads for the on-chain bidder (C2).

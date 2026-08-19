@@ -411,3 +411,107 @@ pub async fn publish_test_tokens(
     })
 }
 
+
+/// SO-416: publish `contracts/exchange-listing` and run its ceremony — park
+/// the exchange's freshly-minted `ListingCap` inside the new
+/// `ListingAuthority` and enable the quote coin with the default listing
+/// economics (mirrors the spot-market conventions in `exchange_markets`).
+pub struct ExchangeListingOutcome {
+    pub package_id: ObjectID,
+    pub upgrade_cap_id: ObjectID,
+    pub listing_authority_id: ObjectID,
+    pub admin_cap_id: ObjectID,
+    pub digest: String,
+}
+
+/// Price grid: 0.001 TUSDC (6 decimals) per lot — same as spot markets.
+const LISTING_TICK_SIZE: u64 = 1_000;
+/// Per-quote defaults cannot know a base's decimals, so the on-chain
+/// minimum stays permissive; clients enforce sensible sizes.
+const LISTING_MIN_SIZE: u64 = 1;
+/// 0.1%, the spot-market convention.
+const LISTING_FEE_BPS: u64 = 10;
+
+pub async fn deploy_exchange_listing(
+    client: &ChainClient,
+    signer: &Signer,
+    path: &Path,
+    env_name: &str,
+    listing_cap_id: ObjectID,
+    quote_coin_type: &str,
+    gas_budget: u64,
+) -> Result<ExchangeListingOutcome> {
+    let out = publish_dep_package(client, signer, path, "exchange_listing", env_name, gas_budget)
+        .await
+        .context("publishing exchange_listing")?;
+    let find = |name: &str| {
+        out.created_objects
+            .iter()
+            .find(|(module, n, _)| module == "exchange_listing" && n == name)
+            .map(|(_, _, id)| *id)
+            .ok_or_else(|| anyhow!("exchange_listing publish created no exchange_listing::{name}"))
+    };
+    let admin_cap_id = find("AdminCap")?;
+    let listing_authority_id = find("ListingAuthority")?;
+    tracing::info!(
+        package = %out.package_id,
+        authority = %listing_authority_id,
+        "exchange_listing published"
+    );
+
+    // Let the fullnode index the fresh objects before the ceremony PTB.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let admin = pt.obj(
+        client
+            .owned_object_arg(admin_cap_id)
+            .await
+            .context("fetching exchange_listing AdminCap")?,
+    )?;
+    let auth = pt.obj(
+        client
+            .shared_object_arg(listing_authority_id, /* mutable */ true)
+            .await
+            .context("fetching shared ListingAuthority")?,
+    )?;
+    let cap = pt.obj(
+        client
+            .owned_object_arg(listing_cap_id)
+            .await
+            .context("fetching exchange ListingCap")?,
+    )?;
+    pt.programmable_move_call(
+        out.package_id,
+        Identifier::new("exchange_listing")?,
+        Identifier::new("deposit_cap")?,
+        vec![],
+        vec![admin, auth, cap],
+    );
+    let quote_tag = <sui_types::TypeTag as std::str::FromStr>::from_str(quote_coin_type)
+        .map_err(|e| anyhow!("parsing quote coin type {quote_coin_type}: {e}"))?;
+    let tick = pt.pure(LISTING_TICK_SIZE)?;
+    let min = pt.pure(LISTING_MIN_SIZE)?;
+    let fee = pt.pure(LISTING_FEE_BPS)?;
+    pt.programmable_move_call(
+        out.package_id,
+        Identifier::new("exchange_listing")?,
+        Identifier::new("set_quote_defaults")?,
+        vec![quote_tag],
+        vec![admin, auth, tick, min, fee],
+    );
+    let resp =
+        sui_tx::tx::submit_ptb(client, signer, pt, gas_budget, "exchange-listing ceremony").await?;
+    tracing::info!(
+        digest = %sui_tx::tx::tx_digest(&resp),
+        quote = quote_coin_type,
+        "listing cap parked + quote defaults set"
+    );
+    Ok(ExchangeListingOutcome {
+        package_id: out.package_id,
+        upgrade_cap_id: out.upgrade_cap_id,
+        listing_authority_id,
+        admin_cap_id,
+        digest: out.digest,
+    })
+}

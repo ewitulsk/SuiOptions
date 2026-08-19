@@ -102,8 +102,8 @@ impl Repo {
 
     // === Markets ===
 
-    pub fn upsert_market(&self, m: &Market) -> Result<(), StoreError> {
-        let row = NewMarket {
+    fn market_row(m: &Market, source: &str) -> Result<NewMarket, StoreError> {
+        Ok(NewMarket {
             registry_id: m.registry_id.to_hex(),
             symbol: m.symbol.clone(),
             base: m.base.clone(),
@@ -112,7 +112,12 @@ impl Repo {
             min_size: to_i64(m.min_size)?,
             lot_size: to_i64(m.lot_size)?,
             current_fee_bps: to_i64(m.current_fee_bps)?,
-        };
+            source: source.to_owned(),
+        })
+    }
+
+    pub fn upsert_market(&self, m: &Market) -> Result<(), StoreError> {
+        let row = Self::market_row(m, "deployments")?;
         diesel::insert_into(exchange_markets::table)
             .values(&row)
             .on_conflict(exchange_markets::registry_id)
@@ -122,9 +127,27 @@ impl Repo {
         Ok(())
     }
 
-    /// Whitelist sync: disable every market row whose registry is no longer
-    /// in the deployments record (stale after a redeploy). Never deletes —
-    /// fills and orders reference the ids. Returns how many were flipped.
+    /// A market discovered from a chain MarketCreatedEvent (permissionless
+    /// listing, SO-416). Insert-only: an existing row — deployments-owned or
+    /// previously discovered — is authoritative for symbol/params, and live
+    /// param changes arrive via Pause/FeeConfig events, never re-creation.
+    /// Returns whether a row was inserted.
+    pub fn insert_discovered_market(&self, m: &Market) -> Result<bool, StoreError> {
+        let row = Self::market_row(m, "discovered")?;
+        let n = diesel::insert_into(exchange_markets::table)
+            .values(&row)
+            .on_conflict(exchange_markets::registry_id)
+            .do_nothing()
+            .execute(&mut self.conn()?)?;
+        Ok(n > 0)
+    }
+
+    /// Whitelist sync: disable every DEPLOYMENTS-sourced market row whose
+    /// registry is no longer in the deployments record (stale after a
+    /// redeploy). Discovered rows are chain-truth and never auto-disabled —
+    /// without the source gate every restart would delist all runtime
+    /// listings. Never deletes — fills and orders reference the ids.
+    /// Returns how many were flipped.
     pub fn disable_markets_absent_from(
         &self,
         current_ids: &[String],
@@ -132,11 +155,84 @@ impl Repo {
         let n = diesel::update(
             exchange_markets::table
                 .filter(exchange_markets::enabled.eq(true))
+                .filter(exchange_markets::source.eq("deployments"))
                 .filter(exchange_markets::registry_id.ne_all(current_ids)),
         )
         .set(exchange_markets::enabled.eq(false))
         .execute(&mut self.conn()?)?;
         Ok(n)
+    }
+
+    /// All enabled markets as `(market, paused)` — the boot authority
+    /// (deployments-mirrored ∪ discovered rows). Rows that fail to parse are
+    /// skipped by the caller, never fatal.
+    pub fn enabled_markets(&self) -> Result<Vec<(Market, bool)>, StoreError> {
+        type Row = (String, String, String, String, i64, i64, i64, i64, bool);
+        let rows: Vec<Row> = exchange_markets::table
+            .filter(exchange_markets::enabled.eq(true))
+            .select((
+                exchange_markets::registry_id,
+                exchange_markets::symbol,
+                exchange_markets::base,
+                exchange_markets::quote,
+                exchange_markets::tick_size,
+                exchange_markets::min_size,
+                exchange_markets::lot_size,
+                exchange_markets::current_fee_bps,
+                exchange_markets::paused,
+            ))
+            .order(exchange_markets::symbol.asc())
+            .load(&mut self.conn()?)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (registry, symbol, base, quote, tick, min, lot, fee, paused) in rows {
+            let Ok(registry_id) = exchange_types::SuiAddress::parse(&registry) else {
+                tracing::warn!(registry, "market row with unparseable registry id; skipping");
+                continue;
+            };
+            out.push((
+                Market {
+                    symbol,
+                    registry_id,
+                    base,
+                    quote,
+                    tick_size: tick as u64,
+                    min_size: min as u64,
+                    lot_size: lot as u64,
+                    current_fee_bps: fee as u64,
+                },
+                paused,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// One enabled market row by registry hex, `(market, paused)`.
+    pub fn get_enabled_market(
+        &self,
+        registry_id: &str,
+    ) -> Result<Option<(Market, bool)>, StoreError> {
+        Ok(self
+            .enabled_markets()?
+            .into_iter()
+            .find(|(m, _)| m.registry_id.to_hex() == registry_id))
+    }
+
+    pub fn set_market_paused(&self, registry_id: &str, paused: bool) -> Result<(), StoreError> {
+        diesel::update(
+            exchange_markets::table.filter(exchange_markets::registry_id.eq(registry_id)),
+        )
+        .set(exchange_markets::paused.eq(paused))
+        .execute(&mut self.conn()?)?;
+        Ok(())
+    }
+
+    pub fn set_market_fee(&self, registry_id: &str, fee_bps: u64) -> Result<(), StoreError> {
+        diesel::update(
+            exchange_markets::table.filter(exchange_markets::registry_id.eq(registry_id)),
+        )
+        .set(exchange_markets::current_fee_bps.eq(to_i64(fee_bps)?))
+        .execute(&mut self.conn()?)?;
+        Ok(())
     }
 
     /// Registry ids of whitelisted markets. Serving/intake is restricted to

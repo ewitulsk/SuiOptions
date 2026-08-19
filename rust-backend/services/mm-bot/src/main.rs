@@ -669,16 +669,25 @@ async fn main() -> Result<()> {
             Some(a) => Some(a.package()?),
             None => None,
         };
-        let deepbook_adapter_package = match snapshot.deepbook_adapter() {
+        // Exchange listings (SO-416): the desk exits inventory via resting
+        // asks on the in-house exchange, so it needs the exchange_adapter
+        // (direct escrow) + exchange_listing (permissionless market
+        // listing) records.
+        let exchange_adapter_package = match snapshot.exchange_adapter() {
             Some(a) => Some(a.package()?),
             None => None,
         };
+        let (exchange_listing_package, exchange_listing_authority) =
+            match snapshot.exchange_listing() {
+                Some(l) => (Some(l.package()?), Some(l.listing_authority()?)),
+                None => (None, None),
+            };
         // Shared governance objects the curator-session calls reference
         // (recorded by the deploy-time activation step, SO-292).
         let tv_objects = snapshot.trading_vault_objects();
-        let (integration_registry, pool_allowlist) = match tv_objects {
-            Some(o) => (Some(o.integration_registry()?), Some(o.pool_allowlist()?)),
-            None => (None, None),
+        let integration_registry = match tv_objects {
+            Some(o) => Some(o.integration_registry()?),
+            None => None,
         };
         let vault_protocol_config = tv_objects
             .context("trading_vault_objects missing from token-info (required by [desk])")?
@@ -761,9 +770,10 @@ async fn main() -> Result<()> {
             })?,
             testnet_seed,
             options_adapter_package,
-            deepbook_adapter_package,
+            exchange_adapter_package,
+            exchange_listing_package,
+            exchange_listing_authority,
             integration_registry,
-            pool_allowlist,
             deepbook,
             deep_coin_type,
         })

@@ -133,10 +133,17 @@ pub struct BucketGql {
     /// DeepBook pool trading this bucket's call coin (SO-152); null until a
     /// venue is created.
     pub deepbook_pool_id: Option<String>,
+    /// In-house exchange market (SettlementRegistry) trading this bucket's
+    /// option coin (SO-416); null until a market is listed.
+    pub exchange_market_id: Option<String>,
 }
 
 impl BucketGql {
-    fn from_row(b: BucketRow, deepbook_pool_id: Option<String>) -> Self {
+    fn from_row(
+        b: BucketRow,
+        deepbook_pool_id: Option<String>,
+        exchange_market_id: Option<String>,
+    ) -> Self {
         BucketGql {
             bucket_id: b.bucket_id,
             asset_type: b.asset_type,
@@ -151,6 +158,7 @@ impl BucketGql {
             invalidated: b.invalidated,
             option_kind: b.option_kind,
             deepbook_pool_id,
+            exchange_market_id,
         }
     }
 }
@@ -643,10 +651,12 @@ impl QueryRoot {
             };
             let pools = repo.deepbook_pool_ids(std::slice::from_ref(&row.bucket_id))?;
             let pool_id = pools.get(&row.bucket_id).cloned();
-            Ok(Some((row, pool_id)))
+            let markets = repo.exchange_market_ids(std::slice::from_ref(&row.bucket_id))?;
+            let market_id = markets.get(&row.bucket_id).cloned();
+            Ok(Some((row, pool_id, market_id)))
         })
         .await?;
-        Ok(row.map(|(b, pool_id)| BucketGql::from_row(b, pool_id)))
+        Ok(row.map(|(b, pool_id, market_id)| BucketGql::from_row(b, pool_id, market_id)))
     }
 
     /// JIT: buckets matching the given filters (all ANDed). `activeOnly`
@@ -681,11 +691,13 @@ impl QueryRoot {
             let rows = repo.buckets_query(q)?;
             let ids: Vec<String> = rows.iter().map(|b| b.bucket_id.clone()).collect();
             let mut pools = repo.deepbook_pool_ids(&ids)?;
+            let mut markets = repo.exchange_market_ids(&ids)?;
             Ok(rows
                 .into_iter()
                 .map(|b| {
                     let pool_id = pools.remove(&b.bucket_id);
-                    BucketGql::from_row(b, pool_id)
+                    let market_id = markets.remove(&b.bucket_id);
+                    BucketGql::from_row(b, pool_id, market_id)
                 })
                 .collect::<Vec<_>>())
         })

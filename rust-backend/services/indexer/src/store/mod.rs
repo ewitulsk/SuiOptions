@@ -15,14 +15,14 @@ use tracing::{debug, trace};
 
 use protocol_types::asset::AssetType;
 use protocol_types::events::{
-    BucketCreated, ChainEvent, DeepBookPoolCreated, Exercised, IndexedEvent, Redeemed,
-    WriteExecuted,
+    BucketCreated, ChainEvent, DeepBookPoolCreated, Exercised, IndexedEvent, OptionMarketListed,
+    Redeemed, WriteExecuted,
 };
 use protocol_types::ids::{ObjectId, SuiAddress};
 
 use crate::db::models::{
     u128_to_bigdecimal, u64_to_bigdecimal, AccountRow, BucketRow,
-    DeepBookPoolRow, EventParticipantRow, PositionRow, RfqBidRow, RfqRow,
+    DeepBookPoolRow, EventParticipantRow, ExchangeMarketLinkRow, PositionRow, RfqBidRow, RfqRow,
     TradingVaultPositionRow, TradingVaultRow, VaultReceiptRow,
     VaultRoundRow, VaultRow,
 };
@@ -86,6 +86,16 @@ pub struct DeepBookPoolState {
     pub min_size: u64,
     pub taker_fee: u64,
     pub maker_fee: u64,
+}
+
+/// A bucket's in-house exchange option market (SO-416). Written once per
+/// bucket — first `OptionMarketListed` for the bucket wins; later ones are
+/// ignored (the listing package dedups on-chain anyway).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExchangeMarketState {
+    /// The exchange `SettlementRegistry` id fills reference.
+    pub registry_id: ObjectId,
+    pub is_put: bool,
 }
 
 /// A live position derived from a `WriteExecuted` event. `Redeemed` removes
@@ -337,6 +347,8 @@ struct Inner {
     positions: BTreeMap<(ObjectId, u128), PositionState>,
     /// bucket_id → its DeepBook venue (SO-152).
     deepbook_pools: BTreeMap<ObjectId, DeepBookPoolState>,
+    /// bucket_id → its in-house exchange option market (SO-416).
+    exchange_markets: BTreeMap<ObjectId, ExchangeMarketState>,
     /// auction_id → auction lifecycle (C3).
     rfqs: BTreeMap<ObjectId, RfqState>,
     /// vault_id → headline state (D2).
@@ -359,6 +371,7 @@ impl Default for Inner {
             buckets: BTreeMap::new(),
             positions: BTreeMap::new(),
             deepbook_pools: BTreeMap::new(),
+            exchange_markets: BTreeMap::new(),
             rfqs: BTreeMap::new(),
             vaults: BTreeMap::new(),
             vault_rounds: BTreeMap::new(),
@@ -478,6 +491,7 @@ impl Store {
         inner.buckets = views.buckets;
         inner.positions = views.positions;
         inner.deepbook_pools = views.deepbook_pools;
+        inner.exchange_markets = views.exchange_markets;
         inner.rfqs = views.rfqs;
         inner.vaults = views.vaults;
         inner.vault_rounds = views.vault_rounds;
@@ -528,6 +542,24 @@ impl Store {
             .deepbook_pools
             .iter()
             .find(|(_, p)| p.pool_id == *pool_id)
+            .map(|(bucket_id, _)| *bucket_id)
+    }
+
+    /// The bucket's in-house exchange option market, if one has been listed
+    /// (SO-416).
+    pub fn exchange_market(&self, bucket_id: &ObjectId) -> Option<ExchangeMarketState> {
+        self.inner.read().exchange_markets.get(bucket_id).cloned()
+    }
+
+    /// The bucket whose exchange market registry is `registry_id` (SO-416).
+    /// Linear scan over the small market set, mirroring
+    /// [`bucket_by_pool_id`](Self::bucket_by_pool_id).
+    pub fn bucket_by_exchange_registry(&self, registry_id: &ObjectId) -> Option<ObjectId> {
+        self.inner
+            .read()
+            .exchange_markets
+            .iter()
+            .find(|(_, m)| m.registry_id == *registry_id)
             .map(|(bucket_id, _)| *bucket_id)
     }
 
@@ -656,6 +688,12 @@ fn collect_participants(
             push(f.taker_balance_manager_id.to_hex(), "deepbook_taker_bm");
             push(f.maker_balance_manager_id.to_hex(), "deepbook_maker_bm");
         }
+        // Exchange fills carry wallet addresses directly — no BM indirection
+        // (SO-416). Both sides fan out so a buy or a sell is matchable.
+        ChainEvent::ExchangeOptionFill(f) => {
+            push(f.maker.to_hex(), "maker");
+            push(f.taker.to_hex(), "taker");
+        }
         // ── cash-secured puts (mirror of the call arms above) ────────
         ChainEvent::PutWriteExecuted(w) => {
             push(w.position_recipient.to_hex(), "position_recipient");
@@ -740,12 +778,13 @@ fn collect_participants(
         | ChainEvent::TvBidPlaced(_)
         | ChainEvent::TvBidReclaimed(_)
         | ChainEvent::TvBidRedeemed(_) => {}
-        // DeepBookPoolCreated carries no addresses (the creator isn't in the
-        // event payload).
+        // DeepBookPoolCreated / OptionMarketListed carry no addresses (the
+        // creator isn't in the event payload).
         ChainEvent::BucketCreated(_)
         | ChainEvent::BucketCleaned(_)
         | ChainEvent::FeeUpdated(_)
         | ChainEvent::DeepBookPoolCreated(_)
+        | ChainEvent::OptionMarketListed(_)
         | ChainEvent::AuctionCreated(_)
         | ChainEvent::AuctionUnfilled(_)
         | ChainEvent::RfqCreated(_)
@@ -845,6 +884,17 @@ fn stage_event_into_batch(
                     timestamp_ms,
                     sequence,
                 ));
+            }
+        }
+        ChainEvent::OptionMarketListed(m) => {
+            // First listing wins — stage the row only when this event's
+            // registry is the one apply_event recorded (the DB insert is
+            // additionally ON CONFLICT DO NOTHING, so replays stay
+            // idempotent).
+            if inner.exchange_markets.get(&m.bucket).map(|s| s.registry_id) == Some(m.registry) {
+                batch
+                    .exchange_markets
+                    .push(exchange_market_row(m, sequence));
             }
         }
         ChainEvent::CollateralizedWrite(w) => {
@@ -1102,6 +1152,7 @@ fn stage_event_into_batch(
         | ChainEvent::TreasuryWithdrawn(_)
         | ChainEvent::VaultPositionRedeemed(_)
         | ChainEvent::DeepBookOrderFilled(_)
+        | ChainEvent::ExchangeOptionFill(_)
         | ChainEvent::VaultConfigUpdated(_)
         | ChainEvent::OffsetClosed(_)
         | ChainEvent::SpreadWritten(_)
@@ -1338,6 +1389,15 @@ fn deepbook_pool_row(
     }
 }
 
+fn exchange_market_row(m: &OptionMarketListed, sequence: i64) -> ExchangeMarketLinkRow {
+    ExchangeMarketLinkRow {
+        bucket_id: m.bucket.to_hex(),
+        registry_id: m.registry.to_hex(),
+        is_put: m.is_put,
+        updated_at_seq: sequence,
+    }
+}
+
 fn rfq_row(auction_id: ObjectId, state: &RfqState, sequence: i64) -> RfqRow {
     RfqRow {
         rfq_id: auction_id.to_hex(),
@@ -1483,6 +1543,7 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
         ChainEvent::Redeemed(r) => apply_redeemed(inner, r),
         ChainEvent::ExpiredOptionBurned(_) => {} // no state change
         ChainEvent::DeepBookOrderFilled(_) => {} // log-only (SO-209)
+        ChainEvent::ExchangeOptionFill(_) => {} // log-only (SO-416)
         ChainEvent::BucketCleaned(c) => {
             if let Some(b) = inner.buckets.get_mut(&c.bucket_id) {
                 b.cleaned = true;
@@ -1539,6 +1600,26 @@ fn apply_event(inner: &mut Inner, event: &ChainEvent, timestamp_ms: u64) {
                         taker_fee: p.taker_fee,
                         maker_fee: p.maker_fee,
                     },
+                );
+            }
+        }
+        ChainEvent::OptionMarketListed(m) => {
+            // First listing wins. The listing package dedups per option
+            // series on-chain, so a duplicate here means a replay or a
+            // listing-package republish — keep the original mapping.
+            if let Some(existing) = inner.exchange_markets.get(&m.bucket) {
+                if existing.registry_id != m.registry {
+                    tracing::warn!(
+                        bucket = %m.bucket.to_hex(),
+                        kept = %existing.registry_id.to_hex(),
+                        ignored = %m.registry.to_hex(),
+                        "duplicate exchange market for bucket; keeping first"
+                    );
+                }
+            } else {
+                inner.exchange_markets.insert(
+                    m.bucket,
+                    ExchangeMarketState { registry_id: m.registry, is_put: m.is_put },
                 );
             }
         }
@@ -2749,6 +2830,60 @@ mod tests {
         // Both events still land in the log.
         assert_eq!(staged.db_batch.events.len(), 2);
         assert_eq!(staged.db_batch.events[0].event_type, "DeepBookPoolCreated");
+    }
+
+    #[test]
+    fn exchange_market_first_wins_and_stages_one_row() {
+        let store = Store::default();
+        let bucket = ObjectId::new([0x42; 32]);
+        store.ingest(bucket_evt(0x42), 1);
+
+        let listed_evt = |registry: u8| {
+            ChainEvent::OptionMarketListed(protocol_types::events::OptionMarketListed {
+                registry: ObjectId::new([registry; 32]),
+                bucket,
+                base: AssetType::new("0x9::call_0::CALL_0"),
+                quote: AssetType::new("USDC"),
+                tick_size: 1_000,
+                min_size: 10_000,
+                fee_bps: 25,
+                is_put: false,
+            })
+        };
+
+        let staged = store
+            .stage_batch(
+                2,
+                1_000,
+                vec![
+                    (listed_evt(0xa1), "0xd1".to_string(), 0),
+                    // Duplicate market for the same bucket: kept out of both
+                    // the view and the DB batch.
+                    (listed_evt(0xa2), "0xd2".to_string(), 0),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(staged.db_batch.exchange_markets.len(), 1);
+        assert_eq!(
+            staged.db_batch.exchange_markets[0].registry_id,
+            ObjectId::new([0xa1; 32]).to_hex()
+        );
+        let state = store.exchange_market(&bucket).unwrap();
+        assert_eq!(state.registry_id, ObjectId::new([0xa1; 32]));
+        assert!(!state.is_put);
+        // The inverse lookup the worker's fill promotion uses.
+        assert_eq!(
+            store.bucket_by_exchange_registry(&ObjectId::new([0xa1; 32])),
+            Some(bucket)
+        );
+        assert_eq!(
+            store.bucket_by_exchange_registry(&ObjectId::new([0xa2; 32])),
+            None
+        );
+        // Both events still land in the log.
+        assert_eq!(staged.db_batch.events.len(), 2);
+        assert_eq!(staged.db_batch.events[0].event_type, "OptionMarketListed");
     }
 
     #[test]

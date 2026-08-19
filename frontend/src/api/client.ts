@@ -59,9 +59,18 @@ export type Bucket = {
   invalidated: boolean;
   /**
    * DeepBook pool trading this bucket's call coin against the settlement
-   * asset (SO-153). `null` until someone creates the venue.
+   * asset (SO-153). `null` until someone creates the venue. Legacy: the
+   * secondary market moved to the in-house exchange (SO-416); kept for
+   * historical rows and rollout compatibility.
    */
   deepbook_pool_id: string | null;
+  /**
+   * In-house exchange market (`SettlementRegistry` id) trading this bucket's
+   * option coin against the settlement asset (SO-416). `null` until someone
+   * lists the market; absent until the backend serves the field — the UI
+   * falls back to matching the option coin type against `/v1/markets`.
+   */
+  exchange_market_id?: string | null;
   /**
    * Pool exists, bucket not cleaned, not expired. Gates the DeepBook trade
    * UI; `invalidated` does NOT affect it (mint freeze only).
@@ -80,11 +89,6 @@ export type Bucket = {
 /** Write/RFQ liveness with rollout fallback to the legacy pool gate. */
 export function rfqTradeable(b: Bucket): boolean {
   return b.rfq_tradeable ?? b.tradeable;
-}
-
-/** Pool (DeepBook panel) gate with rollout fallback. */
-export function poolTradeable(b: Bucket): boolean {
-  return b.pool_tradeable ?? b.tradeable;
 }
 
 /**

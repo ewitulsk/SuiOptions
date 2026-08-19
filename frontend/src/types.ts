@@ -72,9 +72,6 @@ export type OwnedPosition = {
   boughtFrom: string;
   boughtAt: string;
   rangeId: string;
-  /** Portion of `amount` sitting in the user's DeepBook trading account (BM),
-   *  in display units. 0 when the whole holding is in the wallet. */
-  tradingAccountAmount: number;
   /** FIFO cost lots making up the current holding (incl. $0 transfer lots). */
   lots: OwnedLot[];
   // decorated
