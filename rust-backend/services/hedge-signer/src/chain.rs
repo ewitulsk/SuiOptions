@@ -2,9 +2,11 @@
 //!
 //! Keygen is permissionless — a freshly generated parent address is inert
 //! until a protocol admin registers it with
-//! `trading_vault::vault::set_external_account` — so the only thing worth
+//! `vault::set_external_account` — so the only thing worth
 //! checking is that the caller named a REAL vault: a live shared
-//! `vault::TradingVault` of the pinned trading_vault package that has no
+//! `vault::TradingVault` of the pinned trading-vault package (the v2
+//! `vault_v2` publish; module/struct names unchanged, id from token-info's
+//! `trading_vault` key) that has no
 //! external account registered yet. Fail closed: an RPC that will not
 //! answer is not an approval.
 

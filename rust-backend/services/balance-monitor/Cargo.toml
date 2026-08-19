@@ -27,3 +27,7 @@ metrics = { workspace = true }
 
 sui-types = { workspace = true }
 token-info-client = { workspace = true }
+# Trading-vault capital watches (SO-418): JIT reads of the indexer's
+# tradingVaults view.
+indexer-graphql = { workspace = true }
+protocol-types = { workspace = true }

@@ -32,8 +32,9 @@ async fn main() -> Result<()> {
         .await
         .context("connecting Sui client + hedge-signer key")?;
 
-    // The strict tier pins `trading_vault::vault::return_external` against
-    // the deployed trading_vault package. token-info is the only
+    // The strict tier pins `vault::return_external` against the deployed
+    // trading-vault package (v2: `vault_v2` publish, same module/fn names,
+    // token-info key unchanged). token-info is the only
     // deployments.json reader — a deployment without the package can't
     // classify sweeps, so fail at boot.
     let snapshot = TokenInfoClient::new(&cfg.token_info_url)

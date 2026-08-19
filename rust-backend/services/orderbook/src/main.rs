@@ -538,6 +538,27 @@ async fn handle_settle_outcome(state: &Arc<AppState>, job: &MatchJob, outcome: S
                 rematch_and_enqueue(state, &intent.market, d).await;
             }
         }
+        SettleOutcome::VaultRiskOff => {
+            // v2: the maker's vault is in a risk-off capital state
+            // (coverage breach / impaired / reset pending) — outflows are
+            // gated on-chain until the state is cured, so its orders are
+            // unfillable. Same reaction as quoting-disabled, distinct label.
+            book.lock().settle_failed(intent, &[]);
+            for (side, vault) in [(&job.ask, &job.ask_vault), (&job.bid, &job.bid_vault)] {
+                if vault.is_some() {
+                    prune_manager_orders(
+                        state,
+                        &side.signed.order.maker_manager_id,
+                        None,
+                        "vault risk-off",
+                    )
+                    .await;
+                }
+            }
+            for d in [intent.ask_digest, intent.bid_digest] {
+                rematch_and_enqueue(state, &intent.market, d).await;
+            }
+        }
         SettleOutcome::MarketPaused => {
             // Ops state, not a failure: restore the book, mirror the flag so
             // intake rejects and matching stops, and do NOT re-match (that

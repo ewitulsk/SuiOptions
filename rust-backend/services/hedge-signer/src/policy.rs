@@ -4,7 +4,8 @@
 //! hold venue collateral, and the ONLY Sui transaction the service will
 //! countersign from it is the **sweep**: value coming back to the vault.
 //! A transaction qualifies when every Move call is neutral plumbing
-//! (`0x2::coin`, `0x1` stdlib) or `trading_vault::vault::return_external`,
+//! (`0x2::coin`, `0x1` stdlib) or the trading-vault package's
+//! `vault::return_external` (name unchanged in v2),
 //! every shared input is allowlisted, and every `TransferObjects`
 //! recipient is a pure address equal to the vault (or the account itself —
 //! self-directed change).
