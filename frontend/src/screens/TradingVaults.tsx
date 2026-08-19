@@ -24,6 +24,7 @@ import { UNTRANCHED_CAPITAL } from "../tx/tradingVault";
 import { BLUEFIN_TEST_ENABLED, BLUEFIN_TEST_USDC } from "../bluefinTest";
 import { SUPPORTED_TOKENS, TRADING_VAULT_OBJECTS, TRADING_VAULT_PACKAGE_ID } from "../config";
 import { Address } from "../components/Address";
+import { CoverageGauge } from "../components/CoverageGauge";
 import { TokenLogo } from "../components/TokenLogo";
 import { Toast } from "../components/Toast";
 import { formatPrice } from "../format";
@@ -310,6 +311,18 @@ function TradingVaultRow({ vault, onOpen }: { vault: TradingVault; onOpen: () =>
       </span>
       <span>
         <VaultStateBadges vault={vault} />
+        {/* §3.3 compact coverage gauge: junior buffer vs the vault's two
+            immutable thresholds, at a glance on the list. */}
+        {tranched && vault.capitalStructure != null && (
+          <span style={{ display: "block", marginTop: 4 }}>
+            <CoverageGauge
+              bufferBps={vault.juniorBufferBps}
+              targetBps={vault.capitalStructure.targetJuniorBps}
+              maintenanceBps={vault.capitalStructure.maintenanceJuniorBps}
+              variant="compact"
+            />
+          </span>
+        )}
       </span>
       {tranched ? (
         <TranchePair

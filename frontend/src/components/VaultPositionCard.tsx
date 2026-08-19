@@ -11,6 +11,11 @@
 
 import { SHARE_OFFSET, type VaultPosition } from "../api/tradingVaults";
 import { formatPrice } from "../format";
+import { HowTranchesWork } from "./TrancheEducation";
+
+// TODO(SO-418 §3.4): lineage link (split-from / merged-from). Neither the
+// positions endpoints nor the position object expose parent ids today — a
+// lineage read needs the indexer's split/merge events surfaced per position.
 
 function fmtDurationMs(ms: number): string {
   if (ms <= 0) return "none";
@@ -73,6 +78,7 @@ export function VaultPositionCard({
         {p.tranche === "junior" && (
           <span className="vault-bids__sub">gen {p.capitalGeneration}</span>
         )}
+        {p.tranche !== "untranched" && <HowTranchesWork compact />}
         <span
           className="vault-bids__sub"
           style={{ marginLeft: "auto" }}

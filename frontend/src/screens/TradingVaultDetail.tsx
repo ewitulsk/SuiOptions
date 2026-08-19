@@ -50,9 +50,13 @@ import {
   TRADING_VAULT_PACKAGE_ID,
 } from "../config";
 import { Address } from "../components/Address";
+import { CoverageGauge } from "../components/CoverageGauge";
 import { TokenLogo } from "../components/TokenLogo";
-import { TradingVaultPpsChart } from "../components/TradingVaultPpsChart";
+import { HowTranchesWork } from "../components/TrancheEducation";
+import { TradingVaultPpsChart, type RegimeWindow } from "../components/TradingVaultPpsChart";
 import { Toast } from "../components/Toast";
+import { VaultLifecycleTimeline } from "../components/VaultLifecycleTimeline";
+import { WaterfallExplorer } from "../components/WaterfallExplorer";
 import { formatPrice } from "../format";
 import { BLUEFIN_TEST_ENABLED, isBluefinTestUsdc } from "../bluefinTest";
 import { VaultPositionCard, positionShares } from "../components/VaultPositionCard";
@@ -143,10 +147,39 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
   const tvl = tradingVaultTvl(vault, token?.decimals ?? null);
   const ppsHistoryQ = useTradingVaultPpsHistory(vault.vaultId);
   const waterfallQ = useWaterfall(vault.capitalStructure != null ? vault.vaultId : null);
+  // Deduped with SettlementCard's query by key; the timeline wants it too.
+  const settlementQ = useSettlement(vault.vaultId, vault.state === "closed");
   const isCurator =
     account?.address != null &&
     normalizeSuiAddress(account.address) === normalizeSuiAddress(vault.curator);
   const tranched = vault.capitalStructure != null;
+
+  // §3.2 regime shading windows. TODO(SO-418): only the CURRENT risk-off
+  // window is derivable from the vault DTO (impaired_since_ms / the reset
+  // proposal / the live risk state) — historical breach/cure windows need an
+  // indexer state-transition series the API doesn't serve yet.
+  const regimes: RegimeWindow[] = [];
+  if (tranched) {
+    if (vault.impairedSinceMs != null) {
+      regimes.push({ fromMs: vault.impairedSinceMs, toMs: null, kind: "impaired" });
+    }
+    if (vault.resetProposal != null) {
+      regimes.push({
+        fromMs: vault.resetProposal.proposedAtMs,
+        toMs: null,
+        kind: "reset_pending",
+      });
+    }
+    if (vault.riskState === "coverage_breach") {
+      // No breach-start timestamp exists on the DTO; the latest capital sync
+      // that observed the breach is the closest honest anchor.
+      regimes.push({
+        fromMs: waterfallQ.data?.updatedAtMs ?? vault.updatedAtMs,
+        toMs: null,
+        kind: "coverage_breach",
+      });
+    }
+  }
 
   return (
     <>
@@ -214,11 +247,32 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
 
       <div className="vault-grid">
         <div className="vault-grid__main">
+          {tranched && waterfallQ.data != null && (
+            <WaterfallExplorer
+              waterfall={waterfallQ.data}
+              symbol={symbol}
+              decimals={token?.decimals ?? null}
+              termsVersion={vault.termsVersion}
+            />
+          )}
+          {tranched && vault.capitalStructure != null && (
+            <div className="vault-card">
+              <div className="vault-card__head">Coverage</div>
+              <CoverageGauge
+                bufferBps={waterfallQ.data?.juniorBufferBps ?? vault.juniorBufferBps}
+                targetBps={vault.capitalStructure.targetJuniorBps}
+                maintenanceBps={vault.capitalStructure.maintenanceJuniorBps}
+                variant="full"
+              />
+            </div>
+          )}
           <TradingVaultPpsChart
             points={ppsHistoryQ.data ?? []}
             loading={ppsHistoryQ.isLoading}
             symbol={symbol}
             tranched={tranched}
+            hurdleBpsAnnual={vault.capitalStructure?.seniorHurdleBpsAnnual ?? null}
+            regimes={regimes}
           />
           <HoldingsCard vault={vault} />
           <SpotTradesCard vault={vault} />
@@ -231,6 +285,11 @@ function VaultBody({ vault }: { vault: TradingVaultDetailDto }) {
           {isCurator && (
             <CuratorPanel vault={vault} symbol={symbol} decimals={token?.decimals ?? null} />
           )}
+          <VaultLifecycleTimeline
+            vault={vault}
+            points={ppsHistoryQ.data ?? []}
+            settlement={settlementQ.data ?? null}
+          />
           <TermsCard vault={vault} symbol={symbol} />
         </div>
         <div className="vault-grid__side">
@@ -1989,12 +2048,23 @@ function WithdrawQueueCard({
   return (
     <div className="vault-card">
       <div className="vault-card__head">Withdrawal queue · {vault.pendingWithdrawals}</div>
+      {/* §3.5: the two lanes render side by side (stacking only when the
+          card is too narrow); each request carries its GLOBAL sequence tag
+          and the single next-to-pay head is highlighted across lanes. */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: tranched ? "repeat(auto-fit, minmax(300px, 1fr))" : "1fr",
+          gap: 12,
+          marginBottom: 10,
+        }}
+      >
       {lanes.map(({ label, lane }) => {
         const mine = requests.filter((r) => r.lane === lane);
         if (mine.length === 0 && !tranched) return null;
         const laneBlocked = mine.some((r) => r.blockedReason === "junior_lane_blocked");
         return (
-          <div key={lane} style={{ marginBottom: 10, opacity: laneBlocked ? 0.75 : 1 }}>
+          <div key={lane} style={{ opacity: laneBlocked ? 0.7 : 1 }}>
             {tranched && (
               <div className="vault-card__head" style={{ fontSize: 12 }}>
                 {label} · {mine.length}
@@ -2007,6 +2077,14 @@ function WithdrawQueueCard({
                     blocked — coverage breach
                   </span>
                 )}
+              </div>
+            )}
+            {laneBlocked && (
+              // The plain-language rule, in the open — the pill's tooltip
+              // never fires on touch.
+              <div className="vault-prose__muted" style={{ fontSize: 11, margin: "4px 0" }}>
+                Senior keeps flowing; junior resumes in original order when
+                the breach cures.
               </div>
             )}
             {mine.length === 0 ? (
@@ -2075,6 +2153,7 @@ function WithdrawQueueCard({
           </div>
         );
       })}
+      </div>
       <div className="vault-card__foot vault-prose__muted">
         {tranched
           ? "Strict FIFO within a lane; across lanes the lowest global sequence among payable heads pays first."
@@ -2169,6 +2248,35 @@ function SettlementCard({
           <span>Snapshot</span>
           <span>{fmtDateTime(s.snapshotAtMs)}</span>
         </div>
+      </div>
+
+      {/* §3.9: vault-level redeemed-vs-outstanding progress. */}
+      <div
+        role="progressbar"
+        aria-valuenow={Math.round(progress * 100)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label="Settlement claims redeemed"
+        style={{
+          height: 8,
+          borderRadius: 4,
+          overflow: "hidden",
+          background: "var(--aqua-line, rgba(92,107,122,0.2))",
+          marginBottom: 4,
+        }}
+      >
+        <div
+          style={{
+            width: `${progress * 100}%`,
+            height: "100%",
+            background: "var(--aqua-up, #1fbf75)",
+            transition: "width .3s ease",
+          }}
+        />
+      </div>
+      <div className="vault-prose__muted" style={{ fontSize: 11, marginBottom: 10 }}>
+        {toDisplay(s.redeemedRaw)} {symbol} redeemed · {toDisplay(s.outstandingRaw)} {symbol}{" "}
+        outstanding as perpetual claims on the pool
       </div>
 
       {address != null && positions.length > 0 && (
@@ -2383,6 +2491,34 @@ function UserPanel({
           : ((junior + v) * 10_000) / (nav + v);
     }
   }
+  // §3.6: shares to be minted at the locked ratio —
+  // shares = value × (S_t + O) / (nav_t + 1) — exact only for
+  // accounting-asset deposits (non-accounting value depends on the oracle
+  // mark at submit). Float is fine for a preview.
+  let sharesPreview: number | null = null;
+  if (depAsset === accounting && decimals != null && amountNum > 0) {
+    const v = amountNum * 10 ** decimals;
+    const supplyRaw = tranched
+      ? Number(
+          (trancheSel === "senior" ? waterfall?.seniorSharesRaw : waterfall?.juniorSharesRaw) ??
+            NaN,
+        )
+      : Number(vault.totalSharesRaw);
+    const navTRaw = tranched
+      ? Number(
+          (trancheSel === "senior" ? waterfall?.seniorNavRaw : waterfall?.juniorNavRaw) ?? NaN,
+        )
+      : vault.latestNavRaw != null
+        ? Number(vault.latestNavRaw)
+        : Number(vault.totalSharesRaw) === 0
+          ? 0 // genesis: zero book prices at the virtual offset exactly
+          : NaN;
+    if (Number.isFinite(supplyRaw) && Number.isFinite(navTRaw)) {
+      const mintedRaw = (v * (supplyRaw + SHARE_OFFSET)) / (navTRaw + 1);
+      sharesPreview = mintedRaw / (10 ** decimals * SHARE_OFFSET);
+    }
+  }
+
   // Hard inline block: a senior deposit that would push the buffer below the
   // creator-set target is a guaranteed on-chain abort — never let it sign.
   const seniorBufferBlocked =
@@ -2500,7 +2636,8 @@ function UserPanel({
                   rel="noreferrer"
                 >
                   Terms v{vault.termsVersion}
-                </a>
+                </a>{" "}
+                · <HowTranchesWork compact termsVersion={vault.termsVersion} />
               </div>
             </div>
           )}
@@ -2538,8 +2675,18 @@ function UserPanel({
               : "wallet balance unavailable"}
           </div>
 
-          {tranched && postBufferBps != null && waterfall != null && (
+          {(sharesPreview != null || (tranched && postBufferBps != null && waterfall != null)) && (
             <div className="vault-kv" style={{ marginBottom: 10 }}>
+              {sharesPreview != null && (
+                <div className="vault-kv__row">
+                  <span>Shares minted (est.)</span>
+                  <span>
+                    {formatPrice(sharesPreview, { grouping: true })}
+                    {tranched && <span className="vault-bids__sub"> {trancheSel}</span>}
+                  </span>
+                </div>
+              )}
+              {tranched && postBufferBps != null && waterfall != null && (
               <div className="vault-kv__row">
                 <span>Post-deposit junior buffer</span>
                 <span
@@ -2557,6 +2704,7 @@ function UserPanel({
                   </span>
                 </span>
               </div>
+              )}
             </div>
           )}
 
