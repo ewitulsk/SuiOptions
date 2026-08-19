@@ -16,6 +16,7 @@ pub mod client;
 pub mod ladder;
 pub mod server;
 pub mod signing;
+pub mod positions;
 pub mod vault;
 
 #[derive(Parser, Debug)]

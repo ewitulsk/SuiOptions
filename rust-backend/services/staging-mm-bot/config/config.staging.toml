@@ -59,6 +59,12 @@ max_conf_bps = 0
 [vault_direct]
 api_url = "http://api-service:9003"
 buffer_bps = 1_000
+# v2 (SO-418): escrowed curator-commitment funding, accounting-asset raw
+# units. The funding pass deposits it via deposit_into_commitment when
+# the slot is missing (this wallet holds the CuratorCap). 0 disables —
+# but an unfunded commitment parks quoting risk-off once the protocol
+# floor is nonzero.
+commitment_deposit = 100_000_000_000 # $100k at TUSDC's 6 decimals
 
 [vault_direct.provision]
 enabled = true

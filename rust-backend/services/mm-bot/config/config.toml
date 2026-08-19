@@ -108,6 +108,25 @@ enabled            = false
 # unwind_grace_ms    = 86_400_000
 # gas_budget         = 200_000_000
 #
+# v2 capital structure (SO-418). Defaults = UNTRANCHED; the desk vault
+# stays untranched unless all six tranche params are set coherently
+# (structure_code 1 aborts on-chain otherwise).
+# structure_code             = 0   # 0 untranched / 1 senior-junior
+# senior_hurdle_bps_annual   = 0
+# target_junior_bps          = 0
+# maintenance_junior_bps     = 0
+# upside_code                = 0
+# residual_participation_bps = 0
+# total_return_cap_bps       = 0
+# terms_version              = 1
+# spec_hash                  = ""  # hex content hash of the terms doc
+#
+# Escrowed curator-commitment funding (deposit_into_commitment) at
+# provision / on adoption when the slot is missing, accounting raw units.
+# 0 disables — but an unfunded commitment parks the desk risk-off once
+# the protocol floor is nonzero. Default $100k at 6 decimals.
+# commitment_deposit         = 100_000_000_000
+#
 # Testnet-only faucet behaviour. Seeds a vault the desk PROVISIONS (never
 # one it adopts) so it has NAV to quote against — an unseeded vault is
 # NAV 0 and hard-declines every RFQ. Setting this on a non-testnet

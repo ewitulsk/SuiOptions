@@ -126,6 +126,14 @@ struct VaultDirectConfig {
     /// Fraction of the vault's free balance held back from quoting, bps.
     #[serde(default = "default_buffer_bps")]
     buffer_bps: u64,
+    /// SO-418: escrowed curator-commitment funding (`deposit_into_commitment`),
+    /// accounting-asset raw units. The funding pass funds it when the
+    /// slot is missing (this wallet holds the CuratorCap of a vault it
+    /// provisioned). 0 disables — but an unfunded commitment trips the
+    /// `curator_commitment_breached` gate once the protocol floor is
+    /// nonzero, which parks the bot's quoting. Default $100k at 6 decimals.
+    #[serde(default = "default_commitment_deposit")]
+    commitment_deposit: u64,
     /// Self-provisioning when discovery finds no vault of ours.
     #[serde(default)]
     provision: staging_mm_bot::vault::ProvisionConfig,
@@ -133,6 +141,10 @@ struct VaultDirectConfig {
 
 fn default_buffer_bps() -> u64 {
     1_000
+}
+
+fn default_commitment_deposit() -> u64 {
+    100_000_000_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -259,6 +271,15 @@ struct DirectCtx {
     trading_vault_pkg: ObjectID,
     api_url: Option<String>,
     buffer_bps: u64,
+    /// The vault's CuratorCap when this wallet holds it (SO-418) —
+    /// commitment funding needs it; `None` disables commitment upkeep.
+    curator_cap: Option<ObjectID>,
+    /// `[vault_direct].commitment_deposit`, accounting raw units.
+    commitment_deposit: u64,
+    /// Indexer view for the SO-418 risk gate + tranche budget measure.
+    indexer: indexer_graphql::IndexerClient,
+    /// Latch so the risk-off hard-stop logs on transition, not per tick.
+    risk_off_latched: std::sync::atomic::AtomicBool,
     /// Funding refs (SO-375); `None` when `[funding]` is disabled or has
     /// no targets.
     funding: Option<DirectFundingRefs>,
@@ -507,6 +528,10 @@ async fn main() -> Result<()> {
                 trading_vault_pkg,
                 api_url: vd.api_url.clone(),
                 buffer_bps: vd.buffer_bps,
+                curator_cap: resolved.curator_cap,
+                commitment_deposit: vd.commitment_deposit,
+                indexer,
+                risk_off_latched: std::sync::atomic::AtomicBool::new(false),
                 funding,
             };
             (manager_oid, maker, Some(direct))
@@ -859,6 +884,30 @@ async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot)
         }
     };
 
+    // SO-418: does the escrowed curator commitment exist yet? Funded here
+    // (not at provision) because this pass owns the appraisal composer —
+    // by now the vault may hold several appraised assets.
+    let need_commitment = match d.curator_cap {
+        Some(cap) if d.commitment_deposit > 0 => {
+            match staging_mm_bot::vault::has_commitment(
+                &s.wrap.client,
+                s.wrap.signer.address,
+                d.trading_vault_pkg,
+                d.vault,
+                cap,
+            )
+            .await
+            {
+                Ok(exists) => !exists,
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "funding: commitment presence read failed");
+                    false
+                }
+            }
+        }
+        _ => false,
+    };
+
     // Cheap balance reads first; the oracle round-trips only run when
     // something actually needs topping up.
     let mut shortfalls: Vec<(String, &token_info_client::TokenInfo, String, u64)> = Vec::new();
@@ -899,7 +948,7 @@ async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot)
         }
         shortfalls.push((ticker.clone(), token, canonical, target - free));
     }
-    if shortfalls.is_empty() {
+    if shortfalls.is_empty() && !need_commitment {
         return;
     }
 
@@ -919,6 +968,29 @@ async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot)
         return;
     }
 
+    // Commitment first (SO-418): funding it also cures a commitment
+    // breach, which un-parks quoting.
+    if need_commitment {
+        let cap = d.curator_cap.expect("need_commitment implies a cap");
+        match fund_commitment(s, d, f, tokens, &descriptor, cap).await {
+            Ok(_) => {
+                tracing::info!(
+                    amount = d.commitment_deposit,
+                    "funding: escrowed curator commitment funded"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    alert_id = "tx-failed-staging-mm-bot",
+                    amount = d.commitment_deposit,
+                    error = %format!("{e:#}"),
+                    "funding: commitment deposit failed"
+                );
+            }
+        }
+    }
+
+    let mut deposited = false;
     for (ticker, token, canonical, amount) in shortfalls {
         // Holdings per deposit, not per pass: each landed deposit changes
         // the free-balance set, and the next appraisal must cover it.
@@ -932,6 +1004,7 @@ async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot)
             };
         match direct_deposit(s, d, f, &holdings, &descriptor, token, &canonical, amount).await {
             Ok(_) => {
+                deposited = true;
                 tracing::info!(ticker, amount, "funding: minted and deposited into vault");
                 metrics::counter!("staging_mm_bot_mints_total", "ticker" => ticker.clone())
                     .increment(1);
@@ -947,6 +1020,111 @@ async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot)
             }
         }
     }
+
+    // SO-418 custody: every deposit above minted a `VaultPosition` NFT
+    // into this wallet (discovered by owned-object query — transfers emit
+    // no events). Merge to one per tranche × generation so the object
+    // count stays bounded across an infinite-pocket LP's lifetime.
+    if deposited {
+        match staging_mm_bot::positions::merge_owned_positions(
+            &s.wrap,
+            d.trading_vault_pkg,
+            d.vault,
+            s.gas_budget,
+        )
+        .await
+        {
+            Ok(folded) if folded > 0 => {
+                tracing::info!(folded, "funding: merged wallet VaultPositions")
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "funding: position merge failed; next pass retries")
+            }
+        }
+    }
+}
+
+/// SO-418: fund the escrowed curator commitment — full composed appraisal
+/// (the vault may hold several appraised assets by now), faucet-mint of
+/// the ACCOUNTING asset, `vault::deposit_into_commitment`, one PTB.
+async fn fund_commitment(
+    s: &Shared,
+    d: &DirectCtx,
+    f: &DirectFundingRefs,
+    tokens: &token_info_client::TestTokens,
+    descriptor: &oracle_client::OracleDescriptor,
+    curator_cap: ObjectID,
+) -> Result<()> {
+    let holdings = sui_tx::tx::appraisal::discover_holdings(&s.wrap.client, d.vault)
+        .await
+        .context("holdings discovery for the commitment deposit")?;
+    let accounting = holdings.deposit_type.clone();
+    let token = tokens
+        .tokens
+        .values()
+        .find(|t| {
+            canonicalize_move_type(&t.coin_type).is_ok_and(|c| c == accounting)
+        })
+        .ok_or_else(|| anyhow!("no faucet for the accounting asset {accounting}"))?;
+
+    let refs = sui_tx::tx::appraisal::AppraisalRefs {
+        trading_vault_pkg: d.trading_vault_pkg,
+        deepbook_adapter_pkg: f.deepbook_adapter_pkg,
+        options_adapter_pkg: f.options_adapter_pkg,
+        exchange_adapter_pkg: f.exchange_adapter_pkg,
+        vault_id: d.vault,
+        protocol_config_id: f.protocol_config_id,
+        oracle_registry_id: f.oracle_registry_id,
+        equity_oracle_pkg: f.equity_oracle_pkg,
+        equity_book_id: f.equity_book_id,
+        vol_book_id: f.vol_book_id,
+    };
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let (appraisal, _attestations) = sui_tx::tx::appraisal::compose_switchboard_appraisal(
+        &s.wrap.client,
+        &mut pt,
+        &refs,
+        &holdings,
+        &std::collections::BTreeMap::new(),
+        descriptor,
+        &f.oracle,
+        &[],
+    )
+    .await
+    .context("composing appraisal for the commitment deposit")?;
+
+    let (tokens_pkg, module) = token.module_path()?;
+    let faucet =
+        pt.obj(sui_tx::tx::shared_object_arg(&s.wrap.client, token.faucet()?, true).await?)?;
+    let amount_arg = pt.pure(d.commitment_deposit)?;
+    let coin = pt.programmable_move_call(
+        tokens_pkg,
+        Identifier::new(&*module).map_err(|e| anyhow!("module name {module}: {e}"))?,
+        Identifier::new("mint").unwrap(),
+        vec![],
+        vec![faucet, amount_arg],
+    );
+
+    let tv_refs = sui_tx::tx::trading_vault::TradingVaultRefs {
+        package: d.trading_vault_pkg,
+        vault_id: d.vault,
+        protocol_config_id: f.protocol_config_id,
+        deposit_type: &accounting,
+    };
+    sui_tx::tx::trading_vault::build_deposit_into_commitment(
+        &s.wrap.client,
+        &mut pt,
+        &tv_refs,
+        f.whitelist_id,
+        curator_cap,
+        appraisal,
+        coin,
+    )
+    .await?;
+    sui_tx::tx::submit_ptb(&s.wrap.client, &s.wrap.signer, pt, s.gas_budget, "commitment deposit")
+        .await?;
+    Ok(())
 }
 
 /// One attested vault deposit (SO-375): compose the full appraisal (all
@@ -1013,21 +1191,27 @@ async fn direct_deposit(
         protocol_config_id: f.protocol_config_id,
         deposit_type: accounting,
     };
+    // v2 (SO-418): deposits mint a `VaultPosition` NFT that MUST be
+    // consumed — transfer it to this wallet (tranche 0: the bot only
+    // provisions untranched vaults). The funding pass merges the
+    // accumulated positions afterwards.
     if is_accounting {
-        sui_tx::tx::trading_vault::build_deposit(
+        sui_tx::tx::trading_vault::build_deposit_and_transfer(
             &s.wrap.client,
             &mut pt,
             &tv_refs,
             f.whitelist_id,
             appraisal,
             coin,
+            0,
+            s.wrap.signer.address,
         )
         .await?;
     } else {
         let att = *attestations.get(canonical).ok_or_else(|| {
             anyhow!("no attestation composed for {canonical} — descriptor feed missing?")
         })?;
-        sui_tx::tx::trading_vault::build_deposit_asset(
+        let position = sui_tx::tx::trading_vault::build_deposit_asset(
             &s.wrap.client,
             &mut pt,
             &tv_refs,
@@ -1036,8 +1220,10 @@ async fn direct_deposit(
             appraisal,
             coin,
             att,
+            0,
         )
         .await?;
+        pt.transfer_arg(s.wrap.signer.address, position);
     }
     sui_tx::tx::submit_ptb(&s.wrap.client, &s.wrap.signer, pt, s.gas_budget, "vault deposit")
         .await?;
@@ -1269,6 +1455,13 @@ async fn watermark_sweep(s: &Shared) {
 /// buffer, minus outstanding withdrawal-queue obligations when api-service
 /// is configured. Markets share the vault's balance, so the buffer also
 /// absorbs cross-market overcommit (funded mode has the same sharing).
+///
+/// SO-418: hard-stops (empty budget) while the vault is risk-off — fills
+/// settle out of vault free balances, which the on-chain gate set blocks
+/// (abort 124) — and on tranched vaults additionally caps the QUOTE-asset
+/// budget by the junior/risk-bearing measure (the senior claim is not the
+/// bot's to quote against; base-token floats are exchange inventory and
+/// keep the free-balance bound).
 async fn quote_budget(s: &Shared, ctx: &MarketCtx) -> Result<HashMap<String, u64>> {
     let Some(d) = &s.direct else {
         let balances = s.ob.balances(&s.manager).await.context("reading escrow")?;
@@ -1281,6 +1474,38 @@ async fn quote_budget(s: &Shared, ctx: &MarketCtx) -> Result<HashMap<String, u64
             })
             .collect());
     };
+
+    // SO-418 risk gate + tranche measure from the indexer view. An
+    // unreachable indexer never blocks quoting (free balance is still the
+    // on-chain truth); a MISSING vault row does not either (fresh vault,
+    // indexer catching up).
+    let mut junior_cap: Option<u64> = None;
+    match vault_view(&d.indexer, d.vault).await {
+        Ok(Some(v)) => {
+            let off = staging_mm_bot::vault::risk_off(&v);
+            let was = d.risk_off_latched.swap(off, Ordering::Relaxed);
+            if off && !was {
+                tracing::warn!(
+                    vault = %d.vault,
+                    risk_state = v.risk_state,
+                    commitment_breached = v.curator_commitment_breached,
+                    state = %v.state,
+                    settled = v.settled,
+                    "vault is RISK-OFF — quoting hard-stopped until it cures"
+                );
+            } else if !off && was {
+                tracing::info!(vault = %d.vault, "vault risk state cured — quoting resumes");
+            }
+            metrics::gauge!("staging_mm_bot_vault_risk_off").set(if off { 1.0 } else { 0.0 });
+            if off {
+                return Ok(HashMap::new());
+            }
+            junior_cap = staging_mm_bot::vault::junior_capital(&v);
+        }
+        Ok(None) => tracing::debug!(vault = %d.vault, "vault not in indexer view; no risk gate"),
+        Err(e) => tracing::debug!(error = %format!("{e:#}"), "risk-gate indexer read failed"),
+    }
+
     let mut budget = HashMap::new();
     for token in [&ctx.market.base, &ctx.market.quote] {
         let free = sui_tx::tx::trading_vault::dev_inspect_free_balance(
@@ -1293,7 +1518,15 @@ async fn quote_budget(s: &Shared, ctx: &MarketCtx) -> Result<HashMap<String, u64
         .await
         .with_context(|| format!("reading vault free balance of {token}"))?;
         let held_back = ((free as u128) * (d.buffer_bps as u128) / 10_000) as u64;
-        budget.insert(token.clone(), free.saturating_sub(held_back));
+        let mut avail = free.saturating_sub(held_back);
+        // Tranched vault: the quote asset (= accounting asset) budget is
+        // additionally bounded by the junior/risk capital.
+        if token == &ctx.market.quote {
+            if let Some(cap) = junior_cap {
+                avail = avail.min(cap);
+            }
+        }
+        budget.insert(token.clone(), avail);
     }
     if let Some(api) = &d.api_url {
         match pending_obligations(api, &d.vault).await {
@@ -1315,27 +1548,74 @@ async fn quote_budget(s: &Shared, ctx: &MarketCtx) -> Result<HashMap<String, u64
     Ok(budget)
 }
 
+/// The bot's own vault row from the indexer view (SO-418 risk gate).
+async fn vault_view(
+    indexer: &indexer_graphql::IndexerClient,
+    vault: ObjectID,
+) -> Result<Option<indexer_graphql::TradingVault>> {
+    let hex = vault.to_hex_literal();
+    Ok(indexer
+        .trading_vaults()
+        .await
+        .context("listing trading vaults")?
+        .into_iter()
+        .find(|v| format!("0x{}", v.vault_id.to_hex()) == hex))
+}
+
+/// One pending withdraw request as `/trading-vaults/:id/pending-requests`
+/// serves it (SO-418 v2 shape). MIXED CASING on the wire, per the WS-3
+/// DTO contract: the pre-v2 fields keep camelCase (`basisRaw`,
+/// `payoutCoinType`, …) while every v2 addition is pinned snake_case
+/// (`global_seq`, `lane_code`, `position_id`, `payable`,
+/// `blocked_reason`, …) — hence the struct-level camelCase with explicit
+/// renames, mirroring the server DTO.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingReq {
+    basis_raw: String,
+    payout_coin_type: String,
+    /// v2: whether fulfillment could pay this request right now. A
+    /// blocked (junior-lane / wiped) request is still deducted — it
+    /// resumes at its own head when the lane unblocks, so the obligation
+    /// stands either way. Read here so the shape stays pinned by test.
+    #[serde(rename = "payable", default)]
+    #[allow(dead_code)]
+    payable: bool,
+    #[serde(rename = "blocked_reason", default)]
+    #[allow(dead_code)]
+    blocked_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PendingResp {
+    requests: Vec<PendingReq>,
+}
+
+/// Sum pending requests into per-payout-token obligations, estimated at
+/// `basis` (accounting-asset units) — exact payout units are only fixed
+/// at fulfillment, so this is the cheap conservative stand-in. Blocked
+/// lanes still count (see [`PendingReq::payable`]).
+fn sum_obligations(requests: Vec<PendingReq>) -> HashMap<String, u64> {
+    let mut out: HashMap<String, u64> = HashMap::new();
+    for r in requests {
+        let token =
+            canonicalize_move_type(&r.payout_coin_type).unwrap_or(r.payout_coin_type);
+        let amount = r.basis_raw.parse::<u64>().unwrap_or(0);
+        let entry = out.entry(token).or_insert(0);
+        *entry = entry.saturating_add(amount);
+    }
+    out
+}
+
 /// Outstanding withdrawal-queue obligations by payout coin type, from
-/// api-service `GET /trading-vaults/:id/pending-requests`. Estimated at
-/// `basis` (accounting-asset units) — exact payout units are only fixed at
-/// fulfillment, so this is the cheap conservative stand-in.
+/// api-service `GET /trading-vaults/:id/pending-requests`.
 async fn pending_obligations(api: &str, vault: &ObjectID) -> Result<HashMap<String, u64>> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Req {
-        basis_raw: String,
-        payout_coin_type: String,
-    }
-    #[derive(Deserialize)]
-    struct Resp {
-        requests: Vec<Req>,
-    }
     let url = format!(
         "{}/trading-vaults/{}/pending-requests",
         api.trim_end_matches('/'),
         vault
     );
-    let resp: Resp = reqwest::get(&url)
+    let resp: PendingResp = reqwest::get(&url)
         .await
         .context("GET pending-requests")?
         .error_for_status()
@@ -1343,15 +1623,7 @@ async fn pending_obligations(api: &str, vault: &ObjectID) -> Result<HashMap<Stri
         .json()
         .await
         .context("decoding pending-requests")?;
-    let mut out: HashMap<String, u64> = HashMap::new();
-    for r in resp.requests {
-        let token =
-            canonicalize_move_type(&r.payout_coin_type).unwrap_or(r.payout_coin_type);
-        let amount = r.basis_raw.parse::<u64>().unwrap_or(0);
-        let entry = out.entry(token).or_insert(0);
-        *entry = entry.saturating_add(amount);
-    }
-    Ok(out)
+    Ok(sum_obligations(resp.requests))
 }
 
 /// Cancel-replace one market's ladder around `mid`. Returns how many orders
@@ -1458,5 +1730,54 @@ mod tests {
         assert!(vd.vault_id.is_empty(), "staging must not pin a vault");
         assert!(vd.provision.enabled, "staging must self-provision");
         load_config(&dir.join("config.toml")).unwrap();
+    }
+
+    /// Pin the SO-418 `/pending-requests` decode against the WS-3 wire
+    /// contract: legacy fields camelCase, v2 additions snake_case, both
+    /// on ONE object. Unknown fields (v2 adds several more) must be
+    /// ignored, and blocked requests still count as obligations.
+    #[test]
+    fn pending_requests_v2_mixed_casing_decodes_and_sums() {
+        let body = serde_json::json!({
+            "requests": [{
+                "seq": "7",
+                "recipient": "0xabc",
+                "sharesRaw": "1000000",
+                "basisRaw": "250",
+                "payoutCoinType": "0x2::tusdc::TUSDC",
+                "payoutSymbol": "TUSDC",
+                "requestedAtMs": "1",
+                "global_seq": "7",
+                "lane": "junior",
+                "lane_code": 1,
+                "position_id": "0xdef",
+                "tranche": "junior",
+                "tranche_code": 2,
+                "capital_generation": 0,
+                "payable": false,
+                "blocked_reason": "junior_lane_blocked",
+            }, {
+                "seq": "8",
+                "sharesRaw": "1",
+                "basisRaw": "50",
+                "payoutCoinType": "0x2::tusdc::TUSDC",
+                "payoutSymbol": "TUSDC",
+                "requestedAtMs": "2",
+                "global_seq": "8",
+                "lane": "senior",
+                "lane_code": 0,
+                "position_id": "0xfed",
+                "tranche": "senior",
+                "tranche_code": 1,
+                "capital_generation": 0,
+                "payable": true,
+                "blocked_reason": null,
+            }]
+        });
+        let resp: PendingResp = serde_json::from_value(body).unwrap();
+        let out = sum_obligations(resp.requests);
+        let canonical = canonicalize_move_type("0x2::tusdc::TUSDC").unwrap();
+        // Blocked + payable both deduct: 250 + 50.
+        assert_eq!(out.get(&canonical).copied(), Some(300));
     }
 }

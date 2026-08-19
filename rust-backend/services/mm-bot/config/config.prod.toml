@@ -54,6 +54,12 @@ TWAL = 1.0
 enabled = false
 # vault_id           = "0x..."
 # mm_release_enabled = true
+#
+# v2 (SO-418): when the prod desk is provisioned, [desk.provision]
+# defaults create an UNTRANCHED vault (structure_code 0, terms_version 1)
+# and fund the escrowed curator commitment (commitment_deposit, default
+# $100k at 6 decimals) from WALLET coins — no faucet on prod, so the
+# wallet must hold the accounting asset. See config.toml for all knobs.
 
 # Exchange resting-ask exits (SO-416): off until the prod desk is live.
 [desk.listings]

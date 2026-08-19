@@ -85,6 +85,11 @@ max_conf_bps = 0
 # vault_id = "0x..."   # optional pin: adopt a human-provisioned vault
 # api_url = "http://api-service:9010"  # optional pending-requests deduction
 # buffer_bps = 1_000                   # free-balance fraction held back
+# v2 (SO-418): escrowed curator-commitment funding, accounting raw units,
+# deposited by the funding pass when the slot is missing (CuratorCap
+# held). 0 disables — an unfunded commitment parks quoting risk-off once
+# the protocol floor is nonzero. Default $100k at 6 decimals.
+# commitment_deposit = 100_000_000_000
 #
 # [vault_direct.provision]
 # enabled = true        # create + wire a vault when none of ours exists

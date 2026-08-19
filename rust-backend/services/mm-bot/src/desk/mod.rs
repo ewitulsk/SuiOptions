@@ -19,6 +19,7 @@ pub mod limits;
 pub mod listings;
 pub mod model;
 pub mod monitors;
+pub mod positions;
 pub mod provision;
 pub mod quote;
 pub mod state;
@@ -320,6 +321,14 @@ pub struct DeskShared {
     pub funding_rate_annual: RwLock<f64>,
     /// Nightly stress gate: block new short risk (V2 §7).
     pub stress_blocked: AtomicBool,
+    /// SO-418 capital risk gate: true while the desk's vault is risk-off
+    /// (risk state not Healthy, curator commitment breached, lifecycle
+    /// not open, or settled). Quote sessions and `vault_mm` releases
+    /// abort on-chain in these states (code 124), so quoting, auction
+    /// bids and new listings hard-stop here BEFORE burning gas. Seeded at
+    /// boot from the resolved vault; refreshed from the indexer view
+    /// every book-refresher tick.
+    pub risk_off: AtomicBool,
     pub expected_holding_years: f64,
     pub slippage_bps: f64,
     /// Per-bucket marks + per-unit greeks from the last refresher tick
@@ -408,6 +417,14 @@ impl Desk {
         reserve: bool,
         now_ms: u64,
     ) -> Decision {
+        // SO-418 risk gate: every signed quote routes collateral through
+        // `vault_mm::release`, which aborts (code 124) whenever the vault
+        // is risk-off — decline before pricing, reserving, or signing.
+        if self.shared.risk_off.load(Ordering::Relaxed) {
+            return Decision::Decline {
+                reason: "vault risk-off (capital risk state / commitment breach)".into(),
+            };
+        }
         let model = &self.models[model_index];
         let ctx = self.shared.flow_context(spot).await;
         match side {
@@ -564,6 +581,21 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     let vault_address = SuiAddress::from_bytes(vault_id.into_bytes())
         .map_err(|e| anyhow!("vault id → address: {e}"))?;
 
+    // SO-418 position custody: v2 deposits mint `VaultPosition` NFTs into
+    // this wallet (the testnet seed, commitment releases). Merge them to
+    // one per (tranche, generation) so the owned-object count stays
+    // bounded across restarts. Best-effort — a failure never gates boot.
+    if let Err(e) = positions::merge_owned_positions(
+        &wrap,
+        p.trading_vault_package,
+        vault_id,
+        p.cfg.provision.gas_budget,
+    )
+    .await
+    {
+        tracing::warn!(error = %format!("{e:#}"), "vault-position merge pass failed; continuing");
+    }
+
     // Per-market models.
     let surface: SurfaceConfig = p.cfg.surface.into();
     let models: Arc<Vec<MarketModel>> = Arc::new(
@@ -636,6 +668,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         naked_written_units: RwLock::new(0),
         funding_rate_annual: RwLock::new(primary_spec.funding_rate_annual),
         stress_blocked: AtomicBool::new(false),
+        risk_off: AtomicBool::new(resolved.risk_off),
         expected_holding_years: p.cfg.expected_holding_years,
         slippage_bps: primary_spec.slippage_bps,
         marks: RwLock::new(HashMap::new()),
@@ -772,6 +805,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         cfg: p.cfg.exits.clone(),
         secrets: p.secrets.clone(),
         network: p.network,
+        shared: Arc::clone(&shared),
         book: Arc::clone(&book),
         models: Arc::clone(&models),
         market_feeds: market_feeds.clone(),
@@ -936,20 +970,36 @@ fn spawn_book_refresher(p: RefresherParams) {
                 b.recompute_covered();
             }
 
-            // NAV from the indexer view (pps × shares; see book docs).
+            // Budget base + risk state from the indexer view (SO-418:
+            // latest/junior NAV, not total pps × shares — see
+            // `book::budget_base`).
             let nav = match p.indexer.trading_vaults().await {
-                Ok(vaults) => vaults
-                    .iter()
-                    .find(|v| {
+                Ok(vaults) => {
+                    let ours = vaults.iter().find(|v| {
                         let hex = p.vault_id.to_hex_literal();
                         v.vault_id.to_hex() == hex || format!("0x{}", v.vault_id.to_hex()) == hex
-                    })
-                    .and_then(|v| {
-                        v.latest_pps_e12.map(|pps| {
-                            u64::try_from(pps.saturating_mul(v.total_shares) / 1_000_000_000_000u128)
-                                .unwrap_or(u64::MAX)
-                        })
-                    }),
+                    });
+                    if let Some(v) = ours {
+                        // Risk gate refresh, with transition logging: the
+                        // desk keeps running (healthy-but-idle) either way.
+                        let now_off = book::vault_risk_off(v);
+                        let was_off = p.shared.risk_off.swap(now_off, Ordering::Relaxed);
+                        if now_off && !was_off {
+                            tracing::warn!(
+                                vault = %p.vault_id,
+                                risk_state = v.risk_state,
+                                commitment_breached = v.curator_commitment_breached,
+                                state = %v.state,
+                                settled = v.settled,
+                                "desk vault went RISK-OFF — quoting, bids and new listings stop"
+                            );
+                        } else if !now_off && was_off {
+                            tracing::info!(vault = %p.vault_id, "desk vault risk state cured — resuming");
+                        }
+                        metrics::gauge!("mm_desk_vault_risk_off").set(if now_off { 1.0 } else { 0.0 });
+                    }
+                    ours.and_then(book::budget_base)
+                }
                 Err(e) => {
                     tracing::debug!(error = %format!("{e:#}"), "NAV refresh: indexer unreachable");
                     None
