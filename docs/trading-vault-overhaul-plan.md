@@ -1,6 +1,6 @@
 # Trading vault evolution: tokenized positions and optional tranches
 
-Revision 2. See the revision history at the end of this document for what
+Revision 3. See the revision history at the end of this document for what
 changed from the initial draft.
 
 ## Executive recommendation
@@ -45,11 +45,11 @@ The recommended path is:
    complete object layout, one audit, one launch (§7). Sui package upgrades
    cannot add fields to published structs, so the full layout must be in the
    first published version regardless; a single release removes the intermediate
-   migration a phased rollout would force.
+   republish-and-swap a phased rollout would force.
 
 This is a new package (`vault_v2` types), not an in-place layout change to
-existing shared vault objects. Existing vaults can remain on the ledger model
-and opt into migration through an explicit, audited claim flow.
+existing shared vault objects. No vaults are live today, so v2 fully replaces
+the current `trading-vault` package rather than coexisting with it (§5).
 
 ## 1. What exists today
 
@@ -588,33 +588,31 @@ Keep arithmetic functions small and pure where Move permits, and test them again
 high-precision reference model. Use `u256` for every multiply-before-divide and
 explicitly document which side receives rounding dust.
 
-## 5. Migration and compatibility
+## 5. Replacing the current package
 
 Changing the fields of `TradingVault`, `Stake`, and `WithdrawRequest` is not merely
 an additive API change. Published Sui package upgrades cannot rewrite the layout of
 existing objects as if they were database rows — nor add fields to a published
-struct for future instances. Plan for one of:
+struct for future instances. There are no live trading vaults, so this is not a
+migration problem: v2 is a clean replacement.
 
-1. **Parallel v2 vaults (recommended):** deploy `TradingVaultV2`; close/unwind v1;
-   users withdraw and deposit into v2. This is simplest to audit.
-2. **Migration wrapper:** freeze a v1 vault at a specific appraised NAV, consume each
-   ledger stake through a user-authorized migration, and mint an equivalent v2
-   position. This needs replay protection, a deadline, queued-withdrawal handling,
-   and a source-of-truth snapshot.
-3. **Versioned enum/dynamic fields:** only feasible if the currently published
-   object layout already has an extension/version hook. The present concrete fields
-   do not provide a zero-risk automatic conversion path.
+- Keep `contracts/trading-vault` in the tree as a read-only reference throughout
+  the `vault_v2` buildout — the appraisal engine, session hot potato, adapter
+  allowlist, and queue mechanics are the starting point for the new package and
+  should be consulted, not re-derived.
+- Delete the existing on-chain trading vaults and retire the old package at
+  launch. No claim, snapshot, or opt-in conversion path is built, and none should
+  be: every line of migration machinery would be audited code serving zero users.
+- Remove `contracts/trading-vault` from the tree once `vault_v2` is published and
+  the off-chain services no longer reference it.
 
 Because v2 ships as a single complete release (§7), its first published layout
 already contains every capital-structure field — `CapitalStructure`,
 `TrancheBook`, `capital_generation`, the queue lanes, and the settlement pool —
-so no second migration boundary exists inside v2 itself. The position's `UID`
-additionally allows dynamic-field extension as a last-resort escape hatch for
-genuinely unforeseen metadata, but no field consulted by NAV allocation or the
-waterfall may live there.
-
-Do not tokenize pending withdrawal requests twice. At the migration boundary either
-finish the v1 queue or represent each queued request as exactly one migrated claim.
+so no upgrade boundary exists inside v2 itself. The position's `UID` additionally
+allows dynamic-field extension as a last-resort escape hatch for genuinely
+unforeseen metadata, but no field consulted by NAV allocation or the waterfall may
+live there.
 
 Off-chain consumers must version event schemas and APIs. At minimum expose:
 
@@ -700,7 +698,8 @@ the capital risk-state machine, queue lanes, curator escrow, and terminal
 settlement together, in one package with one audit and one launch. Phasing the
 contract work (positions first, tranches later) was rejected: Sui cannot add
 fields to published structs, so a phased rollout either ships dead capital-
-structure fields anyway or forces a second full migration; and a single release
+structure fields anyway or forces a second full republish and position swap —
+this time with live vaults and real users to move; and a single release
 gives the audit one coherent economic model instead of two. The cost is a larger
 single audit scope, which the sequence below absorbs by freezing the
 specification before implementation.
@@ -733,7 +732,8 @@ specification before implementation.
    examples and reference model, shadow index on testnet, then one audit covering
    custody plus the complete economic surface. Contract audit sign-off must cite
    the exact spec version.
-7. **Launch v2 and open migration** from v1 per §5.
+7. **Launch v2 and retire the old package** per §5: delete the existing trading
+   vaults, publish `vault_v2`, and cut every off-chain service over to it.
 8. **Consider fungible wrappers later:** only after integrations demonstrate that
    object positions are insufficient and the global HWM economics are approved.
 
@@ -1289,7 +1289,14 @@ The implementation release checklist must fail closed unless:
 
 ## Revision history
 
-**Revision 2** (this document) — changes from the initial exploration draft,
+**Revision 3** (this document) — no vaults are live, so the v1-to-v2 migration
+path is dropped entirely. §5 becomes "Replacing the current package": keep
+`contracts/trading-vault` as a read-only reference during the `vault_v2`
+buildout, delete the existing on-chain trading vaults at launch, and remove the
+old package once nothing references it. No claim flow, snapshot, or opt-in
+conversion is built.
+
+**Revision 2** — changes from the initial exploration draft,
 following design review against the current `vault.move`:
 
 1. **Queue liveness:** replaced the single strict-head FIFO with per-tranche FIFO
