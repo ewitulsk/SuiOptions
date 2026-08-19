@@ -6,7 +6,7 @@ edition = "2024.beta"
 [dependencies]
 deepbook = { local = "../vendor/deepbook" }
 token = { local = "../vendor/token" }
-trading_vault = { local = "../trading-vault" }
+vault_v2 = { local = "../trading-vault-v2" }
 options_core = { local = "../core" }
 whitelist = { local = "../whitelist" }
 

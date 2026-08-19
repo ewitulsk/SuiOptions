@@ -4,5 +4,5 @@ version = "0.0.1"
 edition = "2024.beta"
 
 [dependencies]
-trading_vault = { local = "../trading-vault" }
+vault_v2 = { local = "../trading-vault-v2" }
 options_core = { local = "../core" }

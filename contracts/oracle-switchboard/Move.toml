@@ -5,7 +5,7 @@ edition = "2024.beta"
 
 [dependencies]
 switchboard = { git = "https://github.com/switchboard-xyz/sui.git", subdir = "on_demand/", rev = "mainnet" }
-trading_vault = { local = "../trading-vault" }
+vault_v2 = { local = "../trading-vault-v2" }
 options_core = { local = "../core" }
 
 # Switchboard ships separate testnet/mainnet branches whose manifests pin

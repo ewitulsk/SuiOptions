@@ -16,9 +16,9 @@ use options_core::admin::{Self, AdminCap};
 
 use whitelist::whitelist::{Self, AdminCap as WlAdminCap, Whitelist};
 
-use trading_vault::registry as tv_registry;
-use trading_vault::registry::{IntegrationRegistry, VaultProtocolConfig};
-use trading_vault::vault::{Self, CuratorCap, TradingVault};
+use vault_v2::registry as tv_registry;
+use vault_v2::registry::{IntegrationRegistry, VaultProtocolConfig};
+use vault_v2::vault::{Self, CuratorCap, TradingVault};
 
 use deepbook_adapter::deepbook_adapter::{Self as adapter, DeepBookCustody, PoolAllowlist};
 
@@ -53,34 +53,58 @@ fun setup(sc: &mut Scenario): Clock {
     whitelist::add_member(&wl_cap, &mut wl, ALICE);
     ts::return_shared(wl);
     ts::return_to_sender(sc, wl_cap);
+    // v2 risk-off gate: no curator commitment in these tests, so disable
+    // the curator-share enforcement protocol-wide.
+    let mut cfg = ts::take_shared<VaultProtocolConfig>(sc);
+    tv_registry::set_enforce_curator_share(&admin_cap, &mut cfg, false);
+    ts::return_shared(cfg);
     ts::return_to_sender(sc, admin_cap);
+
+    ts::next_tx(sc, ADMIN);
+    let clock = clock::create_for_testing(sc.ctx());
 
     // Vault + genesis deposit + custody.
     ts::next_tx(sc, CURATOR);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
     let wl = ts::take_shared<Whitelist>(sc);
-    vault::create_vault<USDC>(&cfg, &wl, 0, 1_000, 3_600_000, sc.ctx());
+    vault::create_vault<USDC>(
+        &cfg,
+        &wl,
+        0,
+        1_000,
+        3_600_000,
+        0, // untranched
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        b"spec-hash-test",
+        &clock,
+        sc.ctx(),
+    );
     ts::return_shared(wl);
     ts::return_shared(cfg);
-
-    ts::next_tx(sc, ADMIN);
-    let clock = clock::create_for_testing(sc.ctx());
 
     ts::next_tx(sc, ALICE);
     let mut v = ts::take_shared<TradingVault>(sc);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
     let wl = ts::take_shared<Whitelist>(sc);
     let appraisal = vault::begin_appraisal<USDC>(&v);
-    vault::deposit<USDC>(
+    let position = vault::deposit<USDC>(
         &mut v,
         &cfg,
         &wl,
         appraisal,
         coin::from_balance(balance::create_for_testing<USDC>(1_000_000_000), sc.ctx()),
         option::none(),
+        0, // untranched
         &clock,
         sc.ctx(),
     );
+    transfer::public_transfer(position, ALICE);
     ts::return_shared(wl);
     ts::return_shared(cfg);
     ts::return_shared(v);

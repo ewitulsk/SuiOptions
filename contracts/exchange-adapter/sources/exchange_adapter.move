@@ -35,9 +35,9 @@ use exchange::balance_manager::{Self, BalanceManager, OwnerCap};
 use exchange::registry::SettlementRegistry;
 use exchange::settlement::{Self, FillObligation};
 use whitelist::whitelist::Whitelist;
-use trading_vault::price::{Self, PriceAttestation};
-use trading_vault::registry::{IntegrationRegistry, VaultProtocolConfig};
-use trading_vault::vault::{Self, Appraisal, CuratorCap, Session, TradingVault};
+use vault_v2::price::{Self, PriceAttestation};
+use vault_v2::registry::{IntegrationRegistry, VaultProtocolConfig};
+use vault_v2::vault::{Self, Appraisal, CuratorCap, Session, TradingVault};
 
 const E_WRONG_CUSTODY: u64 = 1;
 const E_WRONG_MANAGER: u64 = 2;

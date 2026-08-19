@@ -5,5 +5,5 @@ edition = "2024.beta"
 
 [dependencies]
 options_core = { local = "../core" }
-trading_vault = { local = "../trading-vault" }
+vault_v2 = { local = "../trading-vault-v2" }
 whitelist = { local = "../whitelist" }

@@ -25,9 +25,9 @@ use options_core::bucket::{Self, Bucket};
 use options_core::position::{Self, Position};
 use options_core::put_bucket::{Self, PutBucket};
 
-use trading_vault::price::{Self, PriceAttestation};
-use trading_vault::registry::{IntegrationRegistry, VaultProtocolConfig};
-use trading_vault::vault::{Self, Appraisal, TradingVault};
+use vault_v2::price::{Self, PriceAttestation};
+use vault_v2::registry::{IntegrationRegistry, VaultProtocolConfig};
+use vault_v2::vault::{Self, Appraisal, TradingVault};
 
 // Error-code values are stable identifiers (off-chain abort-code mapping
 // keys on them); retired codes are not reused.
@@ -57,7 +57,7 @@ public struct PositionRedeemed has copy, drop {
 #[test_only]
 public fun custody_position_for_testing(
     vault: &mut TradingVault,
-    cap: &trading_vault::vault::CuratorCap,
+    cap: &vault_v2::vault::CuratorCap,
     reg: &IntegrationRegistry,
     pos: Position,
 ) {

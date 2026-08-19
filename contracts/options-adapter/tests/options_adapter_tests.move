@@ -11,11 +11,11 @@ use options_core::admin::{Self, AdminCap};
 use whitelist::whitelist::{Self, AdminCap as WlAdminCap, Whitelist};
 use options_core::bucket::{Self, Bucket};
 
-use trading_vault::price as tv_price;
-use trading_vault::registry as tv_registry;
-use trading_vault::registry::{IntegrationRegistry, OracleRegistry, VaultProtocolConfig};
-use trading_vault::vault::{Self, CuratorCap, TradingVault};
-use trading_vault::vault_mm;
+use vault_v2::price as tv_price;
+use vault_v2::registry as tv_registry;
+use vault_v2::registry::{IntegrationRegistry, OracleRegistry, VaultProtocolConfig};
+use vault_v2::vault::{Self, CuratorCap, TradingVault};
+use vault_v2::vault_mm;
 
 use options_adapter::options_adapter as adapter;
 
@@ -78,34 +78,58 @@ fun setup(sc: &mut Scenario): Clock {
         2_000_000_000_000,
         12,
         sc.ctx());
+    // v2 risk-off gate: no curator commitment in these tests, so disable
+    // the curator-share enforcement protocol-wide.
+    let mut cfg = ts::take_shared<VaultProtocolConfig>(sc);
+    tv_registry::set_enforce_curator_share(&admin_cap, &mut cfg, false);
+    ts::return_shared(cfg);
     ts::return_to_sender(sc, admin_cap);
+
+    ts::next_tx(sc, ADMIN);
+    let clock = clock::create_for_testing(sc.ctx());
 
     // UND-denominated vault, Alice seeds 1_000_000.
     ts::next_tx(sc, CURATOR);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
     let wl = ts::take_shared<Whitelist>(sc);
-    vault::create_vault<UND>(&cfg, &wl, 0, 1_000, 3_600_000, sc.ctx());
+    vault::create_vault<UND>(
+        &cfg,
+        &wl,
+        0,
+        1_000,
+        3_600_000,
+        0, // untranched
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        b"spec-hash-test",
+        &clock,
+        sc.ctx(),
+    );
     ts::return_shared(wl);
     ts::return_shared(cfg);
-
-    ts::next_tx(sc, ADMIN);
-    let clock = clock::create_for_testing(sc.ctx());
 
     ts::next_tx(sc, ALICE);
     let mut v = ts::take_shared<TradingVault>(sc);
     let cfg = ts::take_shared<VaultProtocolConfig>(sc);
     let wl = ts::take_shared<Whitelist>(sc);
     let appraisal = vault::begin_appraisal<UND>(&v);
-    vault::deposit<UND>(
+    let position = vault::deposit<UND>(
         &mut v,
         &cfg,
         &wl,
         appraisal,
         coin::from_balance(balance::create_for_testing<UND>(1_000_000), sc.ctx()),
         option::none(),
+        0, // untranched
         &clock,
         sc.ctx(),
     );
+    transfer::public_transfer(position, ALICE);
     ts::return_shared(wl);
     ts::return_shared(cfg);
     ts::return_shared(v);
@@ -386,7 +410,7 @@ fun spread_position_appraises_from_escrow() {
 }
 
 #[test]
-#[expected_failure(abort_code = 10, location = trading_vault::vault_mm)] // E_LONG_BUCKET_MISMATCH
+#[expected_failure(abort_code = 10, location = vault_v2::vault_mm)] // E_LONG_BUCKET_MISMATCH
 fun spread_appraisal_wrong_long_bucket_aborts() {
     let mut sc = ts::begin(ADMIN);
     let (clock, pos_id) = setup_spread(&mut sc);

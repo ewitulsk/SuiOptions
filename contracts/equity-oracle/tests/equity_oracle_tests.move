@@ -7,9 +7,9 @@ use sui::coin::{Self, Coin};
 use sui::test_scenario::{Self as ts, Scenario};
 
 
-use trading_vault::registry::{Self as tv_registry, OracleRegistry};
-use trading_vault::test_helpers::{Self as th, USDC};
-use trading_vault::vault::{Self, CuratorCap, TradingVault};
+use vault_v2::registry::{Self as tv_registry, OracleRegistry};
+use vault_v2::test_helpers::{Self as th, USDC};
+use vault_v2::vault::{Self, CuratorCap, TradingVault};
 
 use equity_oracle::equity_oracle::{Self as eo, EquityBook, EquityOracle};
 
@@ -47,9 +47,12 @@ fun setup_unregistered(scenario: &mut Scenario): Clock {
     let mut book = ts::take_shared<EquityBook>(scenario);
     eo::add_poster(&admin_cap, &mut book, keeper_addr());
     ts::return_shared(book);
+    let mut cfg = th::take_protocol_config(scenario);
+    tv_registry::set_enforce_curator_share(&admin_cap, &mut cfg, false);
+    ts::return_shared(cfg);
     th::return_admin_cap(scenario, admin_cap);
 
-    th::new_default_vault(scenario);
+    th::new_default_vault(scenario, &clock);
     th::simple_deposit(scenario, th::alice_addr(), 1_000, &clock);
     clock
 }
@@ -107,10 +110,12 @@ fun post(scenario: &mut Scenario, who: address, equity: u64, clock: &Clock) {
 fun release_bootstrap(scenario: &mut Scenario, amount: u64, clock: &Clock) {
     ts::next_tx(scenario, th::curator_addr());
     let mut v = ts::take_shared<TradingVault>(scenario);
+    let cfg = th::take_protocol_config(scenario);
     let cap = ts::take_from_sender<CuratorCap>(scenario);
     let appraisal = vault::begin_appraisal<USDC>(&v);
-    vault::release_external<USDC>(&mut v, &cap, appraisal, amount, clock, scenario.ctx());
+    vault::release_external<USDC>(&mut v, &cap, &cfg, appraisal, amount, clock, scenario.ctx());
     ts::return_to_sender(scenario, cap);
+    ts::return_shared(cfg);
     ts::return_shared(v);
 }
 
@@ -120,11 +125,13 @@ fun release(scenario: &mut Scenario, amount: u64, clock: &Clock) {
     let mut v = ts::take_shared<TradingVault>(scenario);
     let book = ts::take_shared<EquityBook>(scenario);
     let oreg = ts::take_shared<OracleRegistry>(scenario);
+    let cfg = th::take_protocol_config(scenario);
     let cap = ts::take_from_sender<CuratorCap>(scenario);
     let mut appraisal = vault::begin_appraisal<USDC>(&v);
     eo::record(&v, &book, &oreg, &mut appraisal, clock);
-    vault::release_external<USDC>(&mut v, &cap, appraisal, amount, clock, scenario.ctx());
+    vault::release_external<USDC>(&mut v, &cap, &cfg, appraisal, amount, clock, scenario.ctx());
     ts::return_to_sender(scenario, cap);
+    ts::return_shared(cfg);
     ts::return_shared(oreg);
     ts::return_shared(book);
     ts::return_shared(v);
@@ -163,19 +170,21 @@ fun post_within_guardrails_and_appraise() {
     let mut appraisal = vault::begin_appraisal<USDC>(&v);
     eo::record(&v, &book, &oreg, &mut appraisal, &clock);
     assert!(vault::appraisal_value(&appraisal) == 1_040, 0);
-    vault::deposit<USDC>(
+    let position = vault::deposit<USDC>(
         &mut v,
         &cfg,
         &wl,
         appraisal,
         coin::from_balance(th::mint<USDC>(1_040), scenario.ctx()),
         option::none(),
+        th::untranched(),
         &clock,
         scenario.ctx(),
     );
     ts::return_shared(wl);
-    let (bob_shares, _, _) = vault::stake_of(&v, th::bob_addr());
+    let bob_shares = vault_v2::vault_position::shares(&position);
     assert!(bob_shares == th::expected_shares(1_040, 1_000_000_000, 1_040), 0);
+    transfer::public_transfer(position, th::bob_addr());
     ts::return_shared(oreg);
     ts::return_shared(book);
     ts::return_shared(cfg);

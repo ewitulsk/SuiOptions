@@ -18,10 +18,10 @@ use exchange::registry::{Self as ereg, SettlementRegistry};
 use exchange::settlement;
 use whitelist::whitelist;
 
-use trading_vault::events as tv_events;
-use trading_vault::registry::{Self as vreg, IntegrationRegistry};
-use trading_vault::test_helpers as th;
-use trading_vault::vault::{Self, CuratorCap, TradingVault};
+use vault_v2::events as tv_events;
+use vault_v2::registry::{Self as vreg, IntegrationRegistry};
+use vault_v2::test_helpers as th;
+use vault_v2::vault::{Self, CuratorCap, TradingVault};
 
 use exchange_adapter::exchange_adapter as adapter;
 
@@ -51,9 +51,14 @@ fun setup(): (Scenario, Clock) {
         std::type_name::with_defining_ids<adapter::ExchangeAdapter>(),
     );
     ts::return_shared(ireg);
+    // v2 risk-off gate: no curator commitment in these tests, so disable
+    // the curator-share enforcement protocol-wide.
+    let mut cfg = th::take_protocol_config(&sc);
+    vreg::set_enforce_curator_share(&admin_cap, &mut cfg, false);
+    ts::return_shared(cfg);
     th::return_admin_cap(&sc, admin_cap);
 
-    th::new_default_vault(&mut sc);
+    th::new_default_vault(&mut sc, &clk);
     th::simple_deposit(&mut sc, th::alice_addr(), 1_000_000, &clk);
     (sc, clk)
 }
@@ -451,7 +456,7 @@ fun direct_taker_fill_settles_from_vault_free_balances() {
 }
 
 #[test]
-#[expected_failure(abort_code = 113, location = trading_vault::vault)]
+#[expected_failure(abort_code = 113, location = vault_v2::vault)]
 fun direct_fill_refused_without_quote_opt_in() {
     let (mut sc, clk) = setup();
     ts::next_tx(&mut sc, th::curator_addr());
@@ -595,23 +600,25 @@ fun vault_vs_vault_match_settles_both_sides() {
     };
 
     // Vault B: fresh vault with 105_000 USDC.
-    let vault_b = th::new_default_vault(&mut sc);
+    let vault_b = th::new_default_vault(&mut sc, &clk);
     ts::next_tx(&mut sc, h_bob());
     {
         let mut v = ts::take_shared_by_id<TradingVault>(&sc, vault_b);
         let cfg = th::take_protocol_config(&sc);
         let wl = th::take_whitelist(&sc);
         let appraisal = vault::begin_appraisal<th::USDC>(&v);
-        vault::deposit<th::USDC>(
+        let position = vault::deposit<th::USDC>(
             &mut v,
             &cfg,
             &wl,
             appraisal,
             coin::from_balance(th::mint<th::USDC>(105_000), sc.ctx()),
             option::none(),
+            th::untranched(),
             &clk,
             sc.ctx(),
         );
+        transfer::public_transfer(position, h_bob());
         ts::return_shared(wl);
         ts::return_shared(cfg);
         ts::return_shared(v);
@@ -685,21 +692,22 @@ fun direct_custody_appraises_empty_and_deposits_still_work() {
     let mut appraisal = vault::begin_appraisal<th::USDC>(&v);
     let ca = adapter::begin_custody_appraisal(&v, custody_id);
     adapter::finalize_custody_appraisal(&v, &mut appraisal, ca);
-    vault::deposit<th::USDC>(
+    let position = vault::deposit<th::USDC>(
         &mut v,
         &cfg,
         &wl,
         appraisal,
         coin::from_balance(th::mint<th::USDC>(500_000), sc.ctx()),
         option::none(),
+        th::untranched(),
         &clk,
         sc.ctx(),
     );
     ts::return_shared(wl);
     // NAV was exactly the 1M free balance: the new stake matches the
     // genesis stake 1:2 in value.
-    let (shares, _, _) = vault::stake_of(&v, th::alice_addr());
-    assert!(shares > 0);
+    assert!(vault_v2::vault_position::shares(&position) > 0);
+    transfer::public_transfer(position, th::alice_addr());
     ts::return_shared(cfg);
     ts::return_shared(v);
 
