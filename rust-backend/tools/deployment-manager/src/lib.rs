@@ -121,10 +121,12 @@ pub struct Cli {
     #[arg(long, default_value = "../test-tokens")]
     pub test_tokens: PathBuf,
 
-    /// Extra address to seed into the ingress whitelists (core
-    /// ProtocolConfig + exchange Whitelist) during the ceremony.
-    /// Repeatable; merged (deduped) with the env's baked-in
-    /// INGRESS_MEMBERS list. The deployer is always seeded automatically.
+    /// Extra address to seed into the shared ingress Whitelist during the
+    /// ceremony. `addr` seeds ALL four domains; `addr=options,vault-lp`
+    /// seeds only those domains (options, exchange, vault-create,
+    /// vault-lp). Repeatable; merged (domain sets unioned) with the env's
+    /// baked-in INGRESS_MEMBERS list. The deployer is always seeded into
+    /// every domain automatically.
     #[arg(long = "ingress-member")]
     pub ingress_member: Vec<String>,
 }

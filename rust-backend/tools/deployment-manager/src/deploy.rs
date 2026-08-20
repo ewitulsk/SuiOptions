@@ -6,6 +6,7 @@ use sui_move_build::BuildConfig;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::Identifier;
 use sui_tx::chain::{created_objects, published_package, ChainClient, ExecutedTransaction};
+use sui_tx::tx::admin::WhitelistDomain;
 use sui_types::base_types::ObjectID;
 use sui_types::SUI_FRAMEWORK_ADDRESS;
 
@@ -260,16 +261,16 @@ pub async fn publish_dep_package(
 }
 
 /// Seed the standalone ingress `Whitelist` right after its publish: one
-/// PTB calling `whitelist::add_member` for the deployer + configured
-/// members, deduped. The deployer is always a member — the ceremony and
-/// every deployer-signed service tx must pass the gate.
+/// PTB calling `whitelist::add_member` per (member, domain), deduped. The
+/// deployer is always a member of EVERY domain — the ceremony and every
+/// deployer-signed service tx must pass the gates.
 pub async fn seed_whitelist(
     client: &ChainClient,
     signer: &Signer,
     whitelist_pkg: ObjectID,
     admin_cap_id: ObjectID,
     whitelist_id: ObjectID,
-    ingress_members: &[sui_types::base_types::SuiAddress],
+    ingress_members: &[(sui_types::base_types::SuiAddress, Vec<WhitelistDomain>)],
     gas_budget: u64,
 ) -> Result<()> {
     // Let the fullnode index the freshly created AdminCap + shared object.
@@ -288,25 +289,31 @@ pub async fn seed_whitelist(
             .await
             .context("fetching shared Whitelist")?,
     )?;
-    let mut members = vec![signer.address];
-    for m in ingress_members {
-        if !members.contains(m) {
-            members.push(*m);
+    // (member, domain) pairs, deduped — VecSet::insert aborts on duplicates.
+    let mut seeds: Vec<(sui_types::base_types::SuiAddress, WhitelistDomain)> =
+        WhitelistDomain::ALL.iter().map(|d| (signer.address, *d)).collect();
+    for (m, domains) in ingress_members {
+        for d in domains {
+            if !seeds.contains(&(*m, *d)) {
+                seeds.push((*m, *d));
+            }
         }
     }
-    for member in &members {
-        let addr = pt.pure(*member)?;
+    let count = seeds.len();
+    for (member, domain) in seeds {
+        let dom = pt.pure(domain.code())?;
+        let addr = pt.pure(member)?;
         pt.programmable_move_call(
             whitelist_pkg,
             Identifier::new("whitelist")?,
             Identifier::new("add_member")?,
             vec![],
-            vec![admin, wl, addr],
+            vec![admin, wl, dom, addr],
         );
     }
     let resp = sui_tx::tx::submit_ptb(client, signer, pt, gas_budget, "whitelist seed").await?;
     tracing::info!(
-        members = members.len(),
+        member_domain_pairs = count,
         digest = %sui_tx::tx::tx_digest(&resp),
         "ingress whitelist seeded"
     );

@@ -28,6 +28,7 @@ use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::admin::{
     set_fee_bps, set_ingress_paused, set_whitelist_enabled, whitelist_add_member,
     whitelist_remove_member, withdraw_treasury, IngressWhitelist, MarketPauseTarget,
+    WhitelistDomain,
 };
 use sui_tx::tx::test_tokens::{mint_and_deposit_into_collateral, mint_to_sender};
 
@@ -45,6 +46,20 @@ fn resolve_coin_type(snapshot: &Snapshot, input: &str) -> Result<String> {
         return Ok(input.to_owned());
     }
     Ok(snapshot.token_spec(input)?.coin_type.clone())
+}
+
+/// `--domain` flags with the omitted-means-all default applied.
+fn domains_or_all(domains: Vec<WhitelistDomain>) -> Vec<WhitelistDomain> {
+    if domains.is_empty() {
+        WhitelistDomain::ALL.to_vec()
+    } else {
+        domains
+    }
+}
+
+/// Joined display names for a domain list (log lines).
+fn domain_names(domains: &[WhitelistDomain]) -> String {
+    domains.iter().map(|d| d.name()).collect::<Vec<_>>().join(",")
 }
 
 /// The standalone ingress whitelist's (package, AdminCap, Whitelist)
@@ -94,8 +109,8 @@ async fn main() -> Result<()> {
             | Command::WhitelistAdd { .. }
             | Command::WhitelistRemove { .. }
             | Command::WhitelistList
-            | Command::WhitelistEnable
-            | Command::WhitelistDisable
+            | Command::WhitelistEnable { .. }
+            | Command::WhitelistDisable { .. }
             | Command::PauseIngress
             | Command::UnpauseIngress
     );
@@ -236,19 +251,41 @@ async fn main() -> Result<()> {
             .await?;
             println!("✓ withdraw-treasury digest: {}", sui_tx::tx::tx_digest(&resp));
         }
-        Command::WhitelistAdd { address } => {
+        Command::WhitelistAdd { address, ref domains } => {
+            let domains = domains_or_all(domains.clone());
             let wl = ingress_whitelist(&snapshot)?;
-            let resp =
-                whitelist_add_member(&wrap.client, &wrap.signer, &wl, address, cli.gas_budget)
-                    .await?;
-            println!("✓ whitelist-add {address} digest: {}", sui_tx::tx::tx_digest(&resp));
+            let resp = whitelist_add_member(
+                &wrap.client,
+                &wrap.signer,
+                &wl,
+                &domains,
+                address,
+                cli.gas_budget,
+            )
+            .await?;
+            println!(
+                "✓ whitelist-add {address} [{}] digest: {}",
+                domain_names(&domains),
+                sui_tx::tx::tx_digest(&resp)
+            );
         }
-        Command::WhitelistRemove { address } => {
+        Command::WhitelistRemove { address, ref domains } => {
+            let domains = domains_or_all(domains.clone());
             let wl = ingress_whitelist(&snapshot)?;
-            let resp =
-                whitelist_remove_member(&wrap.client, &wrap.signer, &wl, address, cli.gas_budget)
-                    .await?;
-            println!("✓ whitelist-remove {address} digest: {}", sui_tx::tx::tx_digest(&resp));
+            let resp = whitelist_remove_member(
+                &wrap.client,
+                &wrap.signer,
+                &wl,
+                &domains,
+                address,
+                cli.gas_budget,
+            )
+            .await?;
+            println!(
+                "✓ whitelist-remove {address} [{}] digest: {}",
+                domain_names(&domains),
+                sui_tx::tx::tx_digest(&resp)
+            );
         }
         Command::WhitelistList => {
             let wl = ingress_whitelist(&snapshot)?;
@@ -262,36 +299,86 @@ async fn main() -> Result<()> {
                 println!("Whitelist ({id})");
                 match json {
                     Some(v) => {
-                        // VecSet<address> renders as { "contents": [...] }.
-                        let enabled = v.pointer("/whitelist_enabled").and_then(|b| b.as_bool());
-                        let paused = v.pointer("/ingress_paused").and_then(|b| b.as_bool());
-                        let members = v.pointer("/members/contents").and_then(|m| m.as_array());
-                        match (enabled, paused, members) {
-                            (Some(enabled), Some(paused), Some(members)) => {
-                                println!("  whitelist_enabled: {enabled}");
-                                println!("  ingress_paused   : {paused}");
-                                println!("  members          : {}", members.len());
+                        let mut parsed_any = false;
+                        for d in WhitelistDomain::ALL {
+                            let key = d.name().replace('-', "_");
+                            // VecSet<address> renders as { "contents": [...] }.
+                            let enabled =
+                                v.pointer(&format!("/{key}/enabled")).and_then(|b| b.as_bool());
+                            let paused =
+                                v.pointer(&format!("/{key}/paused")).and_then(|b| b.as_bool());
+                            let members = v
+                                .pointer(&format!("/{key}/members/contents"))
+                                .and_then(|m| m.as_array());
+                            if let (Some(enabled), Some(paused), Some(members)) =
+                                (enabled, paused, members)
+                            {
+                                parsed_any = true;
+                                println!("  [{}]", d.name());
+                                println!("    enabled: {enabled}");
+                                println!("    paused : {paused}");
+                                println!("    members: {}", members.len());
                                 for m in members {
-                                    println!("    {}", m.as_str().unwrap_or_default());
+                                    println!("      {}", m.as_str().unwrap_or_default());
                                 }
                             }
-                            // Unexpected JSON rendering — dump it raw
-                            // rather than guessing at the shape.
-                            _ => println!("  {v}"),
+                        }
+                        // Unexpected JSON rendering — dump it raw rather
+                        // than guessing at the shape.
+                        if !parsed_any {
+                            println!("  {v}");
                         }
                     }
                     None => println!("  (node returned no JSON rendering for this object)"),
                 }
             }
         }
-        Command::WhitelistEnable | Command::WhitelistDisable => {
-            let enabled = matches!(cli.cmd, Command::WhitelistEnable);
+        Command::WhitelistDomains { address } => {
             let wl = ingress_whitelist(&snapshot)?;
-            let resp =
-                set_whitelist_enabled(&wrap.client, &wrap.signer, &wl, enabled, cli.gas_budget)
-                    .await?;
+            let id = wl.whitelist;
+            let (_, json) = wrap
+                .client
+                .get_object_json(id)
+                .await
+                .with_context(|| format!("fetching Whitelist {id}"))?;
+            let v = json.context("node returned no JSON rendering for the Whitelist")?;
+            let wanted = address.to_string().to_ascii_lowercase();
+            let mut on: Vec<&str> = Vec::new();
+            for d in WhitelistDomain::ALL {
+                let key = d.name().replace('-', "_");
+                let members = v
+                    .pointer(&format!("/{key}/members/contents"))
+                    .and_then(|m| m.as_array())
+                    .with_context(|| format!("unexpected Whitelist JSON shape for {key}"))?;
+                if members
+                    .iter()
+                    .any(|m| m.as_str().is_some_and(|s| s.eq_ignore_ascii_case(&wanted)))
+                {
+                    on.push(d.name());
+                }
+            }
+            if on.is_empty() {
+                println!("{address}: not whitelisted on any domain");
+            } else {
+                println!("{address}: {}", on.join(","));
+            }
+        }
+        Command::WhitelistEnable { ref domains } | Command::WhitelistDisable { ref domains } => {
+            let enabled = matches!(cli.cmd, Command::WhitelistEnable { .. });
+            let domains = domains_or_all(domains.clone());
+            let wl = ingress_whitelist(&snapshot)?;
+            let resp = set_whitelist_enabled(
+                &wrap.client,
+                &wrap.signer,
+                &wl,
+                &domains,
+                enabled,
+                cli.gas_budget,
+            )
+            .await?;
             println!(
-                "✓ whitelist_enabled={enabled} digest: {}",
+                "✓ whitelist_enabled={enabled} [{}] digest: {}",
+                domain_names(&domains),
                 sui_tx::tx::tx_digest(&resp)
             );
         }

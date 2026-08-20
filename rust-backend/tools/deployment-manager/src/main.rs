@@ -19,6 +19,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use sui_tx::chain::ChainClient;
+use sui_tx::tx::admin::WhitelistDomain;
 
 use deployment_manager::deploy::{
     create_and_share_treasury, publish_cctp_package, publish_dep_package, publish_package,
@@ -78,18 +79,39 @@ async fn main() -> Result<()> {
     let env_key = cli.env.to_ascii_lowercase();
 
     // Ingress whitelist members: the env's baked-in list merged with any
-    // --ingress-member flags, deduped, parsed up front so a typo fails the
-    // run before anything publishes. The deployer is seeded automatically.
-    let mut ingress_members: Vec<SuiAddress> = Vec::new();
+    // --ingress-member flags, deduped (domain sets merged), parsed up front
+    // so a typo fails the run before anything publishes. Spec format:
+    // `addr` seeds ALL four domains; `addr=options,vault-lp` seeds only
+    // those. The deployer is seeded automatically (all domains).
+    let mut ingress_members: Vec<(SuiAddress, Vec<WhitelistDomain>)> = Vec::new();
     for raw in deployment_manager::trading_vault_init::ingress_members_for_env(&env_key)
         .iter()
         .copied()
         .chain(cli.ingress_member.iter().map(String::as_str))
     {
-        let addr = SuiAddress::from_str(raw)
-            .with_context(|| format!("parsing ingress member address {raw}"))?;
-        if !ingress_members.contains(&addr) {
-            ingress_members.push(addr);
+        let (addr_raw, domains_raw) = match raw.split_once('=') {
+            Some((a, d)) => (a, Some(d)),
+            None => (raw, None),
+        };
+        let addr = SuiAddress::from_str(addr_raw)
+            .with_context(|| format!("parsing ingress member address {addr_raw}"))?;
+        let domains: Vec<WhitelistDomain> = match domains_raw {
+            None => WhitelistDomain::ALL.to_vec(),
+            Some(d) => d
+                .split(',')
+                .map(|s| s.trim().parse())
+                .collect::<Result<_>>()
+                .with_context(|| format!("parsing ingress member domains {raw}"))?,
+        };
+        match ingress_members.iter_mut().find(|(a, _)| *a == addr) {
+            Some((_, existing)) => {
+                for dom in domains {
+                    if !existing.contains(&dom) {
+                        existing.push(dom);
+                    }
+                }
+            }
+            None => ingress_members.push((addr, domains)),
         }
     }
 
@@ -384,7 +406,7 @@ async fn deploy_one(
     registrar_pubkey: Option<&str>,
     // Extra addresses seeded into the shared ingress Whitelist alongside
     // the deployer, right after the whitelist package publish.
-    ingress_members: &[SuiAddress],
+    ingress_members: &[(SuiAddress, Vec<WhitelistDomain>)],
     gas_budget: u64,
     skip_init: bool,
 ) -> Result<NetworkDeployment> {
