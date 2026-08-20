@@ -116,6 +116,7 @@ pub async fn mint_and_deposit_into_vault(
     faucet_id: ObjectID,
     refs: &crate::tx::trading_vault::TradingVaultRefs<'_>,
     whitelist_id: ObjectID,
+    tranche_code: u8,
     amount: u64,
     gas_budget: u64,
 ) -> Result<ExecutedTransaction> {
@@ -141,8 +142,9 @@ pub async fn mint_and_deposit_into_vault(
 
     // begin_appraisal -> deposit. Both take the vault as a shared input;
     // the builder unions the mutability, so the mutable deposit leg wins.
-    // v2: deposit mints a VaultPosition NFT — untranched (tranche 0),
-    // transferred back to the depositing signer.
+    // v2: deposit mints a VaultPosition NFT into `tranche_code` (0 on an
+    // untranched vault, junior on a tranched one — the vault rejects a
+    // mismatched code), transferred back to the depositing signer.
     let appraisal = crate::tx::trading_vault::build_begin_appraisal(client, &mut pt, refs).await?;
     crate::tx::trading_vault::build_deposit_and_transfer(
         client,
@@ -151,7 +153,7 @@ pub async fn mint_and_deposit_into_vault(
         whitelist_id,
         appraisal,
         coin,
-        0,
+        tranche_code,
         signer.address,
     )
     .await?;

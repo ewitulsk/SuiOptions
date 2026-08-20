@@ -51,23 +51,13 @@ pub struct ProvisionConfig {
     pub curator_fee_bps: u64,
     pub unwind_grace_ms: u64,
     pub gas_budget: u64,
-    // ── v2 capital structure (SO-418). Defaults = UNTRANCHED: the desk
-    // vault stays untranched unless the operator opts into tranching —
-    // structure_code 1 requires ALL six tranche params set coherently or
-    // `create_vault` aborts on chain.
-    /// 0 = untranched (default), 1 = senior/junior.
-    pub structure_code: u8,
-    pub senior_hurdle_bps_annual: u64,
-    pub target_junior_bps: u64,
-    pub maintenance_junior_bps: u64,
-    pub upside_code: u8,
-    pub residual_participation_bps: u64,
-    pub total_return_cap_bps: u64,
-    /// Terms-document version recorded immutably on the vault (§9.2).
-    pub terms_version: u64,
-    /// Hex content hash of the terms document `terms_version` names.
-    /// Empty = no hash recorded.
-    pub spec_hash: String,
+    /// v2 capital structure (SO-418), flattened — the keys read as before
+    /// (`structure_code`, the six tranche params, `terms_version`,
+    /// `spec_hash`). Defaults = UNTRANCHED; `structure_code` 1 requires
+    /// ALL six tranche params set coherently or `create_vault` aborts on
+    /// chain. Shared with staging-mm-bot (SO-420).
+    #[serde(flatten)]
+    pub tranche: trading_vault::TrancheParams,
     /// Curator escrowed-commitment funding (§8.6), accounting-asset raw
     /// units, deposited via `deposit_into_commitment` when the vault is
     /// provisioned (and topped in on adoption when the commitment slot is
@@ -86,15 +76,7 @@ impl Default for ProvisionConfig {
             curator_fee_bps: 0,
             unwind_grace_ms: 24 * 60 * 60 * 1_000,
             gas_budget: 200_000_000,
-            structure_code: 0,
-            senior_hurdle_bps_annual: 0,
-            target_junior_bps: 0,
-            maintenance_junior_bps: 0,
-            upside_code: 0,
-            residual_participation_bps: 0,
-            total_return_cap_bps: 0,
-            terms_version: 1,
-            spec_hash: String::new(),
+            tranche: trading_vault::TrancheParams::default(),
             commitment_deposit: 100_000_000_000,
         }
     }
@@ -103,26 +85,9 @@ impl Default for ProvisionConfig {
 impl ProvisionConfig {
     /// The v2 `CreateVaultSpec` this config describes.
     fn vault_spec(&self) -> Result<CreateVaultSpec> {
-        let spec_hash = if self.spec_hash.is_empty() {
-            Vec::new()
-        } else {
-            hex::decode(self.spec_hash.trim_start_matches("0x"))
-                .map_err(|e| anyhow!("bad [desk.provision].spec_hash: {e}"))?
-        };
-        Ok(CreateVaultSpec {
-            lockup_ms: self.lockup_ms,
-            curator_fee_bps: self.curator_fee_bps,
-            unwind_grace_ms: self.unwind_grace_ms,
-            structure_code: self.structure_code,
-            senior_hurdle_bps_annual: self.senior_hurdle_bps_annual,
-            target_junior_bps: self.target_junior_bps,
-            maintenance_junior_bps: self.maintenance_junior_bps,
-            upside_code: self.upside_code,
-            residual_participation_bps: self.residual_participation_bps,
-            total_return_cap_bps: self.total_return_cap_bps,
-            terms_version: self.terms_version,
-            spec_hash,
-        })
+        self.tranche
+            .create_vault_spec(self.lockup_ms, self.curator_fee_bps, self.unwind_grace_ms)
+            .context("[desk.provision]")
     }
 }
 
@@ -292,8 +257,10 @@ async fn provision(p: &ResolveParams<'_>) -> Result<ResolvedVault> {
     }
 
     // Seed. An unseeded vault is NAV 0, and NAV 0 declines every RFQ, so
-    // on testnet provisioning is not finished until this lands.
-    if !seed(p, created.vault_id).await? {
+    // on testnet provisioning is not finished until this lands. Junior on
+    // a tranched vault — the risk-bearing side the premium budget reads.
+    let tranche = trading_vault::deposit_tranche_code(p.cfg.tranche.structure_code);
+    if !seed(p, created.vault_id, tranche).await? {
         warn!(
             vault = %created.vault_id.to_hex_literal(),
             "vault provisioned unseeded — NAV is 0 and every RFQ will decline until it is funded"
@@ -508,7 +475,7 @@ async fn is_risk_off(
 
 /// Mint and deposit the `[testnet]` seed. `Ok(false)` when no seed is
 /// configured — the caller decides whether that is worth a warning.
-async fn seed(p: &ResolveParams<'_>, vault_id: ObjectID) -> Result<bool> {
+async fn seed(p: &ResolveParams<'_>, vault_id: ObjectID, tranche_code: u8) -> Result<bool> {
     let Some(seed) = p.testnet_seed else {
         return Ok(false);
     };
@@ -526,6 +493,7 @@ async fn seed(p: &ResolveParams<'_>, vault_id: ObjectID) -> Result<bool> {
         seed.faucet_id,
         &refs,
         p.whitelist,
+        tranche_code,
         seed.amount,
         p.cfg.gas_budget,
     )
@@ -562,7 +530,9 @@ async fn resume_seed(p: &ResolveParams<'_>, view: &TradingVault, me: SuiAddress)
         vault = %vault_id.to_hex_literal(),
         "adopted vault holds no shares — finishing its interrupted provision"
     );
-    seed(p, vault_id).await?;
+    // The vault's own (immutable) structure decides the tranche, not the
+    // config — a resumed vault may predate a config change.
+    seed(p, vault_id, trading_vault::deposit_tranche_code(view.structure_code)).await?;
     Ok(())
 }
 

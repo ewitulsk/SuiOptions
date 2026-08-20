@@ -276,6 +276,9 @@ struct DirectCtx {
     curator_cap: Option<ObjectID>,
     /// `[vault_direct].commitment_deposit`, accounting raw units.
     commitment_deposit: u64,
+    /// Tranche wire code the funding pass deposits into (SO-420): 0 on an
+    /// untranched vault, junior on a tranched one.
+    deposit_tranche: u8,
     /// Indexer view for the SO-418 risk gate + tranche budget measure.
     indexer: indexer_graphql::IndexerClient,
     /// Latch so the risk-off hard-stop logs on transition, not per tick.
@@ -530,6 +533,7 @@ async fn main() -> Result<()> {
                 buffer_bps: vd.buffer_bps,
                 curator_cap: resolved.curator_cap,
                 commitment_deposit: vd.commitment_deposit,
+                deposit_tranche: resolved.deposit_tranche,
                 indexer,
                 risk_off_latched: std::sync::atomic::AtomicBool::new(false),
                 funding,
@@ -1192,9 +1196,10 @@ async fn direct_deposit(
         deposit_type: accounting,
     };
     // v2 (SO-418): deposits mint a `VaultPosition` NFT that MUST be
-    // consumed — transfer it to this wallet (tranche 0: the bot only
-    // provisions untranched vaults). The funding pass merges the
-    // accumulated positions afterwards.
+    // consumed — transfer it to this wallet. SO-420: the tranche code was
+    // fixed at vault resolution (0 untranched, junior on a tranched
+    // vault). The funding pass merges the accumulated positions
+    // afterwards.
     if is_accounting {
         sui_tx::tx::trading_vault::build_deposit_and_transfer(
             &s.wrap.client,
@@ -1203,7 +1208,7 @@ async fn direct_deposit(
             f.whitelist_id,
             appraisal,
             coin,
-            0,
+            d.deposit_tranche,
             s.wrap.signer.address,
         )
         .await?;
@@ -1220,7 +1225,7 @@ async fn direct_deposit(
             appraisal,
             coin,
             att,
-            0,
+            d.deposit_tranche,
         )
         .await?;
         pt.transfer_arg(s.wrap.signer.address, position);
@@ -1729,6 +1734,11 @@ mod tests {
         let vd = staging.vault_direct.expect("staging runs vault-direct");
         assert!(vd.vault_id.is_empty(), "staging must not pin a vault");
         assert!(vd.provision.enabled, "staging must self-provision");
+        // SO-420: the tranche keys ride in via #[serde(flatten)], which
+        // silently ignores unknown keys — a typo'd key would quietly fall
+        // back to untranched. Pin the intent here.
+        assert_eq!(vd.provision.tranche.structure_code, 1, "staging vault is tranched");
+        assert_eq!(vd.provision.tranche.target_junior_bps, 2_000);
         load_config(&dir.join("config.toml")).unwrap();
     }
 

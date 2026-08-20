@@ -26,6 +26,7 @@ use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
 use move_core_types::identifier::Identifier;
+use serde::Deserialize;
 use move_core_types::language_storage::TypeTag;
 use sui_types::base_types::{ObjectID, SuiAddress};
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
@@ -710,6 +711,89 @@ pub struct CreateVaultSpec {
     pub spec_hash: Vec<u8>,
 }
 
+/// Tranche wire codes (`capital::tranche_from_code`).
+pub const TRANCHE_UNTRANCHED: u8 = 0;
+pub const TRANCHE_SENIOR: u8 = 1;
+pub const TRANCHE_JUNIOR: u8 = 2;
+
+/// The tranche a bot's own deposits land in: an untranched vault takes
+/// only tranche 0 and a tranched vault rejects it (abort 121), where the
+/// bot's capital is junior — the risk-bearing side its quoting budget is
+/// measured against.
+pub fn deposit_tranche_code(structure_code: u8) -> u8 {
+    if structure_code == 0 { TRANCHE_UNTRANCHED } else { TRANCHE_JUNIOR }
+}
+
+/// Capital-structure terms (SO-418) as they appear under a bot's
+/// `[..provision]` config table — `#[serde(flatten)]`ed into both bots'
+/// provision configs so the keys and validation stay identical. Defaults
+/// = UNTRANCHED; `structure_code` 1 requires all six tranche params set
+/// coherently within the protocol floors or `create_vault` aborts.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TrancheParams {
+    /// 0 = untranched (default), 1 = senior/junior.
+    pub structure_code: u8,
+    pub senior_hurdle_bps_annual: u64,
+    pub target_junior_bps: u64,
+    pub maintenance_junior_bps: u64,
+    pub upside_code: u8,
+    pub residual_participation_bps: u64,
+    pub total_return_cap_bps: u64,
+    /// Terms-document version recorded immutably on the vault (§9.2).
+    pub terms_version: u64,
+    /// Hex content hash of the terms document `terms_version` names.
+    /// Empty = no hash recorded.
+    pub spec_hash: String,
+}
+
+impl Default for TrancheParams {
+    fn default() -> Self {
+        Self {
+            structure_code: 0,
+            senior_hurdle_bps_annual: 0,
+            target_junior_bps: 0,
+            maintenance_junior_bps: 0,
+            upside_code: 0,
+            residual_participation_bps: 0,
+            total_return_cap_bps: 0,
+            terms_version: 1,
+            spec_hash: String::new(),
+        }
+    }
+}
+
+impl TrancheParams {
+    /// The `CreateVaultSpec` these terms describe.
+    pub fn create_vault_spec(
+        &self,
+        lockup_ms: u64,
+        curator_fee_bps: u64,
+        unwind_grace_ms: u64,
+    ) -> Result<CreateVaultSpec> {
+        let spec_hash = if self.spec_hash.is_empty() {
+            Vec::new()
+        } else {
+            hex::decode(self.spec_hash.trim_start_matches("0x"))
+                .map_err(|e| anyhow!("bad spec_hash: {e}"))?
+        };
+        Ok(CreateVaultSpec {
+            lockup_ms,
+            curator_fee_bps,
+            unwind_grace_ms,
+            structure_code: self.structure_code,
+            senior_hurdle_bps_annual: self.senior_hurdle_bps_annual,
+            target_junior_bps: self.target_junior_bps,
+            maintenance_junior_bps: self.maintenance_junior_bps,
+            upside_code: self.upside_code,
+            residual_participation_bps: self.residual_participation_bps,
+            total_return_cap_bps: self.total_return_cap_bps,
+            terms_version: self.terms_version,
+            spec_hash,
+        })
+    }
+}
+
 pub struct VaultCreation {
     pub digest: String,
     pub vault_id: ObjectID,
@@ -842,4 +926,34 @@ pub async fn dev_inspect_free_balance(
         .await
         .context("dev-inspecting free_balance_of")?;
     crate::chain::decode_return_value::<u64>(&res, 0).context("decoding free_balance_of")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tranche_params_default_is_untranched() {
+        let spec = TrancheParams::default().create_vault_spec(5, 10, 15).unwrap();
+        assert_eq!(spec.structure_code, 0);
+        assert_eq!((spec.lockup_ms, spec.curator_fee_bps, spec.unwind_grace_ms), (5, 10, 15));
+        assert_eq!(spec.terms_version, 1);
+        assert!(spec.spec_hash.is_empty());
+    }
+
+    #[test]
+    fn spec_hash_parses_with_and_without_0x() {
+        let mut p = TrancheParams { spec_hash: "0xdeadbeef".into(), ..Default::default() };
+        assert_eq!(p.create_vault_spec(0, 0, 0).unwrap().spec_hash, vec![0xde, 0xad, 0xbe, 0xef]);
+        p.spec_hash = "deadbeef".into();
+        assert_eq!(p.create_vault_spec(0, 0, 0).unwrap().spec_hash, vec![0xde, 0xad, 0xbe, 0xef]);
+        p.spec_hash = "not-hex".into();
+        assert!(p.create_vault_spec(0, 0, 0).is_err());
+    }
+
+    #[test]
+    fn deposit_tranche_is_junior_iff_tranched() {
+        assert_eq!(deposit_tranche_code(0), TRANCHE_UNTRANCHED);
+        assert_eq!(deposit_tranche_code(1), TRANCHE_JUNIOR);
+    }
 }
