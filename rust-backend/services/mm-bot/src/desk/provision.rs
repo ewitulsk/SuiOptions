@@ -167,8 +167,12 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedVault> {
     }
 
     // Auto path. Only vaults this wallet created are candidates; a cap
-    // someone else minted for us is deliberately ignored.
-    let mine = self_created(p.indexer, me).await?;
+    // someone else minted for us is deliberately ignored. SO-420: the
+    // exchange maker bot (staging-mm-bot) signs with THIS wallet too, so
+    // creator alone cannot tell the desk's vaults from its — drop any
+    // vault wired for direct exchange escrow (that custody is the
+    // exchange bot's marker; the desk never wires one).
+    let mine = drop_exchange_wired(p.indexer, self_created(p.indexer, me).await?).await?;
     if let Some(view) = pick(mine) {
         let vault_id = ObjectID::new(*view.vault_id.as_bytes());
         info!(vault = %vault_id.to_hex_literal(), "adopting self-created vault");
@@ -639,6 +643,36 @@ async fn self_created(indexer: &IndexerClient, me: SuiAddress) -> Result<Vec<Tra
         .into_iter()
         .filter(|v| v.creator == me && v.state == "open")
         .collect())
+}
+
+/// Which candidates are wired for direct exchange escrow (SO-420) — the
+/// exchange maker bot's vaults, never the desk's. Mirrors staging-mm-bot's
+/// `direct_custody` query: the `TvExchangeCustodyCreated(direct)` event is
+/// emitted exactly when that bot wires a vault it owns.
+async fn drop_exchange_wired(
+    indexer: &IndexerClient,
+    vaults: Vec<TradingVault>,
+) -> Result<Vec<TradingVault>> {
+    let mut keep = Vec::with_capacity(vaults.len());
+    for v in vaults {
+        let events = indexer
+            .recent_events_with_payload(
+                &["TvExchangeCustodyCreated"],
+                serde_json::json!({ "vault_id": v.vault_id.to_hex(), "direct": true }),
+                1,
+            )
+            .await
+            .context("querying exchange custody events")?;
+        if events.is_empty() {
+            keep.push(v);
+        } else {
+            info!(
+                vault = %v.vault_id.to_hex(),
+                "ignoring exchange-escrow vault — same wallet, but it is the exchange maker's"
+            );
+        }
+    }
+    Ok(keep)
 }
 
 /// Deterministic choice when several self-created vaults exist, so a

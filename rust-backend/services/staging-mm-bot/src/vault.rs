@@ -550,7 +550,10 @@ async fn wired_set(
 
 /// Every open vault this wallet created in the right accounting asset.
 /// `creator` is the tx sender at creation and cannot be spoofed, which is
-/// the whole basis for trusting auto-discovery.
+/// the whole basis for trusting auto-discovery. SO-420: mm-bot's vol desk
+/// signs with THIS wallet too, so creator alone cannot tell our vaults
+/// from its — skip vaults with `mm_release_enabled` (the desk flips it on
+/// as part of provisioning; this bot never does).
 async fn self_created(
     indexer: &IndexerClient,
     me: SuiAddress,
@@ -566,6 +569,7 @@ async fn self_created(
         .filter(|v| {
             v.creator == me
                 && v.state == "open"
+                && !v.mm_release_enabled
                 && canonicalize_move_type(&v.accounting_asset.to_string()) == want
         })
         .collect())
