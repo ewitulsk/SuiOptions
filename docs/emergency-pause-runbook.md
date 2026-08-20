@@ -2,7 +2,9 @@
 
 **Scope:** stopping money ingress protocol-wide (options writes, trading-vault
 deposits + vault creation, exchange deposits + fills) in one command, deciding
-when to, and unwinding it. Exits are never gated — see the invariant below.
+when to, and unwinding it. Ingress is gated per membership domain — `options`,
+`exchange`, `vault-create`, `vault-lp` (SO-419) — all four live on the ONE
+shared `Whitelist` object. Exits are never gated — see the invariant below.
 
 Companion docs: `docs/fund-egress-audit.md` (where money rests and how it
 exits), the guarded-launch whitelist (SO-381 epic, PRs #449–#453).
@@ -30,7 +32,7 @@ everyone — non-members, de-listed members, and while paused. Consequences:
 | alert_id | Source | Meaning |
 |---|---|---|
 | `drain-suspected-<kind>` | balance-monitor protocol-holdings watch | A watched pool (bucket escrow / vault holdings / exchange BM) dropped faster than the configured bps/window |
-| `whitelist-changed` | balance-monitor admin-change watch | Core or exchange whitelist membership/flags changed — expected only when YOU ran the CLI/UI |
+| `whitelist-changed` | balance-monitor admin-change watch | A whitelist domain's membership/flags changed (the `list` field names the domain) — expected only when YOU ran the CLI/UI |
 | `protocol-paused` | balance-monitor admin-change watch | An ingress-pause flag flipped — expected only when you flipped it |
 | `low-balance-*`, `tx-failed-*` | existing rules | Standard service alerts; a burst can be secondary evidence |
 
@@ -49,9 +51,10 @@ cargo run -p exchange -- --secrets <deployer-secrets.toml> \
 ```
 
 One PTB, three levers atomically:
-1. the protocol's single `Whitelist.ingress_paused = true` — blocks option
-   writes, vault deposits + creation, exchange BM deposits AND all fills
-   (taker + relayer paths); every gated package checks this one object
+1. `whitelist::set_ingress_paused_all(true)` — pauses ALL FOUR membership
+   domains on the single shared `Whitelist`, blocking option writes, vault
+   deposits + creation, exchange BM deposits AND all fills (taker + relayer
+   paths); every gated package checks this one object
 2. trading-vault `registry::set_paused(true)` — belt-and-braces vault
    deposit stop
 3. `exchange::registry::set_paused(true)` on EVERY market — belt-and-braces
@@ -62,8 +65,8 @@ toggle) if you have the admin wallet in a browser.
 
 ## 3. Verify the pause took
 
-- `cargo run -p exchange -- whitelist-list` (same global flags) → the
-  whitelist shows `ingress_paused: true`.
+- `cargo run -p exchange -- whitelist-list` (same global flags) → every
+  domain shows `paused: true`.
 - Grafana: `protocol-paused` alert fired (this is your audit trail that the
   flip was seen on-chain).
 - Spot-check what still works: a `request_withdraw` + fulfillment crank on a
@@ -83,7 +86,8 @@ toggle) if you have the admin wallet in a browser.
 
 | Lever | Command / call | Blocks | Doesn't block |
 |---|---|---|---|
-| Remove one member | `exchange whitelist-remove --address 0x…` | that address's ingress | their exits |
+| Remove one member | `exchange whitelist-remove --address 0x…` (all domains; scope with repeatable `--domain`) | that address's ingress | their exits |
+| Pause one domain | `whitelist::set_ingress_paused(domain, true)` via the CLI's domain-scoped levers or the admin UI | that domain's ingress | the other three domains, all exits |
 | Per-bucket invalidate | core `invalidate_bucket` (existing admin surface) | new writes into one bucket | exercise/redeem |
 | Per-vault deposits | curator `set_deposits_paused` | one vault's deposits | withdrawals |
 | Adapter/oracle delist | `registry::disallow_adapter/oracle` | new sessions/attestations | force sessions, cranks |
@@ -99,22 +103,27 @@ cargo run -p exchange -- --secrets <deployer-secrets.toml> \
     --token-info-url <env token-info> unpause-ingress
 ```
 
-Then verify: member deposit/write succeeds again; `whitelist-list` shows both
-flags false; drain watch quiet for one full window.
+Then verify: member deposit/write succeeds again; `whitelist-list` shows
+`paused: false` on every domain; drain watch quiet for one full window.
 
 ## 7. Going public (not an emergency action)
 
-`whitelist-disable` / `whitelist-enable` flip enforcement on the single
-whitelist without touching membership. Disabling is the post-audit go-public
-lever; re-enabling restores the prior cohort instantly. Never confuse with
-pause: pause blocks members too.
+`whitelist-disable` / `whitelist-enable` flip enforcement without touching
+membership — per domain with repeatable `--domain` (omit for all four).
+Going public can therefore be staged (e.g. open `options` while `vault-lp`
+stays gated). Disabling is the post-audit go-public lever; re-enabling
+restores the prior cohort instantly. Never confuse with pause: pause blocks
+members too.
 
 ## 8. Redeploy interaction
 
 Contracts republish on every redeploy → a fresh Whitelist object, seeded by
 the ceremony right after the whitelist package publish: deployer automatically
-+ `INGRESS_MEMBERS` const +
-`vars.INGRESS_MEMBERS_STAGING` (comma-separated service wallets: orderbook
-relayer/staging-mm-bot wallet, mm-bot wallet). **If the repo variable is unset
+(every domain)
++ `INGRESS_MEMBERS` const + `vars.INGRESS_MEMBERS_STAGING` (comma-separated
+service wallets: orderbook relayer/staging-mm-bot wallet, mm-bot wallet).
+Member spec: a bare `addr` seeds ALL FOUR domains;
+`addr=options,vault-lp` seeds only those. **If the repo variable is unset
 or stale, bots fail their first gated call after redeploy** — the fix is
-`whitelist-add` for the missing wallet, then update the variable.
+`whitelist-add` for the missing wallet (scope with `--domain` if needed),
+then update the variable.
