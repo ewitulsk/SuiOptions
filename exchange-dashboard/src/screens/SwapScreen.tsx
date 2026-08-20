@@ -112,12 +112,20 @@ export function SwapScreen() {
       setAmountText("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Aborts in settlement/order checks or the min-out guard almost always
-      // mean the book moved out from under a stale quote.
-      const stale = /abort|assert|ECoinBelowMin|MoveAbort/i.test(msg);
+      // Ingress-gate aborts (whitelist::whitelist codes 1/2) are membership
+      // problems, not stale quotes — say so instead of misattributing them.
+      const gated =
+        /assert_ingress_allowed/i.test(msg) || (/whitelist/i.test(msg) && /MoveAbort/i.test(msg));
+      // Other aborts in settlement/order checks or the min-out guard almost
+      // always mean the book moved out from under a stale quote.
+      const stale = !gated && /abort|assert|ECoinBelowMin|MoveAbort/i.test(msg);
       setResult({
         ok: false,
-        message: stale ? `Fill aborted on-chain — the quote likely went stale. Refresh and retry.\n${msg}` : msg,
+        message: gated
+          ? `Fill blocked by the ingress whitelist — this wallet is not whitelisted for the exchange domain (or ingress is paused).\n${msg}`
+          : stale
+            ? `Fill aborted on-chain — the quote likely went stale. Refresh and retry.\n${msg}`
+            : msg,
       });
     } finally {
       setBusy(false);

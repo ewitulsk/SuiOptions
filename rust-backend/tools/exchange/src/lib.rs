@@ -14,6 +14,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use sui_types::base_types::{ObjectID, SuiAddress};
 
 use sui_tx::sui_client::Network;
+use sui_tx::tx::admin::WhitelistDomain;
+
+/// clap value parser for `--domain` (anyhow errors aren't clap-compatible).
+fn parse_domain(s: &str) -> Result<WhitelistDomain, String> {
+    s.parse().map_err(|e: anyhow::Error| e.to_string())
+}
 
 /// Option product selector for bucket creation. Mirrors
 /// [`roller::ProductType`]; `call` is the default so existing behaviour is
@@ -114,27 +120,47 @@ pub enum Command {
         #[arg(long)]
         recipient: SuiAddress,
     },
-    /// Add an address to BOTH ingress whitelists (core `ProtocolConfig` +
-    /// exchange `Whitelist`) in one PTB.
+    /// Add an address to the ingress whitelist in one PTB. `--domain` is
+    /// repeatable (options, exchange, vault-create, vault-lp); omitting it
+    /// targets ALL four domains.
     WhitelistAdd {
         #[arg(long)]
         address: SuiAddress,
+        #[arg(long = "domain", value_parser = parse_domain)]
+        domains: Vec<WhitelistDomain>,
     },
-    /// Remove an address from BOTH ingress whitelists in one PTB.
+    /// Remove an address from the ingress whitelist in one PTB. `--domain`
+    /// is repeatable; omitting it targets ALL four domains.
     WhitelistRemove {
         #[arg(long)]
         address: SuiAddress,
+        #[arg(long = "domain", value_parser = parse_domain)]
+        domains: Vec<WhitelistDomain>,
     },
-    /// Print both whitelist objects' members + enabled/paused flags.
+    /// Print the whitelist object's per-domain members + enabled/paused
+    /// flags.
     WhitelistList,
-    /// Turn the member check ON for both lists (guarded-launch mode).
-    WhitelistEnable,
-    /// Turn the member check OFF for both lists — the go-public lever.
-    /// Membership is retained on-chain; re-enabling restores the cohort.
-    WhitelistDisable,
-    /// Big red button, one PTB: pause all ingress (both whitelists), the
-    /// trading-vault registry, and every exchange market registry. Exits
-    /// (withdrawals/cancels) are never gated.
+    /// Print the domains an address is currently whitelisted on.
+    WhitelistDomains {
+        #[arg(long)]
+        address: SuiAddress,
+    },
+    /// Turn the member check ON (guarded-launch mode). `--domain` is
+    /// repeatable; omitting it targets ALL four domains.
+    WhitelistEnable {
+        #[arg(long = "domain", value_parser = parse_domain)]
+        domains: Vec<WhitelistDomain>,
+    },
+    /// Turn the member check OFF — the go-public lever. Membership is
+    /// retained on-chain; re-enabling restores the cohort. `--domain` is
+    /// repeatable; omitting it targets ALL four domains.
+    WhitelistDisable {
+        #[arg(long = "domain", value_parser = parse_domain)]
+        domains: Vec<WhitelistDomain>,
+    },
+    /// Big red button, one PTB: pause all ingress (every whitelist
+    /// domain), the trading-vault registry, and every exchange market
+    /// registry. Exits (withdrawals/cancels) are never gated.
     PauseIngress,
     /// Reverse of `pause-ingress`, one PTB.
     UnpauseIngress,

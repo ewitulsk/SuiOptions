@@ -3,12 +3,14 @@
 //! Two watch kinds on top of the wallet balance polls:
 //!
 //! - **Admin-change watch** — polls the protocol's single shared `Whitelist`
-//!   (the standalone whitelist package) and diffs membership and the
-//!   `whitelist_enabled` / `ingress_paused` flags against the last poll. Any
-//!   change fires `alert_id = "whitelist-changed"` (or `"protocol-paused"`
-//!   for the pause flag) through the generic alert_id Grafana rule. An alert
-//!   nobody on the team caused means the admin key is acting without you —
-//!   treat as an incident.
+//!   (the standalone whitelist package) and diffs each of its four
+//!   membership domains (options, exchange, vault_create, vault_lp) —
+//!   members plus the `enabled` / `paused` flags — against the last poll.
+//!   Any change fires `alert_id = "whitelist-changed"` (or
+//!   `"protocol-paused"` for the pause flag) through the generic alert_id
+//!   Grafana rule, with the domain in the `list` field. An alert nobody on
+//!   the team caused means the admin key is acting without you — treat as
+//!   an incident.
 //! - **Drain watch** — polls configured shared objects and sums named
 //!   top-level balance fields (e.g. a bucket's `underlying_balance`). While
 //!   the value sits more than `drop_bps` below the max seen inside
@@ -28,7 +30,7 @@ use tracing::{error, info, warn};
 
 use crate::config::DrainWatch;
 
-/// Whitelist-carrying object state as of one poll.
+/// One membership domain's state as of one poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WlState {
     pub members: BTreeSet<String>,
@@ -36,35 +38,42 @@ pub struct WlState {
     pub ingress_paused: bool,
 }
 
+/// The whitelist object's four domain fields, in on-chain order.
+const DOMAINS: [&str; 4] = ["options", "exchange", "vault_create", "vault_lp"];
+
 pub struct AdminWatch {
-    /// (label, object id, last seen state).
-    lists: Vec<(&'static str, ObjectID, Option<WlState>)>,
+    whitelist: ObjectID,
+    /// (domain, last seen state).
+    domains: Vec<(&'static str, Option<WlState>)>,
 }
 
 impl AdminWatch {
     pub fn new(whitelist: ObjectID) -> Self {
-        Self { lists: vec![("whitelist", whitelist, None)] }
+        Self {
+            whitelist,
+            domains: DOMAINS.iter().map(|d| (*d, None)).collect(),
+        }
     }
 
     pub async fn poll(&mut self, sui: &ChainClient) {
-        for (list, id, last) in &mut self.lists {
-            let state = match fetch_wl_state(sui, *id).await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(list, object = %id, error = %e, "whitelist poll failed");
-                    metrics::counter!(
-                        "balance_monitor_poll_errors_total",
-                        "service" => format!("whitelist-{list}"),
-                    )
-                    .increment(1);
-                    continue;
-                }
-            };
-
-            metrics::gauge!("whitelist_members", "list" => *list).set(state.members.len() as f64);
-            metrics::gauge!("whitelist_enabled", "list" => *list)
+        let states = match fetch_wl_states(sui, self.whitelist).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(object = %self.whitelist, error = %e, "whitelist poll failed");
+                metrics::counter!(
+                    "balance_monitor_poll_errors_total",
+                    "service" => "whitelist",
+                )
+                .increment(1);
+                return;
+            }
+        };
+        for ((list, last), state) in self.domains.iter_mut().zip(states) {
+            let list: &'static str = list;
+            metrics::gauge!("whitelist_members", "list" => list).set(state.members.len() as f64);
+            metrics::gauge!("whitelist_enabled", "list" => list)
                 .set(state.whitelist_enabled as u8 as f64);
-            metrics::gauge!("ingress_paused", "list" => *list)
+            metrics::gauge!("ingress_paused", "list" => list)
                 .set(state.ingress_paused as u8 as f64);
 
             match last {
@@ -110,28 +119,37 @@ impl AdminWatch {
     }
 }
 
-async fn fetch_wl_state(sui: &ChainClient, id: ObjectID) -> Result<WlState> {
+/// Per-domain states in [`DOMAINS`] order.
+async fn fetch_wl_states(sui: &ChainClient, id: ObjectID) -> Result<Vec<WlState>> {
     let (_, json) = sui.get_object_json(id).await?;
     let json = json.context("object has no JSON rendering")?;
-    let members = json
-        .get("members")
-        .and_then(|m| m.get("contents"))
-        .and_then(Value::as_array)
-        .context("no members.contents in whitelist object")?
+    DOMAINS
         .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
-    let flag = |name: &str| -> Result<bool> {
-        json.get(name)
-            .and_then(Value::as_bool)
-            .with_context(|| format!("no bool field {name} in whitelist object"))
-    };
-    Ok(WlState {
-        members,
-        whitelist_enabled: flag("whitelist_enabled")?,
-        ingress_paused: flag("ingress_paused")?,
-    })
+        .map(|domain| {
+            let d = json
+                .get(domain)
+                .with_context(|| format!("no domain field {domain} in whitelist object"))?;
+            let members = d
+                .get("members")
+                .and_then(|m| m.get("contents"))
+                .and_then(Value::as_array)
+                .with_context(|| format!("no {domain}.members.contents in whitelist object"))?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            let flag = |name: &str| -> Result<bool> {
+                d.get(name)
+                    .and_then(Value::as_bool)
+                    .with_context(|| format!("no bool field {domain}.{name} in whitelist object"))
+            };
+            Ok(WlState {
+                members,
+                whitelist_enabled: flag("enabled")?,
+                ingress_paused: flag("paused")?,
+            })
+        })
+        .collect()
 }
 
 pub struct DrainWatchState {

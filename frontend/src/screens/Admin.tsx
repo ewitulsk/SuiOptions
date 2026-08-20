@@ -10,7 +10,7 @@
 //   - withdraw treasury fees / (re)create the treasury     (treasury.move)
 import { optionCoinType } from "../api/client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { useCurrentAccount } from "@mysten/dapp-kit";
 import type { Transaction } from "@mysten/sui/transactions";
@@ -21,7 +21,13 @@ import { Toast } from "../components/Toast";
 import { TokenManager } from "../components/TokenManager";
 import { useBuckets } from "../api/useBuckets";
 import { useAdminCap } from "../api/useAdminCap";
-import { useWhitelist } from "../api/useWhitelist";
+import { allMembers, domainsOf, useWhitelist } from "../api/useWhitelist";
+import {
+  DOMAIN_HINT,
+  DOMAIN_LABEL,
+  WHITELIST_DOMAINS,
+  type DomainKey,
+} from "../lib/whitelistDomains";
 import type { Bucket, Series } from "../api/client";
 import {
   buildCleanupBucketTx,
@@ -32,7 +38,7 @@ import {
   buildSetFeeBpsTx,
   buildSetWhitelistEnabledTx,
   buildUnpauseIngressTx,
-  buildWhitelistAddTx,
+  buildWhitelistMembershipTx,
   buildWhitelistRemoveTx,
   buildWithdrawTx,
   type IngressPauseParams,
@@ -334,30 +340,43 @@ export function Admin() {
 // ── Access control (guarded launch) ────────────────────────────────────
 //
 // ONE standalone whitelist package (`whitelist::whitelist`): one shared
-// `Whitelist` object gating ingress across core / trading-vault / exchange,
-// mutated with its own `whitelist::AdminCap`. The big-red-button pause
-// additionally flips the trading-vault and per-market exchange registry
-// pause flags (core / exchange caps) in the same PTB.
+// `Whitelist` object with four membership domains (options / exchange /
+// vault-create / vault-lp) gating ingress across core / trading-vault /
+// exchange, mutated with its own `whitelist::AdminCap`. The address editor
+// shows the domains an address is already on and batches the toggled
+// per-domain delta into ONE PTB. The big-red-button pause flips every
+// domain plus the trading-vault and per-market exchange registry pause
+// flags (core / exchange caps) in the same PTB.
 
-const memberGrid = { gridTemplateColumns: "3.2fr 0.8fr" };
+const memberGrid = {
+  gridTemplateColumns: `2.6fr repeat(${WHITELIST_DOMAINS.length}, 0.55fr) 1fr`,
+};
+const leverGrid = { gridTemplateColumns: "1fr 0.7fr 0.6fr 1.4fr" };
 
-const MSG_GO_PUBLIC =
-  "Disable whitelist enforcement (go public)?\n\n" +
-  "Anyone will be able to deposit, write, and fill — protocol-wide. " +
+const msgGoPublic = (domain: string) =>
+  `Disable ${domain} whitelist enforcement (go public)?\n\n` +
+  `Anyone will pass the ${domain} ingress gate. ` +
   "Membership is retained on-chain, so re-enabling restores the current cohort.";
-const MSG_ENFORCE =
-  "Enforce the whitelist?\n\n" +
-  "Only listed members will be able to deposit, write, and fill — protocol-wide. " +
+const msgEnforce = (domain: string) =>
+  `Enforce the ${domain} whitelist?\n\n` +
+  `Only listed members will pass the ${domain} ingress gate. ` +
   "Exits (withdrawals, cancels, exercises) are never gated.";
 const MSG_PAUSE =
   "PAUSE ALL INGRESS?\n\n" +
-  "This blocks ALL deposits, writes, and fills protocol-wide: the ingress whitelist, " +
-  "the trading vaults, and every exchange market. " +
+  "This blocks ALL deposits, writes, and fills protocol-wide: every ingress whitelist " +
+  "domain, the trading vaults, and every exchange market. " +
   "Exits (withdrawals, cancels, exercises) stay open — nobody is stranded.";
 const MSG_UNPAUSE =
   "Unpause ingress?\n\n" +
-  "Deposits, writes, and fills resume protocol-wide (the whitelist, the trading vaults, " +
-  "and every exchange market), subject to whitelist enforcement.";
+  "Deposits, writes, and fills resume protocol-wide (every whitelist domain, the trading " +
+  "vaults, and every exchange market), subject to per-domain whitelist enforcement.";
+
+const emptySel = (): Record<DomainKey, boolean> => ({
+  options: false,
+  exchange: false,
+  vaultCreate: false,
+  vaultLp: false,
+});
 
 function AccessControl({
   busy,
@@ -375,6 +394,7 @@ function AccessControl({
   whitelist: ReturnType<typeof useWhitelist>;
 }) {
   const [addr, setAddr] = useState("");
+  const [sel, setSel] = useState<Record<DomainKey, boolean>>(emptySel);
 
   const wl = whitelist.data ?? null;
   const configMissing = !WHITELIST_ID;
@@ -393,31 +413,44 @@ function AccessControl({
     markets: EXCHANGE_MARKETS,
   });
 
-  const members = [...(wl?.members ?? [])].sort((a, b) => a.localeCompare(b));
+  const members = wl ? allMembers(wl) : [];
 
   const trimmed = addr.trim();
   const addrValid =
     /^0x[0-9a-fA-F]{1,64}$/.test(trimmed) && isValidSuiAddress(normalizeSuiAddress(trimmed));
   const normalized = addrValid ? normalizeSuiAddress(trimmed) : null;
-  // VecSet insert aborts on duplicates — block re-adding an existing member.
-  const addable = normalized !== null && !members.includes(normalized);
+  // The domains the edited address is ALREADY on — the checkbox baseline.
+  const current = wl && normalized ? domainsOf(wl, normalized) : new Set<DomainKey>();
 
-  const paused = !!wl?.ingressPaused;
-  const enforced = !!wl?.whitelistEnabled;
-  const status = paused ? "PAUSED" : enforced ? "GATED" : "OPEN";
-  const statusClass =
-    status === "PAUSED"
-      ? "admin-tag--danger"
-      : status === "GATED"
-        ? "admin-tag--ok"
-        : "admin-tag--mute";
+  // Re-sync the checkboxes to on-chain membership whenever the edited
+  // address or the fetched whitelist state changes.
+  useEffect(() => {
+    const next = emptySel();
+    if (wl && normalized) {
+      for (const d of domainsOf(wl, normalized)) next[d] = true;
+    }
+    setSel(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [normalized, wl]);
 
-  const addMember = async () => {
-    if (!normalized || !addable) return;
+  // The delta the Apply button submits (one PTB, one call per change).
+  const adds = WHITELIST_DOMAINS.filter((d) => sel[d] && !current.has(d));
+  const removes = WHITELIST_DOMAINS.filter((d) => !sel[d] && current.has(d));
+  const deltaLabel = [
+    ...adds.map((d) => `+${DOMAIN_LABEL[d]}`),
+    ...removes.map((d) => `−${DOMAIN_LABEL[d]}`),
+  ].join(", ");
+  const applicable = normalized !== null && (adds.length > 0 || removes.length > 0);
+
+  const anyPaused = wl ? WHITELIST_DOMAINS.some((d) => wl[d].paused) : false;
+  const allPaused = wl ? WHITELIST_DOMAINS.every((d) => wl[d].paused) : false;
+
+  const apply = async () => {
+    if (!normalized || !applicable) return;
     const ok = await run(
-      "wl-add",
-      () => buildWhitelistAddTx(ids(), normalized),
-      "member added",
+      "wl-apply",
+      () => buildWhitelistMembershipTx(ids(), normalized, { add: adds, remove: removes }),
+      `membership updated (${deltaLabel})`,
     );
     if (ok) setAddr("");
   };
@@ -427,23 +460,36 @@ function AccessControl({
       <div className="admin-section__head">
         <h2 className="admin-section__title">Access control</h2>
         <div className="admin-section__sub">
-          guarded-launch ingress whitelist · one list gates the whole protocol ·
+          guarded-launch ingress whitelist · four domains gate the protocol ·
           exits are never gated
         </div>
       </div>
 
-      {/* status banner */}
+      {/* per-domain status banner */}
       <div className="admin-actions-row" style={{ alignItems: "center", marginBottom: 14 }}>
-        <span className={`admin-tag ${statusClass}`}>{status}</span>
+        {WHITELIST_DOMAINS.map((d) => {
+          const st = wl ? (wl[d].paused ? "PAUSED" : wl[d].enabled ? "GATED" : "OPEN") : "…";
+          const cls =
+            st === "PAUSED"
+              ? "admin-tag--danger"
+              : st === "GATED"
+                ? "admin-tag--ok"
+                : "admin-tag--mute";
+          return (
+            <span className={`admin-tag ${cls}`} key={d} title={DOMAIN_HINT[d]}>
+              {DOMAIN_LABEL[d]} · {st}
+            </span>
+          );
+        })}
         {whitelist.isLoading && <span className="admin-cell__dim">loading whitelist state…</span>}
         {whitelist.error && (
           <span className="admin-cell__dim">
             failed to read whitelist · {whitelist.error.message}
           </span>
         )}
-        {paused && (
+        {anyPaused && (
           <span className="admin-cell__dim">
-            all deposits/writes/fills blocked · exits stay open
+            paused domains block deposits/writes/fills · exits stay open
           </span>
         )}
       </div>
@@ -461,44 +507,66 @@ function AccessControl({
         </div>
       )}
 
-      {/* member table */}
+      {/* membership matrix */}
       {!whitelist.isLoading && members.length === 0 && (
         <div className="admin-empty">no whitelisted members yet.</div>
       )}
-      {members.length > 0 && (
+      {members.length > 0 && wl && (
         <div className="admin-table">
           <div className="admin-table__head admin-table__row" style={memberGrid}>
             <span>Member</span>
+            {WHITELIST_DOMAINS.map((d) => (
+              <span key={d} title={DOMAIN_HINT[d]}>
+                {DOMAIN_LABEL[d]}
+              </span>
+            ))}
             <span>Actions</span>
           </div>
-          {members.map((member) => (
-            <div className="admin-table__row" style={memberGrid} key={member}>
-              <code className="admin-cell__id" style={{ fontSize: 12 }}>
-                {member}
-              </code>
-              <span className="admin-cell__actions">
-                <button
-                  className="admin-btn admin-btn--danger"
-                  disabled={!canMutate || busy !== null}
-                  onClick={() =>
-                    run(
-                      `wl-rm-${member}`,
-                      () => buildWhitelistRemoveTx(ids(), member),
-                      "member removed",
-                    )
-                  }
-                >
-                  {busy === `wl-rm-${member}` ? "…" : "Remove"}
-                </button>
-              </span>
-            </div>
-          ))}
+          {members.map((member) => {
+            const on = domainsOf(wl, member);
+            return (
+              <div className="admin-table__row" style={memberGrid} key={member}>
+                <code className="admin-cell__id" style={{ fontSize: 12 }}>
+                  {member}
+                </code>
+                {WHITELIST_DOMAINS.map((d) => (
+                  <span key={d} title={`${DOMAIN_LABEL[d]}: ${on.has(d) ? "member" : "not a member"}`}>
+                    {on.has(d) ? "✓" : "·"}
+                  </span>
+                ))}
+                <span className="admin-cell__actions">
+                  <button
+                    className="admin-btn"
+                    disabled={busy !== null}
+                    title="Load this address into the editor below"
+                    onClick={() => setAddr(member)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="admin-btn admin-btn--danger"
+                    disabled={!canMutate || busy !== null}
+                    title="Remove this address from every domain it is on"
+                    onClick={() =>
+                      run(
+                        `wl-rm-${member}`,
+                        () => buildWhitelistRemoveTx(ids(), member, [...on]),
+                        "member removed from all domains",
+                      )
+                    }
+                  >
+                    {busy === `wl-rm-${member}` ? "…" : "Remove all"}
+                  </button>
+                </span>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* add member */}
+      {/* membership editor: address + per-domain checkboxes + one-PTB apply */}
       <div className="admin-grid" style={{ marginTop: 12 }}>
-        <Field label="Add address">
+        <Field label="Address">
           <input
             className="admin-field__input"
             placeholder="0x…"
@@ -507,58 +575,105 @@ function AccessControl({
           />
         </Field>
       </div>
-      <div className="admin-actions-row">
+      <div className="admin-actions-row" style={{ alignItems: "center" }}>
+        {WHITELIST_DOMAINS.map((d) => (
+          <label
+            key={d}
+            title={DOMAIN_HINT[d]}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+          >
+            <input
+              type="checkbox"
+              disabled={!normalized || busy !== null}
+              checked={sel[d]}
+              onChange={(e) => setSel({ ...sel, [d]: e.target.checked })}
+            />
+            <span>
+              {DOMAIN_LABEL[d]}
+              {normalized && current.has(d) && (
+                <span className="admin-cell__dim"> (on)</span>
+              )}
+            </span>
+          </label>
+        ))}
         <button
           className="admin-btn admin-btn--primary"
-          disabled={!canMutate || busy !== null || !addable}
+          disabled={!canMutate || busy !== null || !applicable}
           title={
             trimmed && !addrValid
               ? "not a valid 0x address"
-              : normalized && !addable
-                ? "already a member"
+              : normalized && !applicable
+                ? "no membership change selected"
                 : undefined
           }
-          onClick={addMember}
+          onClick={apply}
         >
-          {busy === "wl-add" ? "adding…" : "Add member"}
+          {busy === "wl-apply" ? "applying…" : applicable ? `Apply: ${deltaLabel}` : "Apply"}
         </button>
       </div>
 
-      {/* levers */}
+      {/* per-domain go-public levers */}
+      {wl && (
+        <div className="admin-table" style={{ marginTop: 18 }}>
+          <div className="admin-table__head admin-table__row" style={leverGrid}>
+            <span>Domain</span>
+            <span>Status</span>
+            <span>Members</span>
+            <span>Enforcement</span>
+          </div>
+          {WHITELIST_DOMAINS.map((d) => (
+            <div className="admin-table__row" style={leverGrid} key={d}>
+              <span title={DOMAIN_HINT[d]}>{DOMAIN_LABEL[d]}</span>
+              <span>{wl[d].paused ? "PAUSED" : wl[d].enabled ? "GATED" : "OPEN"}</span>
+              <span>{wl[d].members.length}</span>
+              <span className="admin-cell__actions">
+                <button
+                  className="admin-btn"
+                  disabled={!canMutate || busy !== null}
+                  title="Go-public lever: flips this domain's whitelist enforcement"
+                  onClick={() => {
+                    const msg = wl[d].enabled
+                      ? msgGoPublic(DOMAIN_LABEL[d])
+                      : msgEnforce(DOMAIN_LABEL[d]);
+                    if (!window.confirm(msg)) return;
+                    run(
+                      `wl-enabled-${d}`,
+                      () => buildSetWhitelistEnabledTx(ids(), d, !wl[d].enabled),
+                      wl[d].enabled
+                        ? `${DOMAIN_LABEL[d]} whitelist disabled — domain is public`
+                        : `${DOMAIN_LABEL[d]} whitelist enforced`,
+                    );
+                  }}
+                >
+                  {busy === `wl-enabled-${d}`
+                    ? "…"
+                    : wl[d].enabled
+                      ? "Disable (go public)"
+                      : "Enforce"}
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* big red button */}
       <div className="admin-actions-row" style={{ marginTop: 18 }}>
         <button
-          className="admin-btn"
+          className={allPaused ? "admin-btn" : "admin-btn admin-btn--danger"}
           disabled={!canMutate || busy !== null}
-          title="Go-public lever: flips whitelist enforcement"
+          title="Big red button: pauses all ingress protocol-wide (every domain); exits stay open"
           onClick={() => {
-            if (!window.confirm(enforced ? MSG_GO_PUBLIC : MSG_ENFORCE)) return;
-            run(
-              "wl-enabled",
-              () => buildSetWhitelistEnabledTx(ids(), !enforced),
-              enforced ? "whitelist disabled — protocol is public" : "whitelist enforced",
-            );
-          }}
-        >
-          {busy === "wl-enabled"
-            ? "…"
-            : enforced
-              ? "Disable whitelist (go public)"
-              : "Enforce whitelist"}
-        </button>
-        <button
-          className={paused ? "admin-btn" : "admin-btn admin-btn--danger"}
-          disabled={!canMutate || busy !== null}
-          title="Big red button: pauses all ingress protocol-wide; exits stay open"
-          onClick={() => {
-            if (!window.confirm(paused ? MSG_UNPAUSE : MSG_PAUSE)) return;
+            if (!window.confirm(allPaused ? MSG_UNPAUSE : MSG_PAUSE)) return;
             run(
               "wl-paused",
-              () => (paused ? buildUnpauseIngressTx(pauseIds()) : buildPauseIngressTx(pauseIds())),
-              paused ? "ingress unpaused" : "ingress paused protocol-wide",
+              () =>
+                allPaused ? buildUnpauseIngressTx(pauseIds()) : buildPauseIngressTx(pauseIds()),
+              allPaused ? "ingress unpaused" : "ingress paused protocol-wide",
             );
           }}
         >
-          {busy === "wl-paused" ? "…" : paused ? "Unpause ingress" : "Pause all ingress"}
+          {busy === "wl-paused" ? "…" : allPaused ? "Unpause ingress" : "Pause all ingress"}
         </button>
       </div>
     </section>

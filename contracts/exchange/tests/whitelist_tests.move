@@ -123,6 +123,24 @@ fun withdraw_works_while_paused_and_delisted() {
     sc.end();
 }
 
+#[test]
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
+fun other_domain_member_deposit_aborts() {
+    // Membership on the options domain never satisfies the exchange gate —
+    // domains are isolated.
+    let mut sc = ts::begin(STRANGER);
+    let mut wl = wl_mod::new_open_for_testing(sc.ctx());
+    wl_mod::set_enabled_for_testing(&mut wl, true);
+    wl_mod::add_member_domain_for_testing(&mut wl, wl_mod::domain_options(), STRANGER);
+    bm::new(sc.ctx());
+    ts::next_tx(&mut sc, STRANGER);
+    let mut mgr = ts::take_shared<BalanceManager>(&sc);
+    bm::deposit(&mut mgr, &wl, coin::mint_for_testing<QUOTE>(1_000, sc.ctx()), sc.ctx());
+    ts::return_shared(mgr);
+    wl_mod::destroy_for_testing(wl);
+    sc.end();
+}
+
 // ─────────────────────────── fill gate ───────────────────────────
 
 #[test]

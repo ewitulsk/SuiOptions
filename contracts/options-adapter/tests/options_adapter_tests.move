@@ -63,10 +63,10 @@ fun setup(sc: &mut Scenario): Clock {
     // Core ingress whitelist: every named test actor is a member.
     let wl_cap = ts::take_from_sender<WlAdminCap>(sc);
     let mut wl = ts::take_shared<Whitelist>(sc);
-    whitelist::add_member(&wl_cap, &mut wl, ADMIN);
-    whitelist::add_member(&wl_cap, &mut wl, CURATOR);
-    whitelist::add_member(&wl_cap, &mut wl, ALICE);
-    whitelist::add_member(&wl_cap, &mut wl, MM);
+    whitelist::add_member_for_testing(&mut wl, ADMIN);
+    whitelist::add_member_for_testing(&mut wl, CURATOR);
+    whitelist::add_member_for_testing(&mut wl, ALICE);
+    whitelist::add_member_for_testing(&mut wl, MM);
     ts::return_shared(wl);
     ts::return_to_sender(sc, wl_cap);
 

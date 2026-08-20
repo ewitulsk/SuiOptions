@@ -97,11 +97,70 @@ pub async fn set_fee_bps(
     .await
 }
 
+/// One ingress membership domain — mirrors the on-chain `u8` constants in
+/// `whitelist::whitelist`. Every gate names its domain at compile time, so
+/// membership on one domain never satisfies another's gate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WhitelistDomain {
+    /// Core option writes/buys, spreads, any-strike bucket creation.
+    Options,
+    /// Exchange BalanceManager deposits + every fill/match path.
+    Exchange,
+    /// Trading-vault creation (v1 + v2).
+    VaultCreate,
+    /// Trading-vault deposits, commitment funding, junior reset (v1 + v2).
+    VaultLp,
+}
+
+impl WhitelistDomain {
+    pub const ALL: [WhitelistDomain; 4] = [
+        WhitelistDomain::Options,
+        WhitelistDomain::Exchange,
+        WhitelistDomain::VaultCreate,
+        WhitelistDomain::VaultLp,
+    ];
+
+    /// The on-chain `u8` constant.
+    pub fn code(self) -> u8 {
+        match self {
+            WhitelistDomain::Options => 0,
+            WhitelistDomain::Exchange => 1,
+            WhitelistDomain::VaultCreate => 2,
+            WhitelistDomain::VaultLp => 3,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            WhitelistDomain::Options => "options",
+            WhitelistDomain::Exchange => "exchange",
+            WhitelistDomain::VaultCreate => "vault-create",
+            WhitelistDomain::VaultLp => "vault-lp",
+        }
+    }
+}
+
+impl FromStr for WhitelistDomain {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().replace('_', "-").as_str() {
+            "options" => Ok(WhitelistDomain::Options),
+            "exchange" => Ok(WhitelistDomain::Exchange),
+            "vault-create" => Ok(WhitelistDomain::VaultCreate),
+            "vault-lp" => Ok(WhitelistDomain::VaultLp),
+            other => anyhow::bail!(
+                "unknown whitelist domain '{other}' (expected options, exchange, vault-create, or vault-lp)"
+            ),
+        }
+    }
+}
+
 /// The ONE ingress whitelist of a deployment (guarded launch): the
-/// standalone `whitelist` package, its shared `Whitelist` object, and the
-/// `AdminCap` that gates every mutation. Every gated package (core,
-/// trading-vault, exchange, exchange-adapter) checks this same object, so
-/// admin tooling mutates exactly one list.
+/// standalone `whitelist` package, its shared `Whitelist` object (four
+/// membership domains), and the `AdminCap` that gates every mutation.
+/// Every gated package (core, trading-vault, exchange, exchange-adapter)
+/// checks this same object, so admin tooling mutates exactly one object.
 pub struct IngressWhitelist {
     /// The standalone whitelist package id.
     pub package: ObjectID,
@@ -140,69 +199,82 @@ impl IngressWhitelist {
     }
 }
 
-/// One PTB: `whitelist::<function>(cap, wl, member)`.
+/// One PTB: `whitelist::<function>(cap, wl, domain, member)` per domain.
 async fn whitelist_member_op(
     client: &ChainClient,
     signer: &Signer,
     wl: &IngressWhitelist,
+    domains: &[WhitelistDomain],
     member: SuiAddress,
     function: &'static str,
     gas_budget: u64,
 ) -> Result<ExecutedTransaction> {
+    anyhow::ensure!(!domains.is_empty(), "no whitelist domains given");
     let mut pt = ProgrammableTransactionBuilder::new();
     let r = wl.resolve(client, &mut pt).await?;
     let addr = pt.pure(member)?;
-    pt.programmable_move_call(
-        wl.package,
-        Identifier::new("whitelist")?,
-        Identifier::new(function)?,
-        vec![],
-        vec![r.admin, r.whitelist, addr],
-    );
+    for d in domains {
+        let dom = pt.pure(d.code())?;
+        pt.programmable_move_call(
+            wl.package,
+            Identifier::new("whitelist")?,
+            Identifier::new(function)?,
+            vec![],
+            vec![r.admin, r.whitelist, dom, addr],
+        );
+    }
     submit_ptb(client, signer, pt, gas_budget, &format!("ingress whitelist {function}")).await
 }
 
-/// Adds `member` to the ingress whitelist.
+/// Adds `member` to the given ingress whitelist domains (one PTB).
 pub async fn whitelist_add_member(
     client: &ChainClient,
     signer: &Signer,
     wl: &IngressWhitelist,
+    domains: &[WhitelistDomain],
     member: SuiAddress,
     gas_budget: u64,
 ) -> Result<ExecutedTransaction> {
-    whitelist_member_op(client, signer, wl, member, "add_member", gas_budget).await
+    whitelist_member_op(client, signer, wl, domains, member, "add_member", gas_budget).await
 }
 
-/// Removes `member` from the ingress whitelist.
+/// Removes `member` from the given ingress whitelist domains (one PTB).
 pub async fn whitelist_remove_member(
     client: &ChainClient,
     signer: &Signer,
     wl: &IngressWhitelist,
+    domains: &[WhitelistDomain],
     member: SuiAddress,
     gas_budget: u64,
 ) -> Result<ExecutedTransaction> {
-    whitelist_member_op(client, signer, wl, member, "remove_member", gas_budget).await
+    whitelist_member_op(client, signer, wl, domains, member, "remove_member", gas_budget).await
 }
 
-/// `whitelist::set_whitelist_enabled` — the go-public lever. Membership is
-/// retained on-chain, so re-enabling restores the prior cohort.
+/// `whitelist::set_whitelist_enabled` on the given domains — the go-public
+/// lever, now per-domain. Membership is retained on-chain, so re-enabling
+/// restores the prior cohort.
 pub async fn set_whitelist_enabled(
     client: &ChainClient,
     signer: &Signer,
     wl: &IngressWhitelist,
+    domains: &[WhitelistDomain],
     enabled: bool,
     gas_budget: u64,
 ) -> Result<ExecutedTransaction> {
+    anyhow::ensure!(!domains.is_empty(), "no whitelist domains given");
     let mut pt = ProgrammableTransactionBuilder::new();
     let r = wl.resolve(client, &mut pt).await?;
     let flag = pt.pure(enabled)?;
-    pt.programmable_move_call(
-        wl.package,
-        Identifier::new("whitelist")?,
-        Identifier::new("set_whitelist_enabled")?,
-        vec![],
-        vec![r.admin, r.whitelist, flag],
-    );
+    for d in domains {
+        let dom = pt.pure(d.code())?;
+        pt.programmable_move_call(
+            wl.package,
+            Identifier::new("whitelist")?,
+            Identifier::new("set_whitelist_enabled")?,
+            vec![],
+            vec![r.admin, r.whitelist, dom, flag],
+        );
+    }
     submit_ptb(client, signer, pt, gas_budget, "ingress set_whitelist_enabled").await
 }
 
@@ -214,8 +286,9 @@ pub struct MarketPauseTarget {
     pub quote: String,
 }
 
-/// The big red button, ONE PTB: `whitelist::set_ingress_paused` on the
-/// shared Whitelist (whitelist AdminCap), trading-vault
+/// The big red button, ONE PTB: `whitelist::set_ingress_paused_all` on the
+/// shared Whitelist — every membership domain at once — (whitelist
+/// AdminCap), trading-vault
 /// `registry::set_paused` on the VaultProtocolConfig (still gated by the
 /// CORE AdminCap), and exchange `registry::set_paused<Base, Quote>` on
 /// every market (EXCHANGE AdminCap) — three caps total. Exits
@@ -241,7 +314,7 @@ pub async fn set_ingress_paused(
     pt.programmable_move_call(
         wl.package,
         Identifier::new("whitelist")?,
-        Identifier::new("set_ingress_paused")?,
+        Identifier::new("set_ingress_paused_all")?,
         vec![],
         vec![r.admin, r.whitelist, flag],
     );

@@ -306,13 +306,14 @@ async fn localnet_any_strike_atomic_create_write() -> Result<()> {
     let mut pt = ProgrammableTransactionBuilder::new();
     let cap = pt.obj(owned_object_arg(&client, d.wl_admin_cap).await?)?;
     let wl = pt.obj(shared_object_arg(&client, d.whitelist, true).await?)?;
+    let dom = pt.pure(0u8)?; // DOMAIN_OPTIONS
     let member = pt.pure(&address)?;
     pt.programmable_move_call(
         d.package,
         Identifier::new("whitelist").unwrap(),
         Identifier::new("add_member").unwrap(),
         vec![],
-        vec![cap, wl, member],
+        vec![cap, wl, dom, member],
     );
     submit_ptb(&client, &signer, pt, GAS, "whitelist writer").await?;
 
@@ -416,13 +417,14 @@ async fn localnet_roller_grid_roll() -> Result<()> {
     let mut pt = ProgrammableTransactionBuilder::new();
     let cap = pt.obj(owned_object_arg(&client, d.wl_admin_cap).await?)?;
     let wl = pt.obj(shared_object_arg(&client, d.whitelist, true).await?)?;
+    let dom = pt.pure(0u8)?; // DOMAIN_OPTIONS
     let member = pt.pure(&address)?;
     pt.programmable_move_call(
         d.package,
         Identifier::new("whitelist").unwrap(),
         Identifier::new("add_member").unwrap(),
         vec![],
-        vec![cap, wl, member],
+        vec![cap, wl, dom, member],
     );
     submit_ptb(&client, &signer, pt, GAS, "whitelist roller").await?;
 

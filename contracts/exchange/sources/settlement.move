@@ -740,7 +740,7 @@ fun validate<Base, Quote>(
     // no abilities, so every provide_*/collect_* call is stuck inside a
     // tx whose sender passed this gate — the obligation legs need no
     // separate assert.
-    whitelist::assert_ingress_allowed(wl, tx_sender);
+    whitelist::assert_ingress_allowed(wl, tx_sender, whitelist::domain_exchange());
     // 2. decode + token orientation
     let ord = order::from_bytes(order_bytes);
     let base_str = order::canonical_type<Base>();

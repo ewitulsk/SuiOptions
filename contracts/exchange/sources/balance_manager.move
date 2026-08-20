@@ -131,7 +131,7 @@ public fun new_with_owner_cap(owner: address, ctx: &mut TxContext): (ID, OwnerCa
 /// withdrawals are not.
 public fun deposit<T>(bm: &mut BalanceManager, wl: &Whitelist, c: Coin<T>, ctx: &TxContext) {
     let sender = ctx.sender();
-    whitelist::assert_ingress_allowed(wl, sender);
+    whitelist::assert_ingress_allowed(wl, sender, whitelist::domain_exchange());
     assert!(
         sender == bm.owner || bm.approved_signers.contains(&sender),
         EDepositRestricted,
@@ -146,7 +146,7 @@ public fun deposit_with_cap<T>(
     c: Coin<T>,
     ctx: &TxContext,
 ) {
-    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender(), whitelist::domain_exchange());
     assert!(cap.bm_id == object::id(bm), EWrongCap);
     deposit_internal(bm, c);
 }

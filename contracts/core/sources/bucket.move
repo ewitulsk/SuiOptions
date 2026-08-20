@@ -197,7 +197,7 @@ public fun create_bucket_any_strike<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9
     clock: &Clock,
     ctx: &mut TxContext,
 ): Bucket<U, S, OptionCall<U, S, D0, D1, D2, D3, D4, D5, D6, D7, D8, D9>> {
-    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender(), whitelist::domain_options());
     assert!(clock.timestamp_ms() < expiry_ms, errors::bucket_expired());
     // Minute-aligned expiries keep the u32-minutes type encoding injective.
     assert!(expiry_ms % 60_000 == 0, errors::expiry_not_aligned());
@@ -346,7 +346,7 @@ public fun execute_writer_flow<Underlying, Settlement, Call>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender(), whitelist::domain_options());
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
@@ -406,7 +406,7 @@ public fun execute_trader_flow<Underlying, Settlement, Call>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender(), whitelist::domain_options());
     let (q, amount, is_writer) = collateral::destroy(request);
     assert!(!is_writer, errors::request_flow_mismatch());
     let bucket_id = object::id(bucket);
@@ -527,7 +527,7 @@ public fun write_collateralized_balance<Underlying, Settlement, Call>(
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Position, Coin<Call>) {
-    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender(), whitelist::domain_options());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     let amount = underlying.value();
@@ -853,7 +853,7 @@ public fun write_spread<Underlying, Settlement, Call, LongCall>(
     clock: &Clock,
     ctx: &mut TxContext,
 ): (Position, Coin<Call>) {
-    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender(), whitelist::domain_options());
     assert!(clock.timestamp_ms() < bucket.expiry_ms, errors::bucket_expired());
     assert!(!bucket.invalidated, errors::bucket_invalidated());
     let amount = long.value();

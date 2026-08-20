@@ -89,11 +89,13 @@ pub fn registrar_pubkey_for_env(env: &str) -> Option<&'static str> {
 }
 
 /// Addresses seeded into the shared ingress `Whitelist` right after the
-/// whitelist package publish, per deployments.json env slot. The deployer
-/// is always seeded automatically and does not need an entry. Service
-/// wallets that push funds into the protocol — orderbook relayer /
-/// staging-mm-bot / mm-bot — should be listed here (or passed via
-/// `--ingress-member`) once their addresses are settled.
+/// whitelist package publish, per deployments.json env slot. Entry format:
+/// `addr` seeds ALL four membership domains; `addr=options,vault-lp`
+/// seeds only those (options, exchange, vault-create, vault-lp). The
+/// deployer is always seeded into every domain automatically and does not
+/// need an entry. Service wallets that push funds into the protocol —
+/// orderbook relayer / staging-mm-bot / mm-bot — should be listed here
+/// (or passed via `--ingress-member`) once their addresses are settled.
 ///
 /// prod stays empty on purpose: its service wallets aren't finalized —
 /// never guess an address here.

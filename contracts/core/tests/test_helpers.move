@@ -95,11 +95,11 @@ public fun init_protocol(scenario: &mut Scenario): Clock {
     ts::next_tx(scenario, admin_addr());
     let wl_cap = ts::take_from_sender<WlAdminCap>(scenario);
     let mut wl = take_whitelist(scenario);
-    whitelist::add_member(&wl_cap, &mut wl, admin_addr());
-    whitelist::add_member(&wl_cap, &mut wl, writer_addr());
-    whitelist::add_member(&wl_cap, &mut wl, trader_mm_addr());
-    whitelist::add_member(&wl_cap, &mut wl, trader_addr());
-    whitelist::add_member(&wl_cap, &mut wl, writer_mm_addr());
+    whitelist::add_member_for_testing(&mut wl, admin_addr());
+    whitelist::add_member_for_testing(&mut wl, writer_addr());
+    whitelist::add_member_for_testing(&mut wl, trader_mm_addr());
+    whitelist::add_member_for_testing(&mut wl, trader_addr());
+    whitelist::add_member_for_testing(&mut wl, writer_mm_addr());
     ts::return_shared(wl);
     ts::return_to_sender(scenario, wl_cap);
 

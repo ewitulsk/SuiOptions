@@ -25,7 +25,7 @@ fun set_whitelist_enabled(scenario: &mut ts::Scenario, enabled: bool) {
     ts::next_tx(scenario, th::admin_addr());
     let cap = th::take_wl_admin_cap(scenario);
     let mut wl = th::take_whitelist(scenario);
-    wl_mod::set_whitelist_enabled(&cap, &mut wl, enabled);
+    wl_mod::set_whitelist_enabled(&cap, &mut wl, wl_mod::domain_options(), enabled);
     ts::return_shared(wl);
     th::return_wl_admin_cap(scenario, cap);
 }
@@ -34,7 +34,7 @@ fun set_ingress_paused(scenario: &mut ts::Scenario, paused: bool) {
     ts::next_tx(scenario, th::admin_addr());
     let cap = th::take_wl_admin_cap(scenario);
     let mut wl = th::take_whitelist(scenario);
-    wl_mod::set_ingress_paused(&cap, &mut wl, paused);
+    wl_mod::set_ingress_paused(&cap, &mut wl, wl_mod::domain_options(), paused);
     ts::return_shared(wl);
     th::return_wl_admin_cap(scenario, cap);
 }
@@ -191,6 +191,38 @@ fun test_non_member_execute_writer_flow_aborts() {
     ts::end(scenario);
 }
 
+#[test]
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
+fun test_other_domain_member_write_aborts() {
+    // Membership on another domain (vault LP) never satisfies the options
+    // gate — domains are isolated.
+    let mut scenario = ts::begin(th::admin_addr());
+    let clock = th::init_protocol(&mut scenario);
+    th::new_bucket<BTC, USDC, CALL>(&mut scenario, EXPIRY_MS, STRIKE, 0);
+
+    ts::next_tx(&mut scenario, th::admin_addr());
+    let mut wl = th::take_whitelist(&scenario);
+    wl_mod::add_member_domain_for_testing(&mut wl, wl_mod::domain_vault_lp(), th::stranger_addr());
+    ts::return_shared(wl);
+
+    ts::next_tx(&mut scenario, th::stranger_addr());
+    let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
+    let wl = th::take_whitelist(&scenario);
+    let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
+        &mut b,
+        &wl,
+        coin::mint_for_testing<BTC>(10, scenario.ctx()),
+        &clock,
+        scenario.ctx(),
+    );
+    transfer::public_transfer(pos, th::stranger_addr());
+    transfer::public_transfer(call, th::stranger_addr());
+    ts::return_shared(wl);
+    ts::return_shared(b);
+    clock.destroy_for_testing();
+    ts::end(scenario);
+}
+
 // ─────────────────────────── go-public lever ───────────────────────────
 
 #[test]
@@ -204,7 +236,7 @@ fun test_whitelist_disabled_lets_non_member_write() {
     ts::next_tx(&mut scenario, th::stranger_addr());
     let mut b = ts::take_shared<Bucket<BTC, USDC, CALL>>(&scenario);
     let wl = th::take_whitelist(&scenario);
-    assert!(!wl_mod::is_member(&wl, th::stranger_addr()), 0);
+    assert!(!wl_mod::is_member(&wl, wl_mod::domain_options(), th::stranger_addr()), 0);
     let (pos, call) = bucket::write_collateralized<BTC, USDC, CALL>(
         &mut b,
         &wl,
@@ -219,9 +251,9 @@ fun test_whitelist_disabled_lets_non_member_write() {
     set_whitelist_enabled(&mut scenario, true);
     ts::next_tx(&mut scenario, th::admin_addr());
     let wl = th::take_whitelist(&scenario);
-    assert!(wl_mod::whitelist_enabled(&wl), 0);
-    assert!(wl_mod::is_member(&wl, th::writer_addr()), 0);
-    assert!(!wl_mod::is_member(&wl, th::stranger_addr()), 0);
+    assert!(wl_mod::whitelist_enabled(&wl, wl_mod::domain_options()), 0);
+    assert!(wl_mod::is_member(&wl, wl_mod::domain_options(), th::writer_addr()), 0);
+    assert!(!wl_mod::is_member(&wl, wl_mod::domain_options(), th::stranger_addr()), 0);
     ts::return_shared(wl);
 
     transfer::public_transfer(pos, th::stranger_addr());
@@ -312,9 +344,9 @@ fun test_pause_and_removal_never_block_exits() {
     ts::next_tx(&mut scenario, th::admin_addr());
     let cap = th::take_wl_admin_cap(&scenario);
     let mut wl = th::take_whitelist(&scenario);
-    wl_mod::remove_member(&cap, &mut wl, th::writer_addr());
-    wl_mod::set_ingress_paused(&cap, &mut wl, true);
-    assert!(!wl_mod::is_member(&wl, th::writer_addr()), 0);
+    wl_mod::remove_member(&cap, &mut wl, wl_mod::domain_options(), th::writer_addr());
+    wl_mod::set_ingress_paused(&cap, &mut wl, wl_mod::domain_options(), true);
+    assert!(!wl_mod::is_member(&wl, wl_mod::domain_options(), th::writer_addr()), 0);
     ts::return_shared(wl);
     th::return_wl_admin_cap(&scenario, cap);
 
