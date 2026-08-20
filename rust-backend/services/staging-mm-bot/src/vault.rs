@@ -42,7 +42,7 @@ use indexer_graphql::{IndexerClient, TradingVault};
 use protocol_types::asset::canonicalize_move_type;
 use sui_tx::chain::{created_objects, decode_return_value, ChainClient};
 use sui_tx::sui_client::SuiClientWrapper;
-use sui_tx::tx::trading_vault::{self, CreateVaultSpec};
+use sui_tx::tx::trading_vault;
 use sui_tx::tx::{owned_object_arg, shared_object_arg, submit_ptb_rebuilding};
 
 /// `[vault_direct.provision]` — self-provisioning when discovery finds no
@@ -57,6 +57,11 @@ pub struct ProvisionConfig {
     pub curator_fee_bps: u64,
     pub unwind_grace_ms: u64,
     pub gas_budget: u64,
+    /// v2 capital structure (SO-418/SO-420), flattened — same keys as
+    /// mm-bot's `[desk.provision]` (`structure_code`, the six tranche
+    /// params, `terms_version`, `spec_hash`). Defaults = UNTRANCHED.
+    #[serde(flatten)]
+    pub tranche: trading_vault::TrancheParams,
 }
 
 impl Default for ProvisionConfig {
@@ -67,6 +72,7 @@ impl Default for ProvisionConfig {
             curator_fee_bps: 0,
             unwind_grace_ms: 24 * 60 * 60 * 1_000,
             gas_budget: 200_000_000,
+            tranche: trading_vault::TrancheParams::default(),
         }
     }
 }
@@ -109,6 +115,11 @@ pub struct ResolvedDirectVault {
     pub curator_cap: Option<ObjectID>,
     /// True when this call created the vault.
     pub provisioned: bool,
+    /// Wire code the funding pass deposits into (SO-420): 0 on an
+    /// untranched vault, junior on a tranched one — the vault rejects a
+    /// mismatched code (abort 121). Fixed at resolution: the capital
+    /// structure is immutable per vault.
+    pub deposit_tranche: u8,
 }
 
 /// The direct custody's ids, from the indexer's durable event view.
@@ -135,7 +146,13 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedDirectVault> {
         })?;
         info!(vault = %vault_id.to_hex_literal(), creator = %view.creator, "adopting pinned vault");
         let (manager_id, curator_cap) = ensure_wired(&p, &view, me).await?;
-        return Ok(ResolvedDirectVault { vault_id, manager_id, curator_cap, provisioned: false });
+        return Ok(ResolvedDirectVault {
+            vault_id,
+            manager_id,
+            curator_cap,
+            provisioned: false,
+            deposit_tranche: trading_vault::deposit_tranche_code(view.structure_code),
+        });
     }
 
     if !p.cfg.enabled {
@@ -153,7 +170,13 @@ pub async fn resolve(p: ResolveParams<'_>) -> Result<ResolvedDirectVault> {
         let vault_id = ObjectID::new(*view.vault_id.as_bytes());
         info!(vault = %vault_id.to_hex_literal(), "adopting self-created vault");
         let (manager_id, curator_cap) = ensure_wired(&p, &view, me).await?;
-        return Ok(ResolvedDirectVault { vault_id, manager_id, curator_cap, provisioned: false });
+        return Ok(ResolvedDirectVault {
+            vault_id,
+            manager_id,
+            curator_cap,
+            provisioned: false,
+            deposit_tranche: trading_vault::deposit_tranche_code(view.structure_code),
+        });
     }
 
     // Nothing to adopt. Before creating, insist the indexer is current: a
@@ -201,26 +224,15 @@ async fn provision(p: &ResolveParams<'_>, me: SuiAddress) -> Result<ResolvedDire
         p.vault_protocol_config,
         p.whitelist,
         p.accounting_coin_type,
-        // v2 (SO-418): always UNTRANCHED — this bot's vault is testnet
-        // exchange liquidity, not a structured product. structure_code 0
-        // requires all six tranche params zero (the contract aborts
-        // otherwise). The escrowed curator commitment is funded by the
-        // funding pass right after resolution (it has the appraisal
+        // v2 (SO-420): capital structure from config — untranched by
+        // default, senior/junior when `[vault_direct.provision]` sets the
+        // tranche params. The escrowed curator commitment is funded by
+        // the funding pass right after resolution (it has the appraisal
         // composer; provisioning does not).
-        &CreateVaultSpec {
-            lockup_ms: p.cfg.lockup_ms,
-            curator_fee_bps: p.cfg.curator_fee_bps,
-            unwind_grace_ms: p.cfg.unwind_grace_ms,
-            structure_code: 0,
-            senior_hurdle_bps_annual: 0,
-            target_junior_bps: 0,
-            maintenance_junior_bps: 0,
-            upside_code: 0,
-            residual_participation_bps: 0,
-            total_return_cap_bps: 0,
-            terms_version: 1,
-            spec_hash: Vec::new(),
-        },
+        &p.cfg
+            .tranche
+            .create_vault_spec(p.cfg.lockup_ms, p.cfg.curator_fee_bps, p.cfg.unwind_grace_ms)
+            .context("[vault_direct.provision]")?,
         p.cfg.gas_budget,
     )
     .await
@@ -244,6 +256,7 @@ async fn provision(p: &ResolveParams<'_>, me: SuiAddress) -> Result<ResolvedDire
         manager_id: custody.bm_id,
         curator_cap: Some(created.curator_cap_id),
         provisioned: true,
+        deposit_tranche: trading_vault::deposit_tranche_code(p.cfg.tranche.structure_code),
     })
 }
 

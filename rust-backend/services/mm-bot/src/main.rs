@@ -1776,6 +1776,11 @@ mod tests {
         assert!(cfg.desk.vault_id.trim().is_empty(), "staging must not pin a vault id");
         assert!(cfg.desk.provision.enabled, "staging provisions its own vault");
         assert!(cfg.testnet.mint_and_deposit_liquidity, "staging seeds the vault it creates");
+        // SO-420: the tranche keys ride in via #[serde(flatten)], which
+        // silently ignores unknown keys — a typo'd key would quietly fall
+        // back to untranched. Pin the intent here.
+        assert_eq!(cfg.desk.provision.tranche.structure_code, 1, "staging desk vault is tranched");
+        assert_eq!(cfg.desk.provision.tranche.target_junior_bps, 2_000);
     }
 
     /// Prod must never carry the faucet section, and must not silently

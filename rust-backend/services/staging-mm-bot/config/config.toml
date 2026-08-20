@@ -95,3 +95,17 @@ max_conf_bps = 0
 # enabled = true        # create + wire a vault when none of ours exists
 # lockup_ms = 0
 # curator_fee_bps = 0
+#
+# v2 capital structure (SO-420) — same keys as mm-bot's [desk.provision].
+# Defaults = UNTRANCHED; structure_code 1 requires all six tranche params
+# set coherently within the protocol floors or create_vault aborts. The
+# funding pass deposits junior on a tranched vault.
+# structure_code             = 0   # 0 untranched / 1 senior-junior
+# senior_hurdle_bps_annual   = 0
+# target_junior_bps          = 0
+# maintenance_junior_bps     = 0
+# upside_code                = 0
+# residual_participation_bps = 0
+# total_return_cap_bps       = 0
+# terms_version              = 1
+# spec_hash                  = ""  # hex content hash of the terms doc

@@ -80,15 +80,27 @@ mm_release_enabled = true
 # TSUI = "0x..."
 
 # Self-provisioning: create a vault when there is none of ours to adopt.
-# v2 (SO-418): defaults create an UNTRANCHED vault (structure_code 0,
-# terms_version 1) and fund the escrowed curator commitment with
-# commitment_deposit ($100k TUSDC default) via deposit_into_commitment —
-# the boot fails if the commitment can't be funded on a fresh vault, and
-# the desk idles (healthy-but-idle, no rollback) if an adopted vault is
-# risk-off. See config.toml for the tranched knobs.
+# Funds the escrowed curator commitment with commitment_deposit ($100k
+# TUSDC default) via deposit_into_commitment — the boot fails if the
+# commitment can't be funded on a fresh vault, and the desk idles
+# (healthy-but-idle, no rollback) if an adopted vault is risk-off.
+#
+# SO-420: the desk vault is TRANCHED (senior/junior, preferred-only
+# senior upside). Takes effect on the next fresh provision — the desk
+# keeps adopting its existing vault until a redeploy orphans it. The
+# testnet seed lands all-junior; senior stays empty until someone
+# deposits senior.
 [desk.provision]
 enabled = true
 commitment_deposit = 100_000_000_000 # $100k at TUSDC's 6 decimals
+structure_code             = 1     # senior/junior
+senior_hurdle_bps_annual   = 1_000 # 10% annual senior hurdle
+target_junior_bps          = 2_000 # 20% junior target
+maintenance_junior_bps     = 1_000 # 10% maintenance floor
+upside_code                = 0     # preferred-only senior
+residual_participation_bps = 0
+total_return_cap_bps       = 0
+terms_version              = 1
 
 # Exchange resting-ask exits (SO-416): list option inventory as asks on
 # the in-house exchange; the matching engine executes the resales.
