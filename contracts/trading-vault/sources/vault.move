@@ -279,7 +279,7 @@ public fun create_vault<T>(
 ): ID {
     // Ingress gate: an ungated create_vault would let a non-member mint a
     // CuratorCap and self-deposit around the whitelist.
-    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender(), whitelist::domain_vault_create());
     assert!(curator_fee_bps <= registry::max_curator_fee_bps(cfg), errors::fee_too_high());
 
     let accounting = type_name::with_defining_ids<T>();
@@ -405,7 +405,7 @@ fun deposit_internal<T>(
 ) {
     // Ingress gate (whitelist + pause) — the one choke point both deposit
     // paths route through. Exits never check this.
-    whitelist::assert_ingress_allowed(wl, ctx.sender());
+    whitelist::assert_ingress_allowed(wl, ctx.sender(), whitelist::domain_vault_lp());
     assert!(!registry::is_paused(cfg), errors::protocol_paused());
     assert!(vault.state == VaultState::Open, errors::vault_not_open());
     assert!(!vault.config.deposits_paused, errors::deposits_paused());

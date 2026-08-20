@@ -48,9 +48,9 @@ fun setup(sc: &mut Scenario): Clock {
     // Ingress whitelist: every named test actor is a member.
     let wl_cap = ts::take_from_sender<WlAdminCap>(sc);
     let mut wl = ts::take_shared<Whitelist>(sc);
-    whitelist::add_member(&wl_cap, &mut wl, ADMIN);
-    whitelist::add_member(&wl_cap, &mut wl, CURATOR);
-    whitelist::add_member(&wl_cap, &mut wl, ALICE);
+    whitelist::add_member_for_testing(&mut wl, ADMIN);
+    whitelist::add_member_for_testing(&mut wl, CURATOR);
+    whitelist::add_member_for_testing(&mut wl, ALICE);
     ts::return_shared(wl);
     ts::return_to_sender(sc, wl_cap);
     // v2 risk-off gate: no curator commitment in these tests, so disable

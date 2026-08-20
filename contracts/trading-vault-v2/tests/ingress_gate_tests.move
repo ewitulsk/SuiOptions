@@ -20,7 +20,7 @@ fun remove_member(sc: &mut ts::Scenario, who: address) {
     ts::next_tx(sc, h::admin_addr());
     let cap = h::take_wl_admin_cap(sc);
     let mut wl = h::take_whitelist(sc);
-    wl_mod::remove_member(&cap, &mut wl, who);
+    wl_mod::remove_member(&cap, &mut wl, wl_mod::domain_vault_lp(), who);
     ts::return_shared(wl);
     h::return_wl_admin_cap(sc, cap);
 }
@@ -29,7 +29,7 @@ fun set_ingress_paused(sc: &mut ts::Scenario, paused: bool) {
     ts::next_tx(sc, h::admin_addr());
     let cap = h::take_wl_admin_cap(sc);
     let mut wl = h::take_whitelist(sc);
-    wl_mod::set_ingress_paused(&cap, &mut wl, paused);
+    wl_mod::set_ingress_paused(&cap, &mut wl, wl_mod::domain_vault_lp(), paused);
     ts::return_shared(wl);
     h::return_wl_admin_cap(sc, cap);
 }
@@ -50,6 +50,46 @@ fun non_member_deposit_aborts() {
 fun non_member_create_vault_aborts() {
     let mut sc = ts::begin(h::admin_addr());
     let clock = h::init_protocol(&mut sc);
+
+    ts::next_tx(&mut sc, STRANGER);
+    let cfg = h::take_protocol_config(&sc);
+    let wl = h::take_whitelist(&sc);
+    let _id = vault::create_vault<h::USDC>(
+        &cfg,
+        &wl,
+        3_600_000,
+        1_000,
+        3_600_000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        b"spec-hash-test",
+        &clock,
+        sc.ctx(),
+    );
+    ts::return_shared(wl);
+    ts::return_shared(cfg);
+    clock.destroy_for_testing();
+    sc.end();
+}
+
+#[test]
+#[expected_failure(abort_code = 1, location = whitelist::whitelist)] // EIngressRestricted
+fun lp_domain_member_cannot_create_vault() {
+    // Membership on the vault-LP domain never satisfies the vault-create
+    // gate — domains are isolated.
+    let mut sc = ts::begin(h::admin_addr());
+    let clock = h::init_protocol(&mut sc);
+
+    ts::next_tx(&mut sc, h::admin_addr());
+    let mut wl = h::take_whitelist(&sc);
+    wl_mod::add_member_domain_for_testing(&mut wl, wl_mod::domain_vault_lp(), STRANGER);
+    ts::return_shared(wl);
 
     ts::next_tx(&mut sc, STRANGER);
     let cfg = h::take_protocol_config(&sc);
