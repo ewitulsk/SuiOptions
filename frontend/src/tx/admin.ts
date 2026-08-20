@@ -30,6 +30,8 @@ import { Transaction } from "@mysten/sui/transactions";
 import type { TransactionArgument } from "@mysten/sui/transactions";
 import { SUI_CLOCK_OBJECT_ID } from "@mysten/sui/utils";
 
+import { DOMAIN_CODE, type DomainKey } from "../lib/whitelistDomains";
+
 import {
   ENV,
   EXCHANGE_PACKAGE_ID,
@@ -189,9 +191,10 @@ export function buildCreateTreasuryTx(adminCapId: string): Transaction {
 // ── Ingress whitelist + big red button (guarded launch) ────────────────
 //
 // Mirrors sui-tx admin.rs (IngressWhitelist / MarketPauseTarget): ONE
-// standalone whitelist package with one shared `Whitelist` object and its
-// own `whitelist::AdminCap`. Every mutation is a single call — there is no
-// second list to keep in sync.
+// standalone whitelist package with one shared `Whitelist` object (four
+// membership domains) and its own `whitelist::AdminCap`. Per-domain
+// mutations batch into a single PTB — there is no second list to keep in
+// sync.
 
 export type IngressWhitelistParams = {
   /** Owned `whitelist::AdminCap` (the standalone whitelist package's cap). */
@@ -209,42 +212,79 @@ function requireWhitelistPackage(): string {
   return WHITELIST_PACKAGE_ID;
 }
 
-/** One `whitelist::<fn>(cap, wl, value)` call. */
-function addWhitelistCall(
+/** One `whitelist::<fn>(cap, wl, domain, value)` call. */
+function addWhitelistDomainCall(
   tx: Transaction,
   p: IngressWhitelistParams,
   fn: "add_member" | "remove_member" | "set_whitelist_enabled" | "set_ingress_paused",
+  domain: DomainKey,
   value: TransactionArgument,
 ) {
   tx.moveCall({
     target: `${requireWhitelistPackage()}::whitelist::${fn}`,
-    arguments: [tx.object(p.whitelistAdminCapId), tx.object(p.whitelistId), value],
+    arguments: [
+      tx.object(p.whitelistAdminCapId),
+      tx.object(p.whitelistId),
+      tx.pure.u8(DOMAIN_CODE[domain]),
+      value,
+    ],
   });
 }
 
-/** One PTB adding `member` to the ingress whitelist. */
-export function buildWhitelistAddTx(p: IngressWhitelistParams, member: string): Transaction {
+/** The membership delta the Admin editor computed for one address. */
+export type MembershipDelta = {
+  add: DomainKey[];
+  remove: DomainKey[];
+};
+
+/** One PTB applying a per-domain membership delta for `member`: one
+ * `add_member` / `remove_member` call per changed domain. */
+export function buildWhitelistMembershipTx(
+  p: IngressWhitelistParams,
+  member: string,
+  delta: MembershipDelta,
+): Transaction {
+  if (delta.add.length === 0 && delta.remove.length === 0) {
+    throw new Error("empty whitelist membership delta");
+  }
   const tx = new Transaction();
-  addWhitelistCall(tx, p, "add_member", tx.pure.address(member));
+  for (const d of delta.add) {
+    addWhitelistDomainCall(tx, p, "add_member", d, tx.pure.address(member));
+  }
+  for (const d of delta.remove) {
+    addWhitelistDomainCall(tx, p, "remove_member", d, tx.pure.address(member));
+  }
   return tx;
 }
 
-/** One PTB removing `member` from the ingress whitelist. */
-export function buildWhitelistRemoveTx(p: IngressWhitelistParams, member: string): Transaction {
-  const tx = new Transaction();
-  addWhitelistCall(tx, p, "remove_member", tx.pure.address(member));
-  return tx;
+/** One PTB adding `member` to the given domains. */
+export function buildWhitelistAddTx(
+  p: IngressWhitelistParams,
+  member: string,
+  domains: DomainKey[],
+): Transaction {
+  return buildWhitelistMembershipTx(p, member, { add: domains, remove: [] });
 }
 
-/** One PTB flipping `set_whitelist_enabled` — the go-public lever.
- * Membership is retained on-chain, so re-enabling restores the prior
- * cohort. */
+/** One PTB removing `member` from the given domains. */
+export function buildWhitelistRemoveTx(
+  p: IngressWhitelistParams,
+  member: string,
+  domains: DomainKey[],
+): Transaction {
+  return buildWhitelistMembershipTx(p, member, { add: [], remove: domains });
+}
+
+/** One PTB flipping `set_whitelist_enabled` on one domain — the go-public
+ * lever, per-domain. Membership is retained on-chain, so re-enabling
+ * restores the prior cohort. */
 export function buildSetWhitelistEnabledTx(
   p: IngressWhitelistParams,
+  domain: DomainKey,
   enabled: boolean,
 ): Transaction {
   const tx = new Transaction();
-  addWhitelistCall(tx, p, "set_whitelist_enabled", tx.pure.bool(enabled));
+  addWhitelistDomainCall(tx, p, "set_whitelist_enabled", domain, tx.pure.bool(enabled));
   return tx;
 }
 
@@ -268,15 +308,19 @@ export type IngressPauseParams = IngressWhitelistParams & {
   markets: MarketPauseTarget[];
 };
 
-/** The big red button, ONE PTB: `whitelist::set_ingress_paused` (whitelist
- * cap), trading-vault `registry::set_paused` (core cap), and exchange
+/** The big red button, ONE PTB: `whitelist::set_ingress_paused_all` — every
+ * membership domain at once — (whitelist cap), trading-vault
+ * `registry::set_paused` (core cap), and exchange
  * `registry::set_paused<Base, Quote>` on every market (exchange cap). Legs
  * whose ids are absent are omitted. Exits (withdrawals/cancels) are never
  * gated on-chain, so flipping this strands nobody. */
 function buildSetIngressPausedTx(p: IngressPauseParams, paused: boolean): Transaction {
   const tx = new Transaction();
   const flag = tx.pure.bool(paused);
-  addWhitelistCall(tx, p, "set_ingress_paused", flag);
+  tx.moveCall({
+    target: `${requireWhitelistPackage()}::whitelist::set_ingress_paused_all`,
+    arguments: [tx.object(p.whitelistAdminCapId), tx.object(p.whitelistId), flag],
+  });
   if (p.vaultProtocolConfigId && TRADING_VAULT_PACKAGE_ID) {
     tx.moveCall({
       target: `${TRADING_VAULT_PACKAGE_ID}::registry::set_paused`,
