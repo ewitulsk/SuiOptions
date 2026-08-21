@@ -260,6 +260,34 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Points/leaderboard read+write API (go-backend). Public reads on 9021
+  # (nginx /prod/leaderboard/), internal writes on 9022 (never proxied —
+  # the event-ingestor posts points there).
+  leaderboard:
+    image: ${ECR}/options/leaderboard:${LEADERBOARD_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+    restart: unless-stopped
+    networks: [net]
+
+  # DB-driven Sui event→points rules (go-backend): polls Sui GraphQL module
+  # streams and posts to leaderboard's internal API. Admin plane on 9023
+  # (nginx /prod/ingestor/, JWT via auth-service /verify), health/metrics
+  # on 9024 (never proxied). No secrets mount — the GraphQL URL is public.
+  event-ingestor:
+    image: ${ECR}/options/event-ingestor:${EVENT_INGESTOR_TAG}
+    environment:
+      APP_ENV: prod
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+    depends_on: [leaderboard, auth-service]
+    restart: unless-stopped
+    networks: [net]
+
   # Single public entrypoint per env. Strips the /prod/{quoting,api,indexer,mm-bot}
   # prefix before forwarding. depends_on is start-order only; nginx
   # tolerates backends being briefly unreachable on first boot.

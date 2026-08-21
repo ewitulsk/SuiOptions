@@ -7,6 +7,7 @@ import { TradingVaultDetailScreen } from "./screens/TradingVaultDetail";
 import { VaultPositionDetailScreen } from "./screens/VaultPositionDetail";
 import { Activity } from "./screens/Activity";
 import { Analytics } from "./screens/Analytics";
+import { Leaderboard } from "./screens/Leaderboard";
 import { Bridge } from "./screens/Bridge";
 import { Admin } from "./screens/Admin";
 import { Debug } from "./screens/Debug";
@@ -40,6 +41,8 @@ export function App() {
         <Route path="/activity" element={<Activity />} />
         {/* Spot + realized-vol analytics chart (SO-390). */}
         <Route path="/analytics" element={<Analytics />} />
+        {/* Points leaderboard fed by the go-backend leaderboard service. */}
+        <Route path="/leaderboard" element={<Leaderboard />} />
         <Route path="/bridge" element={<Bridge />} />
         {/* Admin self-gates on AdminCap and redirects non-admins to /earn. */}
         <Route path="/admin" element={<Admin />} />

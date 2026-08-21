@@ -70,6 +70,19 @@ export const CCTP_URL: string =
 export const ORDERBOOK_URL: string =
   (import.meta.env.VITE_ORDERBOOK_URL as string | undefined) ?? "http://127.0.0.1:9014";
 
+// leaderboard public base URL (go-backend). Read-only points/ranking API
+// feeding the Leaderboard tab. Deployed builds set VITE_LEADERBOARD_URL to
+// the env's public route (e.g. https://<host>/<env>/leaderboard).
+export const LEADERBOARD_URL: string =
+  (import.meta.env.VITE_LEADERBOARD_URL as string | undefined) ?? "http://127.0.0.1:9021";
+
+// event-ingestor admin base URL (go-backend). JWT-gated config plane for
+// the event→points rules driving the leaderboard (see api/ingestorAdmin.ts).
+// Deployed builds set VITE_INGESTOR_URL to the env's public route
+// (e.g. https://<host>/<env>/ingestor).
+export const INGESTOR_URL: string =
+  (import.meta.env.VITE_INGESTOR_URL as string | undefined) ?? "http://127.0.0.1:9023";
+
 // hedge-signer public base URL (SO-305). Drives the curator dashboard's
 // FROST ceremonies (/frost/*) and the allowlisted Bluefin REST relay
 // (/bluefin/*; Bluefin CORS-blocks third-party origins, so the browser

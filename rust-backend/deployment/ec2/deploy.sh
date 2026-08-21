@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot api-service token-info auth-service gas-station hedge-signer market-sim price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot orderbook staging-mm-bot)
+ALL_SERVICES=(indexer quoting-service mm-bot api-service token-info auth-service gas-station hedge-signer market-sim price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot orderbook staging-mm-bot leaderboard event-ingestor)
 
 tag_var_for() {
   case "$1" in
@@ -72,6 +72,8 @@ tag_var_for() {
     social-bot)       echo SOCIAL_BOT_TAG ;;
     orderbook)        echo ORDERBOOK_TAG ;;
     staging-mm-bot)   echo STAGING_MM_BOT_TAG ;;
+    leaderboard)      echo LEADERBOARD_TAG ;;
+    event-ingestor)   echo EVENT_INGESTOR_TAG ;;
     *) return 1 ;;
   esac
 }
@@ -95,6 +97,8 @@ compose_name_for() {
     social-bot)       echo social-bot ;;
     orderbook)        echo orderbook ;;
     staging-mm-bot)   echo staging-mm-bot ;;
+    leaderboard)      echo leaderboard ;;
+    event-ingestor)   echo event-ingestor ;;
     *) return 1 ;;
   esac
 }
@@ -287,6 +291,8 @@ health_path_for() {
     social-bot)       echo "/$ENV/social-bot/health" ;;
     orderbook)        echo "/$ENV/orderbook/health" ;;
     staging-mm-bot)   echo "/$ENV/staging-mm-bot/health" ;;
+    leaderboard)      echo "/$ENV/leaderboard/health" ;;
+    event-ingestor)   echo "/$ENV/ingestor/health" ;;
     *) return 1 ;;
   esac
 }

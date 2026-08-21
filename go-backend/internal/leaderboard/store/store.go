@@ -49,12 +49,12 @@ type SourceRow struct {
 
 // BreakdownRow is one per-source slice of an account's points.
 type BreakdownRow struct {
-	Source      string     `json:"source"`
-	Label       *string    `json:"label"`
-	EventType   *string    `json:"event_type"`
-	Points      int64      `json:"points"`
-	EventCount  int64      `json:"event_count"`
-	LastEventMs *int64     `json:"last_event_ms"`
+	Source      string  `json:"source"`
+	Label       *string `json:"label"`
+	EventType   *string `json:"event_type"`
+	Points      int64   `json:"points"`
+	EventCount  int64   `json:"event_count"`
+	LastEventMs *int64  `json:"last_event_ms"`
 }
 
 var ErrNotFound = errors.New("not found")

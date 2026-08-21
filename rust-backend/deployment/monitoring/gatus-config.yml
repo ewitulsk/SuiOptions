@@ -76,6 +76,22 @@ endpoints:
       - "[STATUS] == 200"
       - "[BODY] == ok"
 
+  - name: Leaderboard
+    group: staging
+    url: http://options-staging-leaderboard-1:9021/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
+  - name: Event Ingestor
+    group: staging
+    url: http://options-staging-event-ingestor-1:9023/health
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+      - "[BODY] == ok"
+
   - name: Nginx Gateway
     group: staging
     url: http://options-staging-nginx-1:80/staging/health

@@ -36,6 +36,8 @@ on:
           - indexer
           - token-info
           - orderbook
+          - leaderboard
+          - event-ingestor
       environment:
         description: 'Target environment'
         required: true

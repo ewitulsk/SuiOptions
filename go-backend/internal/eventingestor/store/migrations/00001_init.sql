@@ -4,6 +4,8 @@
 -- (introspection cached in modules_json for the UI), configures per-event
 -- rules; the poller walks Sui GraphQL module streams with persisted cursors.
 
+-- +goose Up
+
 CREATE TABLE tracked_packages (
     id              BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     -- Canonical (padded) address; lookups normalize before compare.

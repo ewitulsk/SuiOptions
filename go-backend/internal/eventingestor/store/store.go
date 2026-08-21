@@ -87,9 +87,15 @@ func (s *Store) ListPackages(ctx context.Context) ([]TrackedPackage, error) {
 	return out, rows.Err()
 }
 
-// DeletePackage cascades to its rules and cursors.
+// DeletePackage cascades to its rules (FK) and clears its module cursors
+// (no FK — cursors key on (package, module) only).
 func (s *Store) DeletePackage(ctx context.Context, packageAddress string) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx,
 		`DELETE FROM tracked_packages WHERE package_address = $1`, packageAddress)
 	if err != nil {
 		return err
@@ -97,7 +103,11 @@ func (s *Store) DeletePackage(ctx context.Context, packageAddress string) error 
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}
-	return nil
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM module_cursors WHERE package_address = $1`, packageAddress); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // --- rules ---------------------------------------------------------------------
@@ -173,6 +183,17 @@ func (s *Store) ListRules(ctx context.Context, packageAddress string) ([]*Rule, 
 	return out, rows.Err()
 }
 
+// RulePatch is a partial rule update; nil fields are left untouched.
+type RulePatch struct {
+	Label          *string
+	Points         *int64
+	Enabled        *bool
+	RecipientMode  *string
+	RecipientField *string
+	StartMode      *string
+	StartAt        *time.Time
+}
+
 // PatchRule applies a partial update. nil fields are left alone; an empty
 // patch is a no-op touch. Recipient/start changes re-validate upstream.
 func (s *Store) PatchRule(ctx context.Context, id int64, patch RulePatch) (*Rule, error) {
@@ -195,9 +216,6 @@ func (s *Store) PatchRule(ctx context.Context, id int64, patch RulePatch) (*Rule
 	}
 	if patch.RecipientField != nil {
 		add("recipient_field", *patch.RecipientField)
-	}
-	if patch.StartMode != nil {
-		add("start_mode", *patch.StartMode)
 	}
 	if patch.StartMode != nil {
 		add("start_mode", *patch.StartMode)
@@ -385,10 +403,10 @@ type ModuleStatus struct {
 
 // RuleStatus is one rule's delivery health for /status.
 type RuleStatus struct {
-	RuleID          int64      `json:"rule_id"`
-	BackfillState   string     `json:"backfill_state"`
-	Delivered       int64      `json:"delivered"`
-	LastDeliveryAt  *time.Time `json:"last_delivery_at"`
+	RuleID         int64      `json:"rule_id"`
+	BackfillState  string     `json:"backfill_state"`
+	Delivered      int64      `json:"delivered"`
+	LastDeliveryAt *time.Time `json:"last_delivery_at"`
 }
 
 // Status aggregates everything the admin UI's ingestion panel shows.

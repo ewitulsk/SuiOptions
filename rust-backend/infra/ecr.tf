@@ -13,7 +13,7 @@ locals {
   #   terraform state rm 'aws_ecr_repository.svc["option-scheduler"]'
   # and delete options/option-scheduler by hand, or the apply fails on a
   # non-empty repository.
-  service_repos = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot", "data-room-collector", "data-room-batch"]
+  service_repos = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot", "data-room-collector", "data-room-batch", "leaderboard", "event-ingestor"]
 }
 
 resource "aws_ecr_repository" "svc" {

@@ -49,10 +49,9 @@ var (
 )
 
 type Config struct {
-	PollIntervalMs   int    `toml:"poll_interval_ms"`
-	RetryBaseMs      int    `toml:"retry_base_ms"`
-	RetryCapMs       int    `toml:"retry_cap_ms"`
-	SuiGraphqlURL    string `toml:"-"`
+	PollIntervalMs int `toml:"poll_interval_ms"`
+	RetryBaseMs    int `toml:"retry_base_ms"`
+	RetryCapMs     int `toml:"retry_cap_ms"`
 }
 
 type Poller struct {
@@ -186,8 +185,12 @@ func (p *Poller) runStream(ctx context.Context, pkg, module string) {
 	}
 }
 
-func (p *Poller) baseBackoff() time.Duration { return time.Duration(p.cfg.RetryBaseMs) * time.Millisecond }
-func (p *Poller) maxBackoff() time.Duration  { return time.Duration(p.cfg.RetryCapMs) * time.Millisecond }
+func (p *Poller) baseBackoff() time.Duration {
+	return time.Duration(p.cfg.RetryBaseMs) * time.Millisecond
+}
+func (p *Poller) maxBackoff() time.Duration {
+	return time.Duration(p.cfg.RetryCapMs) * time.Millisecond
+}
 
 // initCursor resumes the persisted position when its package half still
 // matches; anything else seeds at the stream tip (descending last:1 → take

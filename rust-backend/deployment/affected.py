@@ -58,7 +58,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # Order here is the canonical "all services" list. Keep in sync with the
 # ALL_SERVICES array in deployment/ec2/deploy.sh — `test_affected.py`
 # asserts the two match.
-ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot"]
+ALL_SERVICES = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot", "leaderboard", "event-ingestor"]
 
 # Path globs that, when matched, force every service to rebuild +
 # redeploy. Catches lockfile churn, workspace-wide config, infra-side
@@ -156,6 +156,16 @@ SERVICE_GLOBS: dict[str, list[str]] = {
         "rust-backend/services/oracle-service/**",
         "rust-backend/Dockerfile.oracle-service",
     ],
+}
+
+# Go services live in the single-module go-backend/ monorepo — no Cargo
+# manifest, no crate derivation. Any change under go-backend/ rebuilds every
+# Go service (one `go.mod`, shared internal/ packages; the module is small
+# enough that finer-grained selection isn't worth the drift risk).
+# `crate_globs()` / `service_globs()` iterate the Rust SERVICE_GLOBS only.
+GO_SERVICE_GLOBS: dict[str, list[str]] = {
+    "leaderboard": ["go-backend/**"],
+    "event-ingestor": ["go-backend/**"],
 }
 
 # Manifest sections whose deps end up compiled into the service image.
@@ -297,6 +307,7 @@ def affected_services(
     except ManifestError as exc:
         print(f"affected.py: {exc}; failing closed to all services", file=sys.stderr)
         return sorted(ALL_SERVICES)
+    globs_by_service = {**globs_by_service, **GO_SERVICE_GLOBS}
 
     hit: set[str] = set()
     for svc, globs in globs_by_service.items():

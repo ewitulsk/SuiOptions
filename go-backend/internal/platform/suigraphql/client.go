@@ -159,8 +159,8 @@ type eventsData struct {
 }
 
 type eventNode struct {
-	SequenceNumber   any             `json:"sequenceNumber"`
-	Timestamp        string          `json:"timestamp"`
+	SequenceNumber    any    `json:"sequenceNumber"`
+	Timestamp         string `json:"timestamp"`
 	TransactionModule struct {
 		Name string `json:"name"`
 	} `json:"transactionModule"`

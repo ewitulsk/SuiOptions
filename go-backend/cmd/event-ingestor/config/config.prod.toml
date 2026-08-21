@@ -1,0 +1,18 @@
+# event-ingestor config — prod env (prod is a distinct testnet deployment).
+
+environment        = "prod"
+
+# DB_PASSWORD + DB_HOST are injected by compose from the deploy env.
+database_url       = "postgresql://event_ingestor_prod:${DB_PASSWORD}@${DB_HOST}:5432/event_ingestor_prod"
+
+admin_bind_addr    = "0.0.0.0:9023"
+internal_bind_addr = "0.0.0.0:9024"
+
+sui_graphql_url    = "https://graphql.testnet.sui.io/graphql"
+leaderboard_url    = "http://leaderboard:9022"
+auth_service_url   = "http://auth-service:9008"
+
+poll_interval_ms        = 2000
+retry_base_ms           = 500
+retry_cap_ms            = 30000
+backfill_pages_per_sec  = 2

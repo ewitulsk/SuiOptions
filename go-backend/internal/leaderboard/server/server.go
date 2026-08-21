@@ -8,6 +8,7 @@ import (
 	"github.com/ewitulsk/SuiOptions/go-backend/internal/leaderboard/api_internal"
 	"github.com/ewitulsk/SuiOptions/go-backend/internal/leaderboard/api_public"
 	"github.com/ewitulsk/SuiOptions/go-backend/internal/leaderboard/service"
+	"github.com/ewitulsk/SuiOptions/go-backend/internal/platform/cors"
 	"github.com/ewitulsk/SuiOptions/go-backend/internal/platform/obs"
 )
 
@@ -18,12 +19,13 @@ type Config struct {
 	InternalBindAddr string `toml:"internal_bind_addr"`
 }
 
-// NewPublic builds the :9021 mux (read-only + health/metrics).
-func NewPublic(svc *service.Service) *http.ServeMux {
+// NewPublic builds the :9021 handler (read-only + health/metrics, CORS'd —
+// the browser fetches this cross-origin from the Vercel frontend).
+func NewPublic(svc *service.Service) http.Handler {
 	mux := http.NewServeMux()
 	api_public.Mount(mux, svc)
 	obs.MountHealthAndMetrics(mux)
-	return mux
+	return cors.Wrap(mux)
 }
 
 // NewInternal builds the :9022 mux (internal writes + health/metrics).

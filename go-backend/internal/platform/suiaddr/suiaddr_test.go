@@ -34,15 +34,15 @@ func TestValidHex(t *testing.T) {
 
 func TestCanonicalType(t *testing.T) {
 	long := "0x" + hex64 + "::settlement::FillEvent"
-	generic := "0xAB::settlement::FillEvent<0x2::sui::SUI>"
+	shortPadded := "0x00000000000000000000000000000000000000000000000000000000000000ab::settlement::FillEvent"
 
 	if CanonicalType(long) != long {
 		t.Fatalf("CanonicalType(long) = %q", CanonicalType(long))
 	}
-	if got := CanonicalType("0xAB::settlement::FillEvent"); got != long {
+	if got := CanonicalType("0xAB::settlement::FillEvent"); got != shortPadded {
 		t.Fatalf("short pkg not padded: %q", got)
 	}
-	if got := CanonicalType(generic); got != long {
+	if got := CanonicalType("0xAB::settlement::FillEvent<0x2::sui::SUI>"); got != shortPadded {
 		t.Fatalf("generics not stripped: %q", got)
 	}
 }

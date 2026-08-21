@@ -1,0 +1,20 @@
+# event-ingestor config (local dev).
+#
+# Admin API (9023, JWT-gated via auth-service /verify) + internal
+# health/metrics (9024, never proxied).
+
+environment        = "dev"
+
+database_url       = "postgresql://postgres:postgres@localhost:7654/event_ingestor_dev"
+
+admin_bind_addr    = "127.0.0.1:9023"
+internal_bind_addr = "127.0.0.1:9024"
+
+sui_graphql_url    = "https://graphql.testnet.sui.io/graphql"
+leaderboard_url    = "http://127.0.0.1:9022"
+auth_service_url   = "http://127.0.0.1:9008"
+
+poll_interval_ms        = 2000
+retry_base_ms           = 500
+retry_cap_ms            = 30000
+backfill_pages_per_sec  = 2

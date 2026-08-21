@@ -72,12 +72,13 @@ func (w *Worker) backfillRule(ctx context.Context, rule *store.Rule) error {
 	if err := w.st.SetBackfillRunning(ctx, rule.ID); err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
-	log.Printf("backfill: rule %d (%s) starting from %s", rule.ID, rule.EventType, rule.BackfillCursor)
-
 	var before *string
+	resumeFrom := "tip"
 	if rule.BackfillCursor != nil {
 		before = rule.BackfillCursor
+		resumeFrom = *rule.BackfillCursor
 	}
+	log.Printf("backfill: rule %d (%s) starting from %s", rule.ID, rule.EventType, resumeFrom)
 
 	for {
 		select {

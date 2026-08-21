@@ -5,6 +5,8 @@
 -- touching the points ledger. merged_into is audit-only — a merge repoints
 -- every row so queries never chase chains.
 
+-- +goose Up
+
 CREATE TABLE accounts (
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),

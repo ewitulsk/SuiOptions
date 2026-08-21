@@ -12,8 +12,8 @@ import (
 	"io/fs"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
 	"github.com/pressly/goose/v3"
 )
 
@@ -50,16 +50,20 @@ func migrate(databaseURL string, migrationsFS fs.FS, dir string) error {
 	}
 	defer sqlDB.Close()
 
-	g, err := goose.NewProvider(goose.DialectPostgres, sqlDB, migrationsFS)
+	// The provider wants an FS rooted at the migration files themselves.
+	sub, err := fs.Sub(migrationsFS, dir)
+	if err != nil {
+		return fmt.Errorf("db: migrations sub-fs: %w", err)
+	}
+	g, err := goose.NewProvider(goose.DialectPostgres, sqlDB, sub)
 	if err != nil {
 		return fmt.Errorf("db: goose provider: %w", err)
 	}
-	g.SetVerbose(false)
-	// Goose takes its own advisory lock per version, so two instances booting
-	// at once serialize rather than race.
+	// The provider serializes concurrent boots via its version table, so two
+	// instances migrating at once apply each migration exactly once.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if _, err := g.UpContext(ctx, dir); err != nil {
+	if _, err := g.Up(ctx); err != nil {
 		return fmt.Errorf("db: migrate: %w", err)
 	}
 	return nil

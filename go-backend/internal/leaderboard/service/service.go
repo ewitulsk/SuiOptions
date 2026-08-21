@@ -76,6 +76,9 @@ type Service struct {
 
 func New(st *store.Store) *Service { return &Service{store: st} }
 
+// Store exposes the read side for the public API handlers.
+func (s *Service) Store() *store.Store { return s.store }
+
 // AddPoints normalizes the identity and applies one points write. Duplicate
 // idempotency keys report applied=false (idempotent success). A negative
 // delta is a removal.
