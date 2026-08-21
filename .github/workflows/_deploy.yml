@@ -210,7 +210,11 @@ jobs:
           ECR: ${{ env.ECR_REGISTRY }}
           IMAGE_TAG: ${{ needs.affected.outputs.tag }}
         working-directory: rust-backend
-        run: docker buildx bake -f deployment/bake.hcl --push ${{ matrix.service }}
+        # --allow=fs.read=../go-backend: the go-backend targets' build context
+        # lives outside this working directory, which newer buildx gates
+        # behind an explicit filesystem entitlement. Harmlessly unused for the
+        # Rust targets (context ".").
+        run: docker buildx bake -f deployment/bake.hcl --allow=fs.read=../go-backend --push ${{ matrix.service }}
 
   deploy:
     needs: [affected, build]
