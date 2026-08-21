@@ -58,6 +58,19 @@ pub struct Secrets {
     pub pyth: PythSecrets,
     #[serde(default)]
     pub solana: SolanaSecrets,
+    #[serde(default)]
+    pub dakota: DakotaSecrets,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DakotaSecrets {
+    /// Dakota platform API key, sent as `x-api-key` on every request. Minted in
+    /// the Dakota dashboard and shown exactly once.
+    pub api_key: Option<String>,
+    /// PEM-encoded ECDSA P-256 private key used to sign wallet intents
+    /// (`EndorsedRequest`). Its public half is registered with Dakota as an
+    /// `ES256` signer; Dakota never sees this side.
+    pub wallet_p256_pem: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -205,6 +218,23 @@ impl Secrets {
             .jwt_secret
             .as_deref()
             .ok_or_else(|| anyhow!("secrets.toml is missing auth.jwt_secret"))
+    }
+
+    /// Dakota platform API key. Required — dakota-service can do nothing
+    /// without it, so a missing key is a startup failure rather than a
+    /// degraded mode.
+    pub fn dakota_api_key(&self) -> Result<&str> {
+        self.dakota
+            .api_key
+            .as_deref()
+            .ok_or_else(|| anyhow!("secrets.toml is missing dakota.api_key"))
+    }
+
+    /// P-256 signing key for Dakota wallet intents. Optional: the treasury is
+    /// one feature of dakota-service, and the rest of the service works
+    /// without it.
+    pub fn dakota_wallet_p256_pem(&self) -> Option<&str> {
+        self.dakota.wallet_p256_pem.as_deref()
     }
 
     /// Pyth API key if present. Unlike the signing keys this is optional —

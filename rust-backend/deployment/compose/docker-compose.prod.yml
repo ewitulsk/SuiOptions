@@ -172,6 +172,13 @@ services:
   # render-secrets.sh skips an absent secret silently and the container would
   # crash-loop on the missing /run/secrets/cctp-relay.toml.
 
+  # NOTE: dakota-service is deliberately NOT declared in prod either, and this
+  # one is by design rather than by circumstance: it integrates Dakota's
+  # SANDBOX (testnet custody, mocked banking, a $2 per-transaction cap), so
+  # there is nothing here it could usefully do. It ships with no
+  # config.prod.toml at all — the image would exit on a missing config file
+  # even if something did try to start it.
+
   # Gas station. Sponsors user transactions by paying their gas. Public port
   # (9009, proxied by nginx). Reads the sponsor key from /run/secrets.
   gas-station:

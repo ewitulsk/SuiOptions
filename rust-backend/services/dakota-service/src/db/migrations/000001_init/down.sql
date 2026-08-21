@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS webhook_errors;
+DROP TABLE IF EXISTS wallets;
+DROP TABLE IF EXISTS ledger_events;
+DROP TABLE IF EXISTS accounts;
+DROP TABLE IF EXISTS customers;
+DROP TABLE IF EXISTS fee_schedule;
+DROP TABLE IF EXISTS assets;

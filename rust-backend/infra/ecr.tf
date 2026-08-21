@@ -8,7 +8,10 @@ locals {
   # retired. Removing it here destroys the repo on apply — if it still holds
   # images, run `terraform state rm 'aws_ecr_repository.svc["derived-metric-worker"]'`
   # and delete the repo by hand (or set force_delete) to avoid a destroy error.
-  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "twitter-service", "social-bot"]
+  # dakota-service deploys only to staging, but it still needs a repo here:
+  # the image is built and pushed by the shared workflow regardless of which
+  # env consumes it, and a missing repo fails the push with a 403.
+  service_repos = ["indexer", "quoting-service", "mm-bot", "option-scheduler", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "balance-monitor", "keeper", "oracle-service", "cctp-relay", "dakota-service", "twitter-service", "social-bot"]
 }
 
 resource "aws_ecr_repository" "svc" {

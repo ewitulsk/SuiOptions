@@ -1,0 +1,49 @@
+# dakota-service — staging.
+#
+# STAGING ONLY. This service is declared in docker-compose.staging.yml and
+# deliberately absent from docker-compose.prod.yml; deploy.sh filters the
+# requested set against the env's compose file, so leaving it out is what keeps
+# it from ever being planned into prod. Do not add a config.prod.toml.
+#
+# Points at the Dakota SANDBOX, which runs real crypto custody on testnets and
+# mocks the banking rails.
+
+environment = "staging"
+bind_addr   = "0.0.0.0:9019"
+
+database_url = "postgresql://dakota_staging:${DB_PASSWORD}@${DB_HOST}:5432/dakota_staging"
+db_pool_size = 4
+
+allowed_origins = ["*"]
+
+[dakota]
+base_url = "https://api.platform.sandbox.dakota.xyz"
+
+# Ed25519 key Dakota signs webhook deliveries with. SANDBOX value — the
+# production key differs, and the wrong one rejects every delivery.
+webhook_public_key = "7a2f771f3a7ac9ae2a95066df35dc0261d7ce354214736cc232d70b3c66f8a5f"
+
+# Where Dakota should deliver. Registered on demand via
+# POST /admin/webhooks/register, not at boot.
+webhook_url = "https://sui-options.com/staging/dakota/webhooks/dakota"
+
+# Sandbox refuses anything over $2.00; matching it here turns a confusing
+# downstream 400 into a local message. Raising this does NOT lift Dakota's cap.
+max_amount_minor = 200
+
+# Testnets only. The sandbox lists mainnet ids in /capabilities/networks and
+# then rejects them on every object-create call, so the intersection is the
+# honest offering — and this stops a mainnet id ever leaving the box.
+allowed_networks = [
+  "ethereum-sepolia",
+  "base-sepolia",
+  "arbitrum-sepolia",
+  "optimism-sepolia",
+  "polygon-amoy",
+  "solana-devnet",
+]
+
+[auth]
+# auth-service's INTERNAL port — never proxied by nginx.
+internal_url    = "http://auth-service:9008"
+invite_ttl_secs = 604800
