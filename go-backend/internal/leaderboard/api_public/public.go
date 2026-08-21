@@ -88,6 +88,10 @@ func (a *API) getLeaderboard(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 500, err.Error())
 		return
 	}
+	if entries == nil {
+		// Empty result must marshal as [], not null — clients index into it.
+		entries = []store.Entry{}
+	}
 	writeJSON(w, http.StatusOK, leaderboardResp{
 		Window:        window,
 		Source:        source,
@@ -200,6 +204,9 @@ func (a *API) getBreakdown(w http.ResponseWriter, r *http.Request) {
 		errorJSON(w, 500, err.Error())
 		return
 	}
+	if rows == nil {
+		rows = []store.BreakdownRow{}
+	}
 	writeJSON(w, http.StatusOK, breakdownResp{AccountID: accountID, Total: total, BySource: rows})
 }
 
@@ -212,6 +219,9 @@ func (a *API) getSources(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		errorJSON(w, 500, err.Error())
 		return
+	}
+	if rows == nil {
+		rows = []store.SourceRow{}
 	}
 	writeJSON(w, http.StatusOK, sourcesResp{Sources: rows})
 }
