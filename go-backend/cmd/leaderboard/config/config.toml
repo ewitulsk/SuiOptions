@@ -1,0 +1,12 @@
+# leaderboard config (local dev).
+#
+# Public read API (9021, nginx-proxied in deployed envs) + internal write
+# API (9022, never proxied). Local dev binds loopback and talks to the
+# local Postgres.
+
+environment        = "dev"
+
+database_url       = "postgresql://postgres:postgres@localhost:7654/leaderboard_dev"
+
+public_bind_addr   = "127.0.0.1:9021"
+internal_bind_addr = "127.0.0.1:9022"
