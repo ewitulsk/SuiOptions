@@ -1,10 +1,10 @@
 //! auth-service.
 //!
-//! Issues short-lived admin JWTs to wallets on a hardcoded allowlist, after a
-//! Sui signature challenge-response. It is the single holder of the JWT
-//! signing secret: other services gate endpoints by calling the internal
-//! `/verify` route (via `auth-client`) rather than verifying tokens
-//! themselves.
+//! Issues short-lived admin JWTs after a Sui signature challenge-response,
+//! to wallets on a config allowlist OR currently holding the on-chain core
+//! `admin::AdminCap` (SO-422). It is the single holder of the JWT signing
+//! secret: other services gate endpoints by calling the internal `/verify`
+//! route (via `auth-client`) rather than verifying tokens themselves.
 //!
 //! Two routers on two ports:
 //! - public (proxied by nginx): `GET /challenge`, `POST /login`,
@@ -12,6 +12,7 @@
 //! - internal (network-isolated): `POST /verify`.
 
 pub mod allowlist;
+pub mod capcheck;
 pub mod challenge;
 pub mod config;
 pub mod handlers;

@@ -8,9 +8,14 @@ internal_bind_addr = "0.0.0.0:9008"
 allowed_origins    = ["*"]
 
 # Wallets allowed to obtain an admin JWT. Case/padding-insensitive. The seed
-# entry is the protocol deployer (AdminCap holder) from deployments.json —
-# replace / extend with the real admin wallet addresses.
+# entry is the protocol deployer from deployments.json. Any wallet currently
+# holding the on-chain core admin::AdminCap is ALSO allowed (SO-422) — this
+# list is the fallback that keeps working when token-info / GraphQL are down.
 admin_addresses    = ["0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"]
+
+# On-chain AdminCap login fallback (SO-422).
+token_info_url     = "http://token-info:9005"
+sui_graphql_url    = "https://graphql.testnet.sui.io/graphql"
 
 token_ttl_secs     = 3600
 refresh_max_secs   = 86400

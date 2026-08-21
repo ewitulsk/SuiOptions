@@ -23,10 +23,20 @@ pub struct Config {
     pub allowed_origins: Vec<String>,
 
     /// Admin allowlist: Sui addresses permitted to obtain a JWT. `0x`-prefixed;
-    /// case/padding-insensitive (normalized before comparison). Membership is
-    /// the only authorization check.
+    /// case/padding-insensitive (normalized before comparison).
     #[serde(default)]
     pub admin_addresses: Vec<String>,
+
+    /// token-info public base URL, for resolving the core package id behind
+    /// the on-chain AdminCap login fallback (SO-422). Both this and
+    /// `sui_graphql_url` must be set for the fallback to be active; unset
+    /// (dev default) means the static list is the only check.
+    #[serde(default)]
+    pub token_info_url: Option<String>,
+
+    /// Sui GraphQL endpoint for the owned-AdminCap ownership query (SO-422).
+    #[serde(default)]
+    pub sui_graphql_url: Option<String>,
 
     /// Issued-JWT lifetime, seconds. Default 1h.
     #[serde(default = "default_token_ttl")]

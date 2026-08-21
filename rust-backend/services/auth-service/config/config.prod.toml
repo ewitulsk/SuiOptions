@@ -8,8 +8,13 @@ internal_bind_addr = "0.0.0.0:9008"
 allowed_origins    = ["*"]
 
 # Wallets allowed to obtain an admin JWT. Case/padding-insensitive. Replace
-# with the real mainnet admin wallet address(es) before going live.
+# with the real mainnet admin wallet address(es) before going live. Any wallet
+# currently holding the on-chain core admin::AdminCap is ALSO allowed (SO-422).
 admin_addresses    = ["0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"]
+
+# On-chain AdminCap login fallback (SO-422). prod is a testnet deployment.
+token_info_url     = "http://token-info:9005"
+sui_graphql_url    = "https://graphql.testnet.sui.io/graphql"
 
 token_ttl_secs     = 3600
 refresh_max_secs   = 86400

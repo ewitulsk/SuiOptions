@@ -26,13 +26,26 @@ async fn main() -> Result<()> {
         refresh_max_secs = cfg.refresh_max_secs,
         "auth-service starting"
     );
-    if cfg.admin_addresses.is_empty() {
-        tracing::warn!("admin_addresses is empty — no wallet will be able to log in");
+    // On-chain AdminCap fallback (SO-422): active only when both endpoints
+    // are configured. Lazy — no boot-time dependency on token-info.
+    let cap_check = match (&cfg.token_info_url, &cfg.sui_graphql_url) {
+        (Some(ti), Some(gql)) => {
+            info!(token_info = %ti, graphql = %gql, "AdminCap login fallback enabled");
+            Some(auth_service::capcheck::CapCheck::new(ti, gql))
+        }
+        _ => {
+            info!("AdminCap login fallback disabled (token_info_url / sui_graphql_url unset)");
+            None
+        }
+    };
+    if cfg.admin_addresses.is_empty() && cap_check.is_none() {
+        tracing::warn!("admin_addresses is empty and cap check disabled — no wallet will be able to log in");
     }
 
     let state = Arc::new(AppState::new(
         jwt_secret,
         cfg.admin_addresses.clone(),
+        cap_check,
         cfg.challenge_ttl_secs,
         cfg.token_ttl_secs,
         cfg.refresh_max_secs,
