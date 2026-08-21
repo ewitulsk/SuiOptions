@@ -47,6 +47,11 @@ on:
         required: false
         type: string
         default: ''
+      exclude_services:
+        description: 'JSON array of service names to drop from whatever set was selected (after force_all/only_services/affected resolution). Used by redeploy-contract to keep the go-backend services (leaderboard, event-ingestor) out of contract rollouts — their DBs and rollout cadence are independent of the Move package.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -140,6 +145,7 @@ jobs:
           FORCE_ALL: ${{ inputs.force_all }}
           OVERRIDE_TAG: ${{ inputs.image_tag }}
           ONLY_SERVICES: ${{ inputs.only_services }}
+          EXCLUDE_SERVICES: ${{ inputs.exclude_services }}
           CHANGED_FILES: ${{ steps.changed.outputs.all_changed_files }}
         run: |
           if [ -n "$ONLY_SERVICES" ]; then
@@ -159,11 +165,16 @@ jobs:
             # twitter-service + social-bot are temporarily out of the rollable
             # set (PR #280 strip), and price-charting until its Tiger Data
             # tsdb is resumed — see the docker-compose.staging.yml notes.
-            services='["indexer","quoting-service","mm-bot","api-service","token-info","auth-service","gas-station","hedge-signer","market-sim","balance-monitor","keeper","oracle-service","cctp-relay","orderbook","staging-mm-bot"]'
+            services='["indexer","quoting-service","mm-bot","api-service","token-info","auth-service","gas-station","hedge-signer","market-sim","balance-monitor","keeper","oracle-service","cctp-relay","orderbook","staging-mm-bot","leaderboard","event-ingestor"]'
             echo "force_all or image_tag override → rolling all services"
           else
             services=$(printf '%s\n' "$CHANGED_FILES" \
               | python3 rust-backend/deployment/affected.py)
+          fi
+          if [ -n "$EXCLUDE_SERVICES" ]; then
+            services=$(echo "$services" \
+              | jq -c --argjson ex "$EXCLUDE_SERVICES" 'map(select(. as $s | $ex | index($s) | not))')
+            echo "after exclude_services $EXCLUDE_SERVICES → $services"
           fi
           echo "services=$services" >> "$GITHUB_OUTPUT"
           echo "affected services: $services"

@@ -730,6 +730,10 @@ jobs:
     with:
       envs: ${{ format('["{0}"]', inputs.environment) }}
       force_all: true
+      # The go-backend services don't touch the Move package or
+      # deployments.json — a contract redeploy must neither wipe nor roll
+      # them (redeploy-leaderboard.yml owns their reset).
+      exclude_services: '["leaderboard","event-ingestor"]'
       ref: ${{ needs.publish.outputs.new_sha }}
 
   # latest / latest-build-token-info (pass 1): skip all builds and roll every
@@ -744,6 +748,9 @@ jobs:
     with:
       envs: ${{ format('["{0}"]', inputs.environment) }}
       image_tag: ${{ needs.publish.outputs.latest_tag }}
+      # Contract redeploys never touch the go-backend services (see
+      # deploy-rebuild-all above).
+      exclude_services: '["leaderboard","event-ingestor"]'
       ref: ${{ needs.publish.outputs.new_sha }}
 
   # latest-build-token-info (pass 2): after the latest-image roll, rebuild +

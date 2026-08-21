@@ -1,0 +1,67 @@
+name: Go CI
+
+# Build + test the go-backend/ monorepo (leaderboard + event-ingestor) on
+# every change. gofmt is a hard gate; the store integration tests run
+# against the postgres service container via TEST_DATABASE_URL (they
+# self-skip when the variable is unset, so `go test ./...` also works on a
+# bare laptop).
+
+on:
+  push:
+    branches: [staging, main]
+    paths:
+      - 'go-backend/**'
+      - '.github/workflows/go-ci.yml'
+  pull_request:
+    paths:
+      - 'go-backend/**'
+      - '.github/workflows/go-ci.yml'
+
+concurrency:
+  group: go-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go-backend
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go-backend/go.mod
+          cache-dependency-path: go-backend/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: go test ./...

@@ -37,6 +37,8 @@ on:
           - oracle-service
           - orderbook
           - staging-mm-bot
+          - leaderboard
+          - event-ingestor
           - nginx
 
 permissions:

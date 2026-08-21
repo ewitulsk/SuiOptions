@@ -169,6 +169,26 @@ target "market-sim" {
   cache-to   = [{ type = "gha", mode = "max", scope = "market-sim" }]
 }
 
+# Go services build out of go-backend/ — they do NOT inherit _common
+# (bake runs with working-directory: rust-backend, so the context walks up).
+target "leaderboard" {
+  context    = "../go-backend"
+  platforms  = ["linux/amd64"]
+  dockerfile = "Dockerfile.leaderboard"
+  tags       = ["${ECR}/options/leaderboard:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "leaderboard" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "leaderboard" }]
+}
+
+target "event-ingestor" {
+  context    = "../go-backend"
+  platforms  = ["linux/amd64"]
+  dockerfile = "Dockerfile.event-ingestor"
+  tags       = ["${ECR}/options/event-ingestor:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "event-ingestor" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "event-ingestor" }]
+}
+
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot"]
+  targets = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot", "leaderboard", "event-ingestor"]
 }

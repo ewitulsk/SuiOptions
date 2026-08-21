@@ -58,8 +58,10 @@ case "$SERVICE" in
   scheduler)       DB_PREFIX=scheduler ;;
   token-info)      DB_PREFIX=token_info ;;
   orderbook)       DB_PREFIX=orderbook ;;
+  leaderboard)     DB_PREFIX=leaderboard ;;
+  event-ingestor)  DB_PREFIX=event_ingestor ;;
   *)
-    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info|orderbook)"
+    echo "FATAL: unknown service '$SERVICE' (expected indexer|scheduler|token-info|orderbook|leaderboard|event-ingestor)"
     exit 1
     ;;
 esac

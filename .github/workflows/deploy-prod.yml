@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      go_backend_only:
+        description: 'Roll ONLY the go-backend services (leaderboard + event-ingestor) — no Rust builds at all.'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write   # _deploy.yml advances the `deployed-prod` marker tag
@@ -29,3 +34,4 @@ jobs:
       envs: '["prod"]'
       image_tag: ${{ inputs.image_tag || '' }}
       force_all: ${{ inputs.force_all == true }}
+      only_services: ${{ inputs.go_backend_only == true && '["leaderboard","event-ingestor"]' || '' }}

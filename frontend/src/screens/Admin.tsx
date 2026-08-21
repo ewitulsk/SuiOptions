@@ -19,6 +19,7 @@ import { useSubmitTransaction } from "../tx/submit";
 
 import { Toast } from "../components/Toast";
 import { TokenManager } from "../components/TokenManager";
+import { EventIngestorManager } from "../components/EventIngestorManager";
 import { useBuckets } from "../api/useBuckets";
 import { useAdminCap } from "../api/useAdminCap";
 import { allMembers, domainsOf, useWhitelist } from "../api/useWhitelist";
@@ -330,6 +331,9 @@ export function Admin() {
 
         {/* ── Supported tokens (token-info) ───────────────────────── */}
         <TokenManager flash={flash} />
+
+        {/* ── Event ingestor (leaderboard points pipeline) ────────── */}
+        <EventIngestorManager flash={flash} />
       </div>
 
       {toast && <Toast message={toast} />}

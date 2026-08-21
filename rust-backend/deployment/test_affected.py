@@ -84,10 +84,13 @@ class TestServiceRoster(unittest.TestCase):
         self.assertEqual(affected.ALL_SERVICES, m.group(1).split())
 
     def test_service_globs_covers_exactly_all_services(self):
-        self.assertEqual(sorted(affected.SERVICE_GLOBS), sorted(affected.ALL_SERVICES))
+        watched = sorted([*affected.SERVICE_GLOBS, *affected.GO_SERVICE_GLOBS])
+        self.assertEqual(watched, sorted(affected.ALL_SERVICES))
 
-    def test_every_service_has_a_manifest(self):
-        for svc in affected.ALL_SERVICES:
+    def test_every_rust_service_has_a_manifest(self):
+        # Go services live in go-backend/ (single module, no Cargo.toml);
+        # only the Rust roster is manifest-backed.
+        for svc in affected.SERVICE_GLOBS:
             with self.subTest(service=svc):
                 self.assertTrue((RUST / "services" / svc / "Cargo.toml").is_file())
 
@@ -119,7 +122,7 @@ class TestDerivedCrateCoverage(unittest.TestCase):
         cls.derived = affected.crate_globs()
 
     def test_matches_independent_transitive_resolution(self):
-        for svc in affected.ALL_SERVICES:
+        for svc in affected.SERVICE_GLOBS:
             with self.subTest(service=svc):
                 expected = {
                     f"rust-backend/crates/{c}/**" for c in _resolve_transitively(svc)
@@ -188,8 +191,36 @@ class TestRegressionPins(unittest.TestCase):
 
 def _dependents_of(crate: str) -> set[str]:
     return {
-        svc for svc in affected.ALL_SERVICES if crate in _resolve_transitively(svc)
+        svc for svc in affected.SERVICE_GLOBS if crate in _resolve_transitively(svc)
     }
+
+
+class TestGoServices(unittest.TestCase):
+    """go-backend/ is one Go module: any change rebuilds both Go services."""
+
+    def test_go_change_selects_exactly_the_go_services(self):
+        got = affected.affected_services(
+            ["go-backend/internal/leaderboard/store/store.go"]
+        )
+        self.assertEqual(got, ["event-ingestor", "leaderboard"])
+
+    def test_go_dockerfile_change_selects_the_go_services(self):
+        got = affected.affected_services(["go-backend/Dockerfile.leaderboard"])
+        self.assertEqual(got, ["event-ingestor", "leaderboard"])
+
+    def test_rust_crate_change_does_not_select_go_services(self):
+        got = affected.affected_services(
+            ["rust-backend/crates/indexer-graphql/src/lib.rs"]
+        )
+        self.assertNotIn("leaderboard", got)
+        self.assertNotIn("event-ingestor", got)
+
+    def test_go_dockerfiles_exist(self):
+        for svc in affected.GO_SERVICE_GLOBS:
+            with self.subTest(service=svc):
+                self.assertTrue(
+                    (REPO_ROOT / "go-backend" / f"Dockerfile.{svc}").is_file()
+                )
 
 
 class TestOutputContract(unittest.TestCase):

@@ -2776,3 +2776,119 @@ html[data-mode="dark"] [data-theme="aqua"] .moneyness__track {
 [data-theme="aqua"] .ana-legend__time {
   margin-left: auto; font-family: "JetBrains Mono", monospace; font-size: 11px;
 }
+
+/* ============================================================
+   LEADERBOARD (points tab). One block: controls row, wallet
+   search, pinned position card, table accents, per-source
+   breakdown, pager. Tables reuse .vault-table (+ --cards on
+   mobile); loading/empty/error reuse WaveLoader / .dash-empty /
+   .dash-alert; the admin section reuses the admin-* classes.
+   ============================================================ */
+[data-theme="aqua"] .lb-controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
+  margin: 0 0 20px;
+}
+/* Select + search input follow the admin-field__input recipe. */
+[data-theme="aqua"] .lb-select {
+  font-family: inherit; font-size: 13px; color: var(--aqua-ink-1);
+  background: var(--aqua-solid-surface);
+  border: 1px solid var(--aqua-line); border-radius: 9px;
+  padding: 9px 11px; outline: none; cursor: pointer;
+}
+[data-theme="aqua"] .lb-select:focus { border-color: var(--aqua-sui); }
+[data-theme="aqua"] .lb-search { position: relative; flex: 1 1 220px; max-width: 340px; }
+[data-theme="aqua"] .lb-search__input {
+  font-family: inherit; font-size: 13px; color: var(--aqua-ink-1);
+  background: var(--aqua-solid-surface);
+  border: 1px solid var(--aqua-line); border-radius: 9px;
+  padding: 9px 30px 9px 11px; outline: none; width: 100%;
+}
+[data-theme="aqua"] .lb-search__input:focus { border-color: var(--aqua-sui); }
+[data-theme="aqua"] .lb-search__clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  border: none; background: none; padding: 4px 8px; cursor: pointer;
+  font-size: 15px; line-height: 1; color: var(--aqua-ink-3);
+}
+[data-theme="aqua"] .lb-search__clear:hover { color: var(--aqua-ink-1); }
+[data-theme="aqua"] .lb-hint { font-size: 13px; color: var(--aqua-ink-3); margin: 0 0 16px; }
+[data-theme="aqua"] .lb-loading { display: flex; justify-content: center; padding: 48px 0; }
+
+/* Pinned position card — vault-card look. */
+[data-theme="aqua"] .lb-pos {
+  border: 1px solid var(--aqua-line); background: var(--aqua-glass);
+  border-radius: 14px; padding: 16px; margin: 0 0 16px;
+}
+[data-theme="aqua"] .lb-pos__head {
+  font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--aqua-ink-2);
+  display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-weight: 600;
+}
+[data-theme="aqua"] .lb-pos__hint { font-size: 13px; color: var(--aqua-ink-3); }
+[data-theme="aqua"] .lb-pos__stats {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 14px;
+  font-variant-numeric: tabular-nums;
+}
+[data-theme="aqua"] .lb-pos__rank {
+  font-family: "Sora", system-ui, sans-serif; font-size: 32px; font-weight: 700;
+  color: var(--aqua-ink-1);
+}
+[data-theme="aqua"] .lb-pos__points { font-size: 16px; color: var(--aqua-ink-1); }
+[data-theme="aqua"] .lb-pos__pct {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--aqua-sui); background: rgba(77,162,255,0.12);
+  border-radius: 999px; padding: 3px 9px;
+}
+[data-theme="aqua"] .lb-pos__sub { font-size: 11px; color: var(--aqua-ink-3); font-weight: 400; }
+[data-theme="aqua"] .lb-pos__neighbors {
+  margin-top: 12px; border-top: 1px solid var(--aqua-line);
+  font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+[data-theme="aqua"] .lb-pos__neighbor {
+  display: grid; grid-template-columns: 56px 1fr auto; gap: 8px;
+  padding: 6px 4px; border-bottom: 1px solid var(--aqua-line);
+  color: var(--aqua-ink-2);
+}
+[data-theme="aqua"] .lb-pos__neighbor:last-child { border-bottom: none; }
+
+/* "You" highlight — used in the neighbors mini-table and the main table. */
+[data-theme="aqua"] .lb-row--you {
+  background: rgba(77,162,255,0.10); border-radius: 8px;
+}
+[data-theme="aqua"] .lb-rank--top { color: var(--aqua-sui); font-weight: 700; }
+[data-theme="aqua"] .lb-cell__sub { color: var(--aqua-ink-3); font-size: 11px; }
+
+/* Expanded per-source breakdown under a table row. */
+[data-theme="aqua"] .lb-breakdown {
+  padding: 8px 4px 12px; border-bottom: 1px solid var(--aqua-line);
+  font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+[data-theme="aqua"] .lb-breakdown--note { color: var(--aqua-ink-3); }
+[data-theme="aqua"] .lb-breakdown__row {
+  display: grid; grid-template-columns: 1.6fr 1fr 1fr auto; gap: 8px;
+  padding: 4px 0; color: var(--aqua-ink-2);
+}
+[data-theme="aqua"] .lb-breakdown__row > span:nth-child(2),
+[data-theme="aqua"] .lb-breakdown__row > span:nth-child(3) { color: var(--aqua-ink-3); }
+[data-theme="aqua"] .lb-breakdown__total {
+  border-top: 1px solid var(--aqua-line); margin-top: 4px; padding-top: 6px;
+  font-weight: 600; color: var(--aqua-ink-1);
+}
+
+/* Pager. */
+[data-theme="aqua"] .lb-pager {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 12px 0 2px;
+}
+[data-theme="aqua"] .lb-pager__info { font-size: 12px; color: var(--aqua-ink-3); }
+[data-theme="aqua"] .lb-pager__btn {
+  font: inherit; font-size: 12.5px; font-weight: 500; color: var(--aqua-ink-1);
+  background: var(--aqua-glass); border: 1px solid var(--aqua-line);
+  padding: 7px 14px; border-radius: 999px; cursor: pointer;
+}
+[data-theme="aqua"] .lb-pager__btn:hover:not(:disabled) { background: rgba(77,162,255,0.10); }
+[data-theme="aqua"] .lb-pager__btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+@media (max-width: 640px) {
+  /* The breakdown grid squashes on phones — stack each source's cells. */
+  [data-theme="aqua"] .lb-breakdown__row { grid-template-columns: 1fr auto; }
+  [data-theme="aqua"] .lb-breakdown__row > span:nth-child(3) { display: none; }
+}

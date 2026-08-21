@@ -37,6 +37,10 @@ scrape_configs:
         labels: { env: staging, service: oracle-service }
       - targets: ["cctp-relay:9015"] # bridge relay; cctp_bridge_duration_seconds lives here
         labels: { env: staging, service: cctp-relay }
+      - targets: ["leaderboard:9022"] # internal port; /metrics is never public
+        labels: { env: staging, service: leaderboard }
+      - targets: ["event-ingestor:9024"] # internal port; poll lag + delivery counters
+        labels: { env: staging, service: event-ingestor }
 
   # data-room-host is a separate EC2 instance in the same VPC, not on
   # options-staging_net, so it is scraped by private IP rather than by

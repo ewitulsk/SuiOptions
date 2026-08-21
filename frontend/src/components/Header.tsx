@@ -323,6 +323,12 @@ export function Header() {
         >
           Analytics
         </button>
+        <button
+          className={pathname === "/leaderboard" ? "is-active" : ""}
+          onClick={() => navigate("/leaderboard")}
+        >
+          Leaderboard
+        </button>
         {ENV === "testnet" && (
           <button
             className={pathname === "/faucet" ? "is-active" : ""}

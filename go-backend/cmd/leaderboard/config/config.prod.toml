@@ -1,0 +1,9 @@
+# leaderboard config — prod env (testnet).
+
+environment        = "prod"
+
+# DB_PASSWORD + DB_HOST are injected by compose from the deploy env.
+database_url       = "postgresql://leaderboard_prod:${DB_PASSWORD}@${DB_HOST}:5432/leaderboard_prod"
+
+public_bind_addr   = "0.0.0.0:9021"
+internal_bind_addr = "0.0.0.0:9022"

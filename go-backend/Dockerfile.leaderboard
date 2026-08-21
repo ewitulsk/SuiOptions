@@ -1,0 +1,24 @@
+# Multi-stage build for leaderboard (go-backend).
+#
+# Static Go binary (CGO off) on a bookworm-slim runtime — kept debian (not
+# scratch) so the compose curl healthcheck and ca-certificates exist, same
+# runtime family as every other service image.
+FROM golang:1.24-bookworm AS builder
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/leaderboard ./cmd/leaderboard
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /out/leaderboard /usr/local/bin/leaderboard
+COPY cmd/leaderboard/config/ /app/config/
+
+ENV APP_ENV=staging
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/leaderboard \
+  --config /app/config/config.${APP_ENV}.toml"]

@@ -36,6 +36,8 @@ on:
           - indexer
           - token-info
           - orderbook
+          - leaderboard
+          - event-ingestor
       environment:
         description: 'Target environment'
         required: true
@@ -95,6 +97,8 @@ jobs:
             indexer)         echo "compose_svc=indexer"               >> "$GITHUB_OUTPUT" ;;
             token-info)      echo "compose_svc=token-info"            >> "$GITHUB_OUTPUT" ;;
             orderbook)       echo "compose_svc=orderbook"             >> "$GITHUB_OUTPUT" ;;
+            leaderboard)     echo "compose_svc=leaderboard"           >> "$GITHUB_OUTPUT" ;;
+            event-ingestor)  echo "compose_svc=event-ingestor"        >> "$GITHUB_OUTPUT" ;;
             *)
               echo "::error::Invalid service '$SERVICE'"
               exit 1
