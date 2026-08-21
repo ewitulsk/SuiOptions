@@ -16,6 +16,10 @@ runtime-config = { workspace = true }
 observability  = { workspace = true, features = ["axum"] }
 cli-spec       = { workspace = true }
 protocol-types = { workspace = true }
+# On-chain AdminCap login fallback (SO-422): package id via token-info,
+# ownership via a Sui GraphQL owned-objects query.
+token-info-client = { workspace = true }
+reqwest = { workspace = true }
 
 config = { version = "0.14", features = ["toml"] }
 clap = { workspace = true }

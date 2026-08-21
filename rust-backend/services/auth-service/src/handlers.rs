@@ -97,8 +97,22 @@ async fn login_inner(
         .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
 
     if !allowlist::is_allowed(&state.admin_addresses, &address) {
-        warn!(%address, "login rejected: not on allowlist");
-        return Err((StatusCode::FORBIDDEN, "address not on admin allowlist".into()));
+        // Not on the static list — fall back to on-chain AdminCap ownership
+        // (SO-422). Any failure on this path (token-info down, GraphQL down)
+        // is a plain rejection: never fail open.
+        let holds_cap = match &state.cap_check {
+            Some(check) => check.holds_admin_cap(&address).await.unwrap_or_else(|e| {
+                warn!(%address, error = %e, "AdminCap check failed; treating as not held");
+                false
+            }),
+            None => false,
+        };
+        if !holds_cap {
+            warn!(%address, "login rejected: not on allowlist and no AdminCap");
+            return Err((StatusCode::FORBIDDEN, "address not on admin allowlist".into()));
+        }
+        info!(%address, "login allowed via on-chain AdminCap");
+        metrics::counter!("auth_logins_capcheck_total").increment(1);
     }
 
     let now = jwt::now_secs();
