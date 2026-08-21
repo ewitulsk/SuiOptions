@@ -7,11 +7,18 @@ internal_bind_addr = "0.0.0.0:9008"
 
 allowed_origins    = ["*"]
 
-# Wallets allowed to obtain an admin JWT. Case/padding-insensitive. The seed
-# entry is the protocol deployer (AdminCap holder) from deployments.json —
-# replace / extend with the real admin wallet addresses.
+# Identity store on the shared staging RDS. The role and database must exist
+# before first boot — migrations run themselves, the database does not.
+database_url = "postgresql://auth_staging:${DB_PASSWORD}@${DB_HOST}:5432/auth_staging"
+db_pool_size = 4
+
+# Wallets auto-provisioned with the `admin` role on first login. This is the
+# ONLY path that creates an account without an invite — treat it as the
+# root-of-trust list. Case/padding-insensitive. The seed entry is the protocol
+# deployer (AdminCap holder) from deployments.json.
 admin_addresses    = ["0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"]
 
 token_ttl_secs     = 3600
 refresh_max_secs   = 86400
 challenge_ttl_secs = 300
+invite_ttl_secs    = 604800

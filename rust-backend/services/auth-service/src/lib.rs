@@ -1,21 +1,50 @@
 //! auth-service.
 //!
-//! Issues short-lived admin JWTs to wallets on a hardcoded allowlist, after a
-//! Sui signature challenge-response. It is the single holder of the JWT
-//! signing secret: other services gate endpoints by calling the internal
-//! `/verify` route (via `auth-client`) rather than verifying tokens
-//! themselves.
+//! Issues short-lived JWTs and is the single holder of the JWT signing secret:
+//! other services gate endpoints by calling the internal `/verify` route (via
+//! `auth-client`) rather than verifying tokens themselves.
 //!
-//! Two routers on two ports:
-//! - public (proxied by nginx): `GET /challenge`, `POST /login`,
-//!   `POST /refresh`.
-//! - internal (network-isolated): `POST /verify`.
+//! ## Identity model
+//!
+//! An **account** (`users`) holds a role and an opaque scope. It is reached
+//! through one or more **identities** (`identities`), each a different way of
+//! proving you are that account — today `password` (username + Argon2id) and
+//! `sui_wallet` (address + signed challenge). Because they hang off a shared
+//! account, a wallet user can add a password and a password user can add a
+//! wallet, and either then signs them in.
+//!
+//! Adding a method touches four things: an [`db::models::IdentityKind`]
+//! variant, an [`handlers::account::AuthMethod`] variant, an arm in
+//! `resolve_method`, and a login route of its own in [`handlers::session`].
+//! Registration and identity-linking both go through `resolve_method`, so they
+//! need no further changes; sign-in does, because each method is proved
+//! differently. Nothing outside this service moves — tokens carry the account
+//! uuid, so callers never learn how the session was opened.
+//!
+//! Accounts are created by redeeming an **invite**, minted over the internal
+//! port by whichever service knows the caller ought to exist. The lone
+//! exception is a wallet listed in `admin_addresses`, auto-provisioned as an
+//! admin on first login so the first operator can get in at all.
+//!
+//! ## No PII
+//!
+//! The store holds usernames, Sui addresses, roles and opaque scope ids —
+//! deliberately no email, no legal name, nothing sourced from KYC. Password
+//! recovery is consequently an admin re-invite, not a reset link.
+//!
+//! ## Two routers on two ports
+//!
+//! - public (proxied by nginx): `/challenge`, `/login`, `/login/password`,
+//!   `/register`, `/refresh`, `/me`, `/identities`, `/invites/preview`.
+//! - internal (network-isolated): `/verify`, `/invites`.
 
 pub mod allowlist;
 pub mod challenge;
 pub mod config;
+pub mod db;
 pub mod handlers;
 pub mod jwt;
+pub mod password;
 pub mod router;
 pub mod state;
 pub mod sui_sig;
@@ -30,7 +59,8 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(
     name = "auth-service",
-    about = "Sui-wallet admin auth. Issues + verifies short-lived JWTs for an allowlist of addresses."
+    about = "Multi-method identity service. Password or Sui-wallet login, linkable per account; \
+             issues + verifies short-lived JWTs carrying a role and scope."
 )]
 pub struct Cli {
     #[arg(short, long, default_value = "services/auth-service/config/config.toml")]
@@ -45,8 +75,8 @@ cli_spec::define_program! {
     id          = "auth-service",
     cargo_pkg   = "auth-service",
     working_dir = ".",
-    description = "Sui-wallet admin auth-service. Challenge-response login against a hardcoded \
-                   address allowlist, issues HS256 JWTs, and exposes an internal verify route \
-                   other services delegate to.",
+    description = "Identity service. Username+password or Sui-wallet login (linkable to one \
+                   account), invite-gated registration, issues HS256 JWTs carrying role and \
+                   scope, and exposes an internal verify route other services delegate to.",
     cli         = crate::Cli,
 }

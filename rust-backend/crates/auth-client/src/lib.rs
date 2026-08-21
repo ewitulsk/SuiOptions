@@ -32,10 +32,25 @@ use tracing::{debug, warn};
 /// The claims auth-service confirms for a valid token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifiedClaims {
-    /// Sui address the token was issued to (the admin), `0x`-prefixed.
+    /// Sui address the session was opened with, `0x`-prefixed. Empty for
+    /// password sessions, which have no address — gate on [`Self::role`], not
+    /// on this field.
     pub address: String,
+    /// Account uuid. Stable across login methods, unlike `address`.
+    pub user_id: String,
+    /// `admin` | `business` | `individual`.
+    pub role: String,
+    /// Opaque authorization scope — dakota-service reads it as a Dakota
+    /// customer id. `None` for admins, who are unscoped.
+    pub scope: Option<String>,
     /// Expiry, unix seconds.
     pub exp: u64,
+}
+
+impl VerifiedClaims {
+    pub fn is_admin(&self) -> bool {
+        self.role == "admin"
+    }
 }
 
 /// Wire shape of auth-service's `POST /verify` response.
@@ -44,6 +59,12 @@ struct VerifyResp {
     valid: bool,
     #[serde(default)]
     address: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
     #[serde(default)]
     exp: Option<u64>,
 }
@@ -82,6 +103,11 @@ impl AuthClient {
         if resp.valid {
             Ok(Some(VerifiedClaims {
                 address: resp.address.unwrap_or_default(),
+                user_id: resp.user_id.unwrap_or_default(),
+                // Absent only if auth-service predates roles; treating that as
+                // the least-privileged role fails closed.
+                role: resp.role.unwrap_or_else(|| "individual".to_string()),
+                scope: resp.scope,
                 exp: resp.exp.unwrap_or_default(),
             }))
         } else {
@@ -98,26 +124,61 @@ fn bearer(req: &Request) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// axum middleware: require a valid admin JWT, verified by auth-service.
+/// axum middleware: require any valid JWT, verified by auth-service.
 ///
 /// Wire with `from_fn_with_state(Arc::new(AuthClient::new(url)), require_auth)`.
 /// 401 if the header is missing/invalid or the token doesn't verify; 502 if
 /// auth-service is unreachable (fail closed — never let a request through when
 /// we can't confirm it).
+///
+/// This authenticates but does NOT authorize. Since auth-service began issuing
+/// tokens to non-admin roles, "valid token" no longer implies "operator" —
+/// anything gating a privileged operation wants [`require_admin`].
 pub async fn require_auth(
     State(auth): State<Arc<AuthClient>>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let Some(token) = bearer(&req) else {
+    let claims = authenticate(&auth, bearer(&req)).await?;
+    debug!(user_id = %claims.user_id, role = %claims.role, "auth ok");
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
+}
+
+/// axum middleware: require a valid JWT belonging to an **admin**.
+///
+/// Same failure modes as [`require_auth`], plus 403 for an authenticated
+/// non-admin.
+pub async fn require_admin(
+    State(auth): State<Arc<AuthClient>>,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let claims = authenticate(&auth, bearer(&req)).await?;
+    if !claims.is_admin() {
+        warn!(user_id = %claims.user_id, role = %claims.role, "rejected: admin required");
+        return Err(StatusCode::FORBIDDEN);
+    }
+    debug!(user_id = %claims.user_id, "admin auth ok");
+    req.extensions_mut().insert(claims);
+    Ok(next.run(req).await)
+}
+
+/// Shared verification for the middlewares above.
+///
+/// Takes the already-extracted token rather than the request: holding a
+/// `&Request` across the `.await` would make the future non-`Send` (its `Body`
+/// is not `Sync`), and axum silently rejects such a middleware with an
+/// unsatisfied `Service` bound at the call site.
+async fn authenticate(
+    auth: &AuthClient,
+    token: Option<String>,
+) -> Result<VerifiedClaims, StatusCode> {
+    let Some(token) = token else {
         return Err(StatusCode::UNAUTHORIZED);
     };
     match auth.verify(&token).await {
-        Ok(Some(claims)) => {
-            debug!(address = %claims.address, "auth ok");
-            req.extensions_mut().insert(claims);
-            Ok(next.run(req).await)
-        }
+        Ok(Some(claims)) => Ok(claims),
         Ok(None) => Err(StatusCode::UNAUTHORIZED),
         Err(e) => {
             warn!(error = %e, "auth-service verify failed; rejecting");

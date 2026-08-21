@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS invites;
+DROP TABLE IF EXISTS identities;
+DROP TABLE IF EXISTS users;

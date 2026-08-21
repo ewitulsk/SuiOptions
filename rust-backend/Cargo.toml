@@ -116,6 +116,10 @@ sha2 = "0.10"
 hmac = "0.12"
 blake2 = "0.10"
 base64 = "0.22"
+# auth-service: password-identity hashing. Argon2id at the crate defaults —
+# the PHC string it emits embeds its own params, so a later parameter bump
+# still verifies hashes written today.
+argon2 = "0.5"
 
 thiserror = "1"
 anyhow = "1"
@@ -136,7 +140,9 @@ opentelemetry-http = "0.30"
 tracing-opentelemetry = "0.31"
 
 dashmap = "6"
-uuid = { version = "1", features = ["v4"] }
+# `serde` so uuids can be request/response fields directly (auth-service
+# invites) without a String round-trip.
+uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
 parking_lot = "0.12"
 
@@ -175,7 +181,7 @@ async-graphql = { version = "7" }
 async-graphql-axum = { version = "7" }
 
 # Postgres persistence for the indexer.
-diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric", "serde_json"] }
+diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric", "serde_json", "uuid"] }
 diesel_migrations = { version = "2", features = ["postgres"] }
 r2d2 = "0.8"
 bigdecimal = { version = "0.4", features = ["serde"] }

@@ -7,10 +7,29 @@ internal_bind_addr = "0.0.0.0:9008"
 
 allowed_origins    = ["*"]
 
-# Wallets allowed to obtain an admin JWT. Case/padding-insensitive. Replace
-# with the real mainnet admin wallet address(es) before going live.
+# !! PROVISION BEFORE THE NEXT PROD DEPLOY !!
+#
+# auth-service gained a hard Postgres dependency when it became a multi-method
+# identity service: it will not boot without this database, and it is
+# health-gated, so deploy.sh rolls back the WHOLE planned set if it fails.
+# `auth_prod` does not create itself — the embedded migrations run on boot, the
+# database and role do not. Create both on the prod RDS first:
+#
+#   CREATE ROLE auth_prod LOGIN PASSWORD '<the shared DB_PASSWORD>';
+#   CREATE DATABASE auth_prod OWNER auth_prod;
+#
+# The Dakota work this was built for is staging-only, but auth-service itself
+# still ships to prod, so prod carries the dependency regardless.
+database_url = "postgresql://auth_prod:${DB_PASSWORD}@${DB_HOST}:5432/auth_prod"
+db_pool_size = 4
+
+# Wallets auto-provisioned with the `admin` role on first login — the only
+# account-creation path that skips an invite, so this is the root-of-trust
+# list. Case/padding-insensitive. Replace with the real mainnet admin wallet
+# address(es) before going live.
 admin_addresses    = ["0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865"]
 
 token_ttl_secs     = 3600
 refresh_max_secs   = 86400
 challenge_ttl_secs = 300
+invite_ttl_secs    = 604800

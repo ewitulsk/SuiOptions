@@ -22,11 +22,25 @@ pub struct Config {
     #[serde(default = "default_cors")]
     pub allowed_origins: Vec<String>,
 
-    /// Admin allowlist: Sui addresses permitted to obtain a JWT. `0x`-prefixed;
-    /// case/padding-insensitive (normalized before comparison). Membership is
-    /// the only authorization check.
+    /// Postgres connection string for the identity store, assembled from
+    /// `${DB_HOST}` / `${DB_PASSWORD}` at load time.
+    pub database_url: String,
+    #[serde(default = "default_db_pool_size")]
+    pub db_pool_size: u32,
+
+    /// Admin bootstrap: Sui addresses auto-provisioned with the `admin` role on
+    /// first wallet login. `0x`-prefixed; case/padding-insensitive (normalized
+    /// before comparison).
+    ///
+    /// This is the only account-creation path that does not require an invite,
+    /// and it grants `admin` — treat it as the root-of-trust list.
     #[serde(default)]
     pub admin_addresses: Vec<String>,
+
+    /// Default lifetime of a minted invite, seconds. Default 7 days — long
+    /// enough to send a link and have a human act on it.
+    #[serde(default = "default_invite_ttl")]
+    pub invite_ttl_secs: i64,
 
     /// Issued-JWT lifetime, seconds. Default 1h.
     #[serde(default = "default_token_ttl")]
@@ -54,6 +68,12 @@ fn default_refresh_max() -> u64 {
 }
 fn default_challenge_ttl() -> u64 {
     300
+}
+fn default_db_pool_size() -> u32 {
+    4
+}
+fn default_invite_ttl() -> i64 {
+    7 * 86_400
 }
 
 impl Config {
