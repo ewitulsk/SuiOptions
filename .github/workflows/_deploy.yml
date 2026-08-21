@@ -47,6 +47,11 @@ on:
         required: false
         type: string
         default: ''
+      exclude_services:
+        description: 'JSON array of service names to drop from whatever set was selected (after force_all/only_services/affected resolution). Used by redeploy-contract to keep the go-backend services (leaderboard, event-ingestor) out of contract rollouts — their DBs and rollout cadence are independent of the Move package.'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -140,6 +145,7 @@ jobs:
           FORCE_ALL: ${{ inputs.force_all }}
           OVERRIDE_TAG: ${{ inputs.image_tag }}
           ONLY_SERVICES: ${{ inputs.only_services }}
+          EXCLUDE_SERVICES: ${{ inputs.exclude_services }}
           CHANGED_FILES: ${{ steps.changed.outputs.all_changed_files }}
         run: |
           if [ -n "$ONLY_SERVICES" ]; then
@@ -164,6 +170,11 @@ jobs:
           else
             services=$(printf '%s\n' "$CHANGED_FILES" \
               | python3 rust-backend/deployment/affected.py)
+          fi
+          if [ -n "$EXCLUDE_SERVICES" ]; then
+            services=$(echo "$services" \
+              | jq -c --argjson ex "$EXCLUDE_SERVICES" 'map(select(. as $s | $ex | index($s) | not))')
+            echo "after exclude_services $EXCLUDE_SERVICES → $services"
           fi
           echo "services=$services" >> "$GITHUB_OUTPUT"
           echo "affected services: $services"

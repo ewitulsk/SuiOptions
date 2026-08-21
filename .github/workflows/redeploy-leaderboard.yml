@@ -1,43 +1,24 @@
-# Wipe + (idempotently) provision a single service's Postgres database for
-# a target env. Creates the role + database if missing, then resets the
-# public schema; the service binary re-runs its embedded migrations on the
-# next start.
+# Wipe + redeploy the leaderboard subsystem (go-backend): stop leaderboard +
+# event-ingestor, wipe BOTH their databases (leaderboard_<env> AND
+# event_ingestor_<env> — points ledger, tracked packages/rules, cursors, and
+# the deliveries audit log all reset together so no stale delivery/cursor
+# state survives a points wipe), then rebuild the two go images from the
+# dispatched ref and roll them. Migrations re-provision the schemas at boot;
+# the admin re-adds packages/rules through the /admin UI afterwards.
 #
-# Flow:
-#   1. Resolve the compose service name from the chosen service.
-#   2. Fetch RDS master creds (the per-env role can't CREATE on the cluster).
-#   3. Upload deployment/ec2/wipe-provision-db.sh to S3 (deploy-bundles/).
-#   4. Over SSM on the EC2 host: stop the service → run the script → start it.
+# This is deliberately SEPARATE from redeploy-contract.yml: a Move-package
+# redeploy neither wipes nor rolls the go-backend services (they carry
+# exclude_services there), and this workflow touches nothing else — no Rust
+# builds, no indexer/orderbook wipe, no deployments.json.
 #
-# prod is a selectable target but GATED twice. Typing the env name into
-# `confirm` catches an accidental dropdown pick; the environment must also be
-# PROVABLY testnet, checked here and again in the remote script.
-#
-# That second gate is derived rather than hardcoded:
-# rust-backend/deployment/assert_testnet.sh resolves the network from the
-# service configs and refuses anything it cannot prove is testnet.
-#
-# What used to be here compared the env name against "production" and
-# "mainnet" — two strings the `type: choice` input below cannot produce — so
-# it could never fire, and the word "network" appeared nowhere in this file.
-# The typed confirmation was the only guard that worked, and it catches a
-# mis-click, not a category error (SO-330).
+# Guards mirror wipe-provision-db.yml: the env must be provably testnet
+# (assert_testnet.sh), and prod additionally requires typing "prod".
 
-name: Wipe & Provision Service DB
+name: Redeploy Leaderboard
 
 on:
   workflow_dispatch:
     inputs:
-      service:
-        description: 'Service whose DB to wipe + provision'
-        required: true
-        type: choice
-        options:
-          - indexer
-          - token-info
-          - orderbook
-          - leaderboard
-          - event-ingestor
       environment:
         description: 'Target environment'
         required: true
@@ -46,14 +27,14 @@ on:
           - staging
           - prod
       confirm:
-        description: "Type the env name to confirm (required for prod — it WIPES the DB)."
+        description: "Type the env name to confirm (required for prod — it WIPES both leaderboard DBs)."
         required: false
         type: string
         default: ''
 
 permissions:
-  contents: read
-  id-token: write    # OIDC → AWS
+  contents: write   # _deploy.yml's deploy job declares contents: write
+  id-token: write   # OIDC → AWS
 
 env:
   AWS_REGION:        ${{ vars.AWS_REGION }}
@@ -62,48 +43,26 @@ env:
   SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
 
 jobs:
-  wipe-provision:
+  wipe:
     runs-on: ubuntu-latest
     steps:
-      # ── 0. Checkout (for the script) ─────────────────────────────
+      # ── 0. Checkout (for the script + the testnet guard) ─────────
       - uses: actions/checkout@v4
 
-      # ── 1. Validate + resolve the compose service name ───────────
-      - name: Resolve target
-        id: target
+      # ── 1. Guards ────────────────────────────────────────────────
+      - name: Guards
+        id: guard
         env:
           ENV: ${{ inputs.environment }}
-          SERVICE: ${{ inputs.service }}
           CONFIRM: ${{ inputs.confirm }}
         run: |
-          # ── MAINNET GUARD ──
-          # This previously compared $ENV against "production"/"mainnet" —
-          # two strings the `type: choice` input above cannot produce, so the
-          # guard could never fire. It also never learned what CHAIN the env
-          # was on: the word "network" did not appear anywhere in this file.
-          #
-          # Now derived from the service configs, which are what actually
-          # change when an env becomes mainnet, and inverted to refuse unless
-          # the env is provably testnet.
           NETWORK="$(bash rust-backend/deployment/assert_testnet.sh "$ENV")"
           echo "resolved network for $ENV: $NETWORK"
           echo "network=$NETWORK" >> "$GITHUB_OUTPUT"
-          # prod wipes a live DB — require an explicit typed confirmation.
           if [ "$ENV" = "prod" ] && [ "$CONFIRM" != "prod" ]; then
             echo "::error::prod requires typing 'prod' into the confirm input"
             exit 1
           fi
-          case "$SERVICE" in
-            indexer)         echo "compose_svc=indexer"               >> "$GITHUB_OUTPUT" ;;
-            token-info)      echo "compose_svc=token-info"            >> "$GITHUB_OUTPUT" ;;
-            orderbook)       echo "compose_svc=orderbook"             >> "$GITHUB_OUTPUT" ;;
-            leaderboard)     echo "compose_svc=leaderboard"           >> "$GITHUB_OUTPUT" ;;
-            event-ingestor)  echo "compose_svc=event-ingestor"        >> "$GITHUB_OUTPUT" ;;
-            *)
-              echo "::error::Invalid service '$SERVICE'"
-              exit 1
-              ;;
-          esac
 
       # ── 2. AWS credentials (OIDC) ────────────────────────────────
       - uses: aws-actions/configure-aws-credentials@v4
@@ -117,8 +76,6 @@ jobs:
           env: ${{ inputs.environment }}
 
       # ── 3. Fetch RDS master creds ────────────────────────────────
-      # The per-env <service>_<env> role lacks CREATE on the cluster, so
-      # role/database creation and the schema reset run as the master.
       - name: Fetch master DB creds
         id: master
         run: |
@@ -134,23 +91,21 @@ jobs:
         id: bundle
         env:
           ENV: ${{ inputs.environment }}
-          SERVICE: ${{ inputs.service }}
         run: |
           TS=$(date +%s)
-          # deploy-bundles/ is the only prefix the EC2 instance role may
-          # GetObject from on this bucket (see infra/iam.tf).
-          KEY="deploy-bundles/wipe-provision-db-${ENV}-${SERVICE}-${TS}.sh"
+          KEY="deploy-bundles/redeploy-leaderboard-${ENV}-${TS}.sh"
           aws s3 cp rust-backend/deployment/ec2/wipe-provision-db.sh \
             "s3://${SSM_OUTPUT_BUCKET}/${KEY}"
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
 
-      # ── 5. SSM: stop → wipe+provision → start ────────────────────
-      - name: Run on EC2
+      # ── 5. SSM: stop both services → wipe both DBs ───────────────
+      # The services stay STOPPED; the deploy job below brings them back up
+      # on freshly built images (embedded migrations re-provision the
+      # schemas on connect).
+      - name: Stop + wipe on EC2
         env:
           ENV: ${{ inputs.environment }}
-          COMPOSE_SVC: ${{ steps.target.outputs.compose_svc }}
-          NETWORK: ${{ steps.target.outputs.network }}
-          SERVICE: ${{ inputs.service }}
+          NETWORK: ${{ steps.guard.outputs.network }}
           SCRIPT_KEY: ${{ steps.bundle.outputs.key }}
           MASTER_USER: ${{ steps.master.outputs.user }}
           MASTER_PASS: ${{ steps.master.outputs.pass }}
@@ -158,8 +113,6 @@ jobs:
           jq -nc \
             --arg env "$ENV" \
             --arg network "$NETWORK" \
-            --arg svc "$COMPOSE_SVC" \
-            --arg service "$SERVICE" \
             --arg script_key "$SCRIPT_KEY" \
             --arg db_host "$RDS_HOST" \
             --arg master_user "$MASTER_USER" \
@@ -179,24 +132,21 @@ jobs:
                 "aws s3 cp \"s3://\($bucket)/\($script_key)\" /tmp/wipe-provision-db.sh --region \($region)",
                 "chmod +x /tmp/wipe-provision-db.sh",
 
-                "# ── Stop the service (if present in this env) ──",
-                "if docker compose -f \"$COMPOSE_FILE\" config --services | grep -qx \($svc | @sh); then docker compose -f \"$COMPOSE_FILE\" stop \($svc | @sh) || true; echo \"stopped \($svc)\"; else echo \"\($svc) not in compose; skipping stop\"; fi",
+                "# ── Stop both go services (if present in this env) ──",
+                "for svc in leaderboard event-ingestor; do if docker compose -f \"$COMPOSE_FILE\" config --services | grep -qx \"$svc\"; then docker compose -f \"$COMPOSE_FILE\" stop \"$svc\" || true; echo \"stopped $svc\"; else echo \"$svc not in compose; skipping stop\"; fi; done",
 
-                "# ── Wipe + provision the DB ──",
-                "DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/wipe-provision-db.sh \($env | @sh) \($service | @sh)",
-
-                "# ── Start the service again (migrations run on connect) ──",
-                "if docker compose -f \"$COMPOSE_FILE\" config --services | grep -qx \($svc | @sh); then docker compose -f \"$COMPOSE_FILE\" start \($svc | @sh) || true; echo \"started \($svc)\"; fi",
+                "# ── Wipe + provision both DBs ──",
+                "for svc in leaderboard event-ingestor; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
 
                 "rm -f /tmp/wipe-provision-db.sh",
-                "echo \"wipe+provision complete (\($service) / \($env))\""
+                "echo \"leaderboard + event-ingestor DBs wiped (\($env)); services left stopped for the deploy roll\""
               ]
             }' > /tmp/ssm-params.json
 
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "wipe-provision-db $SERVICE $ENV" \
+            --comment "redeploy-leaderboard wipe $ENV" \
             --parameters file:///tmp/ssm-params.json \
             --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
             --timeout-seconds 300 \
@@ -226,3 +176,14 @@ jobs:
               --query StandardErrorContent --output text
             exit 1
           fi
+
+  # ── Rebuild the two go images from the dispatched ref and roll them ──
+  # deploy.sh pulls + up -d, restarting the stopped services on the wiped
+  # DBs, then health-checks /{env}/leaderboard/health + /{env}/ingestor/health.
+  deploy:
+    needs: wipe
+    uses: ./.github/workflows/_deploy.yml
+    secrets: inherit
+    with:
+      envs: ${{ format('["{0}"]', inputs.environment) }}
+      only_services: '["leaderboard","event-ingestor"]'
