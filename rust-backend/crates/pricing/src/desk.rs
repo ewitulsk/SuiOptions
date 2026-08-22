@@ -1,7 +1,8 @@
 //! Desk quoting formulas for the mm-bot vol desk
 //! (docs/mm-bot-v2/00-plan.md): the V1 long-only bid built from
 //! separately-testable vol-discount terms (§V1 item 1 + "V1 starting
-//! parameters"), and the V2 two-sided inventory-skewed quote (§V2 item 2).
+//! parameters"). The two-sided writing quote was removed with the
+//! option-writing strategy (SO-426, doc 08 §4.1).
 //!
 //! Everything is expressed in **vol points** (annualized decimals: 0.05 =
 //! 5 vol points) applied to the model fair sigma, so each term can be
@@ -125,82 +126,6 @@ pub fn v1_bid(
         + ctx.slippage_cost;
     let bid = fair_at(sigma_bid) - hedge_cost;
     if bid > 0.0 { Some(bid) } else { None }
-}
-
-// ---- V2 two-sided quoting ----
-
-/// V2 two-sided quote parameters (plan §V2 items 1–2). Vega bands are in
-/// fractions of NAV per vol point (net vega Δ NAV per 1 vol pt move); both
-/// must be positive. `write_cap_pct_nav` / `buy_cap_pct_nav` (asymmetric
-/// per-quote size caps) and `near_expiry_size_mult` are carried here for
-/// the caller's sizing logic — [`v2_effective_sigmas`] uses the spread
-/// mult, [`v2_write_size_scale`] the short band.
-#[derive(Clone, Copy, Debug)]
-pub struct V2Params {
-    /// Half-spread around the effective mid, vol points (starting 0.03).
-    pub base_spread_volpts: f64,
-    /// Long edge of the signed vega band, NAV fraction per vol pt
-    /// (starting +0.005 — i.e. +0.5% NAV per vol point).
-    pub vega_band_long: f64,
-    /// Short edge magnitude of the vega band (starting 0.0015).
-    pub vega_band_short: f64,
-    /// Inventory skew gain: effective mid = fair + k·(net vega / band).
-    /// Sign convention: a *negative* k shifts the mid down when long (sell
-    /// inventory) and up when short (buy it back).
-    pub skew_k: f64,
-    /// Max premium written per quote, % NAV (starting 3.0). Caller-side cap.
-    pub write_cap_pct_nav: f64,
-    /// Max premium bought per quote, % NAV (starting 5.0). Caller-side cap.
-    pub buy_cap_pct_nav: f64,
-    /// Tenor threshold for the near-expiry ATM throttle (starting 48).
-    pub near_expiry_hours: f64,
-    /// Spread multiplier inside the near-expiry window (starting 2.0).
-    pub near_expiry_spread_mult: f64,
-    /// Size multiplier inside the near-expiry window (starting 0.5).
-    /// Caller-side: apply to quote size alongside [`v2_write_size_scale`].
-    pub near_expiry_size_mult: f64,
-}
-
-/// The V2 effective bid/ask sigmas around the inventory-skewed mid.
-///
-/// `net_vega_per_nav_volpt` is the signed net book vega as a NAV fraction
-/// per vol point (positive = long vol). The effective mid is
-/// `σ_fair + skew_k · (net_vega / band)` where `band` is the long band
-/// when inventory is long and the short band when short (see
-/// [`V2Params::skew_k`] for the sign convention); bid/ask sit
-/// `∓ base_spread` around it (bid floored at 0), with the spread multiplied
-/// by `near_expiry_spread_mult` when `t_years` is inside
-/// `near_expiry_hours` (hours / 8760, matching the crate's 365-day year).
-///
-/// Returns `None` when net short vega is at/past the short band edge —
-/// short-vol capacity is exhausted, so there is no ask (no writing) and the
-/// caller must construct any buy-back bid separately.
-pub fn v2_effective_sigmas(
-    sigma_fair: f64,
-    net_vega_per_nav_volpt: f64,
-    t_years: f64,
-    p: &V2Params,
-) -> Option<(f64, f64)> {
-    if net_vega_per_nav_volpt <= -p.vega_band_short {
-        return None;
-    }
-    let band = if net_vega_per_nav_volpt >= 0.0 { p.vega_band_long } else { p.vega_band_short };
-    let mid = sigma_fair + p.skew_k * (net_vega_per_nav_volpt / band);
-    let mut spread = p.base_spread_volpts;
-    if t_years <= p.near_expiry_hours / (24.0 * 365.0) {
-        spread *= p.near_expiry_spread_mult;
-    }
-    Some(((mid - spread).max(0.0), mid + spread))
-}
-
-/// Write-size scale vs the short vega edge: 1.0 when flat or long, scaling
-/// linearly down to 0.0 as net vega approaches `−vega_band_short` (plan
-/// §V2 item 2: "write size → 0 at the short edge"). Clamped to [0, 1].
-pub fn v2_write_size_scale(net_vega_per_nav_volpt: f64, p: &V2Params) -> f64 {
-    if net_vega_per_nav_volpt >= 0.0 {
-        return 1.0;
-    }
-    (1.0 + net_vega_per_nav_volpt / p.vega_band_short).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -332,77 +257,5 @@ mod tests {
         // Hedge costs exceed the discounted fair → net ≤ 0.
         let c = BidContext { slippage_cost: 10_000.0, ..ctx(1.0, 0.0) };
         assert!(v1_bid(|s| 10_000.0 * s, 0.60, &c, &p).is_none());
-    }
-
-    /// The plan's V2 starting parameters.
-    fn v2_params() -> V2Params {
-        V2Params {
-            base_spread_volpts: 0.03,
-            vega_band_long: 0.005,
-            vega_band_short: 0.0015,
-            skew_k: 0.02,
-            write_cap_pct_nav: 3.0,
-            buy_cap_pct_nav: 5.0,
-            near_expiry_hours: 48.0,
-            near_expiry_spread_mult: 2.0,
-            near_expiry_size_mult: 0.5,
-        }
-    }
-
-    #[test]
-    fn v2_flat_book_quotes_symmetric_spread() {
-        let (bid, ask) = v2_effective_sigmas(0.60, 0.0, 0.5, &v2_params()).unwrap();
-        close(bid, 0.57, 1e-12);
-        close(ask, 0.63, 1e-12);
-    }
-
-    #[test]
-    fn v2_inventory_skews_the_mid_by_band_fraction() {
-        let p = v2_params();
-        // Long half the long band: mid = 0.60 + 0.02·0.5 = 0.61.
-        let (bid, ask) = v2_effective_sigmas(0.60, 0.0025, 0.5, &p).unwrap();
-        close(bid, 0.61 - 0.03, 1e-12);
-        close(ask, 0.61 + 0.03, 1e-12);
-        // Short half the (much tighter) short band: mid = 0.60 − 0.01.
-        let (bid, ask) = v2_effective_sigmas(0.60, -0.00075, 0.5, &p).unwrap();
-        close(bid, 0.59 - 0.03, 1e-12);
-        close(ask, 0.59 + 0.03, 1e-12);
-    }
-
-    #[test]
-    fn v2_short_band_edge_kills_the_quote() {
-        let p = v2_params();
-        assert!(v2_effective_sigmas(0.60, -0.0015, 0.5, &p).is_none());
-        assert!(v2_effective_sigmas(0.60, -0.01, 0.5, &p).is_none());
-        // Just inside the edge still quotes.
-        assert!(v2_effective_sigmas(0.60, -0.00149, 0.5, &p).is_some());
-    }
-
-    #[test]
-    fn v2_near_expiry_doubles_the_spread() {
-        let p = v2_params();
-        let t_inside = 24.0 / (24.0 * 365.0); // 24h < 48h window
-        let (bid, ask) = v2_effective_sigmas(0.60, 0.0, t_inside, &p).unwrap();
-        close(ask - bid, 2.0 * 2.0 * 0.03, 1e-12);
-        // Outside the window: base spread.
-        let (bid, ask) = v2_effective_sigmas(0.60, 0.0, 0.5, &p).unwrap();
-        close(ask - bid, 2.0 * 0.03, 1e-12);
-    }
-
-    #[test]
-    fn v2_bid_sigma_floors_at_zero() {
-        let (bid, ask) = v2_effective_sigmas(0.02, 0.0, 0.5, &v2_params()).unwrap();
-        close(bid, 0.0, 1e-12);
-        close(ask, 0.05, 1e-12);
-    }
-
-    #[test]
-    fn v2_write_size_scale_endpoints_and_midpoint() {
-        let p = v2_params();
-        close(v2_write_size_scale(0.0, &p), 1.0, 1e-12);
-        close(v2_write_size_scale(0.003, &p), 1.0, 1e-12); // long: full size
-        close(v2_write_size_scale(-0.00075, &p), 0.5, 1e-12);
-        close(v2_write_size_scale(-0.0015, &p), 0.0, 1e-12);
-        close(v2_write_size_scale(-0.01, &p), 0.0, 1e-12); // past the edge: clamped
     }
 }

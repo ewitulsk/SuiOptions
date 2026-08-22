@@ -38,7 +38,9 @@ rate               = 0.0
 # reservation TTL).
 quote_ttl_ms       = 30_000
 
-# Both roles by default; writer_mm only matters once [desk.v2] is on.
+# Both roles by default: writer_mm receives trader-flow RFQs so the desk
+# can decline them explicitly (and record the decline) rather than
+# silently unsubscribing — the desk never writes options (SO-426).
 roles = ["trader_mm", "writer_mm"]
 
 # Answer unsigned bulk-view RFQs (indicative premiums for the frontend's
@@ -73,7 +75,7 @@ TWAL = 1.0
 # V1: delta-hedged long-vol fund — buys retail's covered calls (WS RFQs +
 # on-chain auctions), paper-hedges delta on bands, runs the exit ladder
 # (resale → hold → automated/flash exercise), monitors + nightly stress.
-# V2 (two-sided writing) stays behind [desk.v2].
+# The desk never writes options (SO-426): trader-flow RFQs always decline.
 #
 # VAULT-ONLY MAKER: the bot trades exclusively as the trading vault's
 # curator. Quotes release collateral from the vault (`vault_mm`); all
@@ -233,20 +235,7 @@ enabled            = false
 # interval_secs = 60
 # bleed_window_hours = 24.0
 # stress_interval_secs = 86_400
-# stress_max_drawdown = 0.25  # V2 gate
-
-# [desk.v2]                   # two-sided maker — OFF until ungated
-# enabled = false
-# base_spread_volpts = 0.03
-# vega_band_long = 0.005
-# vega_band_short = 0.0015
-# skew_k = -0.01              # negative: sell inventory when long
-# write_cap_pct_nav = 3.0
-# buy_cap_pct_nav = 5.0
-# near_expiry_hours = 48.0
-# near_expiry_spread_mult = 2.0
-# near_expiry_size_mult = 0.5
-# naked_vega_cap_nav_per_volpt = 0.001
+# stress_max_drawdown = 0.25
 
 # ── Testnet counterparty sim (SO-299) ──────────────────────────────────
 # The desk's test counterparty: redeems expired wallet Positions and
