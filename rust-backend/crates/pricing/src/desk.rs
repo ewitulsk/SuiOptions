@@ -11,8 +11,8 @@
 //! `None`s are the hard max-single-fill cap (a decline is never priced) and
 //! a bid whose net value after hedge costs is ≤ 0.
 
-/// Per-quote context for the V1 bid. `premium_notional`, `nav`, and
-/// `slippage_cost` share one unit (the vault's settlement currency).
+/// Per-quote context for the V1 bid. `premium_notional`, `nav`, and the
+/// hedge-cost fields share one unit (the vault's settlement currency).
 #[derive(Clone, Copy, Debug)]
 pub struct BidContext {
     /// Vault NAV.
@@ -22,14 +22,56 @@ pub struct BidContext {
     /// Current vega utilization as a fraction of the vega cap (0..1, may
     /// exceed 1 when over the cap — the penalty keeps growing).
     pub vega_utilization: f64,
-    /// Annualized funding rate on the perp hedge; positive = shorts earn
-    /// (funding is income), negative = shorts pay (funding is a cost).
-    pub funding_rate_annual: f64,
-    /// Expected holding period of the position (years), for the funding
-    /// cost estimate.
-    pub expected_holding_years: f64,
-    /// Absolute hedge slippage estimate, premium units.
-    pub slippage_cost: f64,
+    /// Expected cash cost of hedging THIS fill, resolved by the caller
+    /// (doc 08 §4.3): direction-aware funding on incremental signed
+    /// hedge notional, plus fees/slippage/fixed costs.
+    pub hedge_cost: ExpectedHedgeCost,
+}
+
+/// Expected cash cost of hedging one proposed fill over its holding
+/// period (doc 08 §4.3, SO-429). All fields are premium units; the
+/// funding leg may be negative (income) only up to the caller's
+/// configured conservative credit — see [`expected_funding_cost`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ExpectedHedgeCost {
+    /// Signed expected funding cash flow (positive = cost).
+    pub funding: f64,
+    pub venue_fees: f64,
+    pub slippage: f64,
+    pub fixed_cost: f64,
+}
+
+impl ExpectedHedgeCost {
+    /// The bid subtracts this; never negative — a net funding credit can
+    /// offset fees but never ADD to the bid.
+    pub fn total(&self) -> f64 {
+        (self.funding + self.venue_fees + self.slippage + self.fixed_cost).max(0.0)
+    }
+}
+
+/// Direction-aware expected funding for one fill's incremental hedge
+/// (doc 08 §4.3). The hedge for incremental option delta `d` is `−d`
+/// signed perp units; market convention has longs PAY positive funding
+/// and shorts receive it, so the expected cash flow is
+/// `funding × (−d × spot) × holding_years` (positive = cost). Funding is
+/// charged on hedge NOTIONAL, never on option premium. Income (a
+/// negative cost) is credited only at `income_credit` — 0 is the
+/// conservative default: income is upside, never priced into the bid.
+pub fn expected_funding_cost(
+    incremental_delta_units: f64,
+    spot: f64,
+    funding_rate_annual: f64,
+    holding_years: f64,
+    income_credit: f64,
+) -> f64 {
+    // Signed LONG-hedge notional for this fill: hedge_units × spot.
+    let hedge_notional = -incremental_delta_units * spot;
+    let cost = funding_rate_annual * hedge_notional * holding_years;
+    if cost >= 0.0 {
+        cost
+    } else {
+        cost * income_credit.clamp(0.0, 1.0)
+    }
 }
 
 /// V1 bid parameters (plan "V1 starting parameters"). Requires
@@ -49,6 +91,9 @@ pub struct V1BidParams {
     /// Hard cap: max premium for a single fill, % of NAV (starting 5.0).
     /// Beyond this the quote is declined, not priced.
     pub max_single_fill_pct_nav: f64,
+    /// Fraction of expected funding INCOME credited into the bid
+    /// (0 = conservative: income is upside, never priced — doc 08 §4.3).
+    pub funding_income_credit: f64,
 }
 
 /// The V1 vol discount decomposed into its terms (all vol points), so each
@@ -99,19 +144,16 @@ pub fn v1_vol_discount(ctx: &BidContext, p: &V1BidParams) -> Option<VolDiscount>
     Some(VolDiscount { base, size, inventory, total: base + size + inventory })
 }
 
-/// The V1 bid: fair value repriced at the discounted vol, minus the hedge
-/// cost estimate.
+/// The V1 bid: fair value repriced at the discounted vol, minus the
+/// caller-resolved expected hedge cost (doc 08 §4.3 — funding on signed
+/// incremental hedge notional, direction-aware; never on premium).
 ///
 /// `fair_at(σ)` must return the fair premium for the *full quote size* at
 /// vol σ, in the same units as `ctx.premium_notional` (so the vol discount
 /// and the absolute hedge costs compose). The bid vol is
 /// `max(σ_fair − discount.total, 0)` — a deep discount collapses toward
-/// intrinsic rather than going negative. Hedge cost =
-/// `max(0, −funding_rate_annual) · expected_holding_years ·
-/// premium_notional + slippage_cost`: when shorts *earn* funding the term
-/// is 0 (income is upside, not priced into the bid); when shorts pay, the
-/// expected payment over the holding period is charged. Returns `None`
-/// when the discount declines the quote or the net bid is ≤ 0.
+/// intrinsic rather than going negative. Returns `None` when the discount
+/// declines the quote or the net bid is ≤ 0.
 pub fn v1_bid(
     fair_at: impl Fn(f64) -> f64,
     sigma: f64,
@@ -120,11 +162,7 @@ pub fn v1_bid(
 ) -> Option<f64> {
     let discount = v1_vol_discount(ctx, p)?;
     let sigma_bid = (sigma - discount.total).max(0.0);
-    let hedge_cost = (-ctx.funding_rate_annual).max(0.0)
-        * ctx.expected_holding_years
-        * ctx.premium_notional
-        + ctx.slippage_cost;
-    let bid = fair_at(sigma_bid) - hedge_cost;
+    let bid = fair_at(sigma_bid) - ctx.hedge_cost.total();
     if bid > 0.0 { Some(bid) } else { None }
 }
 
@@ -146,19 +184,18 @@ mod tests {
             inventory_penalty_max_volpts: 0.10,
             inventory_penalty_start_util: 0.6,
             max_single_fill_pct_nav: 5.0,
+            funding_income_credit: 0.0,
         }
     }
 
-    /// NAV 100_000; premium expressed as % of it, utilization as given; no
-    /// funding/slippage unless a test sets them.
+    /// NAV 100_000; premium expressed as % of it, utilization as given;
+    /// no hedge cost unless a test sets it.
     fn ctx(premium_pct: f64, util: f64) -> BidContext {
         BidContext {
             nav: 100_000.0,
             premium_notional: 1_000.0 * premium_pct,
             vega_utilization: util,
-            funding_rate_annual: 0.0,
-            expected_holding_years: 0.0,
-            slippage_cost: 0.0,
+            hedge_cost: ExpectedHedgeCost::default(),
         }
     }
 
@@ -210,20 +247,20 @@ mod tests {
     #[test]
     fn v1_bid_arithmetic_with_synthetic_linear_fair() {
         // fair_at(σ) = 10_000·σ makes every term hand-checkable.
-        // σ 0.60, 1% NAV (discount 0.06), shorts pay 10% funding for 0.1y on
-        // premium 1000 → hedge 10, slippage 5.
+        // σ 0.60, 1% NAV (discount 0.06), funding cost 10, slippage 5.
         let c = BidContext {
-            funding_rate_annual: -0.10,
-            expected_holding_years: 0.1,
-            slippage_cost: 5.0,
+            hedge_cost: ExpectedHedgeCost { funding: 10.0, slippage: 5.0, ..Default::default() },
             ..ctx(1.0, 0.0)
         };
         let bid = v1_bid(|s| 10_000.0 * s, 0.60, &c, &v1_params()).unwrap();
         close(bid, 10_000.0 * (0.60 - 0.06) - 10.0 - 5.0, 1e-9);
-        // Positive funding (shorts earn) is not priced in: only slippage.
-        let c_earn = BidContext { funding_rate_annual: 0.25, ..c };
+        // A net funding credit can offset fees but never ADDS to the bid.
+        let c_earn = BidContext {
+            hedge_cost: ExpectedHedgeCost { funding: -25.0, slippage: 5.0, ..Default::default() },
+            ..ctx(1.0, 0.0)
+        };
         let bid = v1_bid(|s| 10_000.0 * s, 0.60, &c_earn, &v1_params()).unwrap();
-        close(bid, 10_000.0 * 0.54 - 5.0, 1e-9);
+        close(bid, 10_000.0 * 0.54, 1e-9);
     }
 
     #[test]
@@ -239,9 +276,11 @@ mod tests {
             nav: 1_000_000.0,
             premium_notional: fair,
             vega_utilization: 0.8,
-            funding_rate_annual: -0.05,
-            expected_holding_years: 20.0 / 365.0,
-            slippage_cost: fair * 0.002,
+            hedge_cost: ExpectedHedgeCost {
+                funding: fair * 0.01,
+                slippage: fair * 0.002,
+                ..Default::default()
+            },
         };
         let bid = v1_bid(fair_at, sigma, &c, &v1_params()).unwrap();
         assert!(bid > 0.0 && bid < fair, "bid {bid} not inside (0, fair {fair})");
@@ -255,7 +294,48 @@ mod tests {
         // Vol discount swallows the whole sigma → intrinsic 0 → net ≤ 0.
         assert!(v1_bid(|s| 100.0 * s, 0.05, &ctx(1.0, 0.0), &p).is_none());
         // Hedge costs exceed the discounted fair → net ≤ 0.
-        let c = BidContext { slippage_cost: 10_000.0, ..ctx(1.0, 0.0) };
+        let c = BidContext {
+            hedge_cost: ExpectedHedgeCost { slippage: 10_000.0, ..Default::default() },
+            ..ctx(1.0, 0.0)
+        };
         assert!(v1_bid(|s| 10_000.0 * s, 0.60, &c, &p).is_none());
+    }
+
+    // ── direction-aware funding (doc 08 §4.3, SO-429) ──────────────────
+
+    #[test]
+    fn funding_sign_matrix() {
+        // Long CALL book: fill delta +100 units → short hedge. Positive
+        // funding is INCOME for a short: credit 0 charges nothing,
+        // credit 1 credits it in full.
+        close(expected_funding_cost(100.0, 10.0, 0.10, 0.1, 0.0), 0.0, 1e-12);
+        close(expected_funding_cost(100.0, 10.0, 0.10, 0.1, 1.0), -10.0, 1e-12);
+        // Negative funding: the short PAYS — always charged.
+        close(expected_funding_cost(100.0, 10.0, -0.10, 0.1, 0.0), 10.0, 1e-12);
+        // Long PUT book: fill delta −100 → LONG hedge. Positive funding
+        // is a COST for a long — always charged.
+        close(expected_funding_cost(-100.0, 10.0, 0.10, 0.1, 0.0), 10.0, 1e-12);
+        // Negative funding: the long RECEIVES — income, credit-gated.
+        close(expected_funding_cost(-100.0, 10.0, -0.10, 0.1, 0.0), 0.0, 1e-12);
+        close(expected_funding_cost(-100.0, 10.0, -0.10, 0.1, 0.5), -5.0, 1e-12);
+    }
+
+    #[test]
+    fn funding_is_proportional_to_hedge_notional_not_premium() {
+        // Doubling the fill's delta doubles the funding charge; the
+        // premium never enters.
+        let one = expected_funding_cost(-100.0, 10.0, 0.10, 0.1, 0.0);
+        let two = expected_funding_cost(-200.0, 10.0, 0.10, 0.1, 0.0);
+        close(two, 2.0 * one, 1e-12);
+        // A delta-net mixed fill (net delta 0) has zero incremental cost.
+        close(expected_funding_cost(0.0, 10.0, 0.10, 0.1, 0.0), 0.0, 1e-12);
+    }
+
+    #[test]
+    fn hedge_cost_total_floors_at_zero() {
+        let c = ExpectedHedgeCost { funding: -50.0, venue_fees: 10.0, slippage: 5.0, fixed_cost: 0.0 };
+        close(c.total(), 0.0, 1e-12);
+        let c = ExpectedHedgeCost { funding: -5.0, venue_fees: 10.0, slippage: 5.0, fixed_cost: 1.0 };
+        close(c.total(), 11.0, 1e-12);
     }
 }
