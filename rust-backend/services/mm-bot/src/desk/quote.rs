@@ -84,6 +84,7 @@ pub fn price_writer_flow(
     let greeks = model.greeks_per_unit(inputs.is_put, ctx.spot, strike, t, sigma);
     let fill = ProposedFill {
         premium: fair_pu * amount,
+        is_put: inputs.is_put,
         vega_per_volpt: greeks.vega * amount / 100.0,
         // Long options decay: per-day theta < 0 ⇒ positive daily cost.
         theta_cost_per_day: (-greeks.theta * amount).max(0.0),

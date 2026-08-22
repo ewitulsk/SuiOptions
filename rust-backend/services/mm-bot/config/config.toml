@@ -168,14 +168,16 @@ enabled            = false
 # inventory_penalty_start_util = 0.6
 # max_single_fill_pct_nav = 5.0
 
-# [desk.limits]
-# premium_budget_soft = 0.30
-# premium_budget_hard = 0.35
+# [desk.limits]                     # long-only retrofit (doc 08 §0.4)
+# premium_budget_soft = 0.25
+# premium_budget_hard = 0.30
+# call_premium_max = 0.20
+# put_premium_max = 0.20
 # vega_cap_nav_per_volpt = 0.005
 # theta_soft_nav_per_day = 0.0010   # 10 bps
 # theta_hard_nav_per_day = 0.0015   # 15 bps
-# per_expiry_max = 0.30
-# per_strike_bucket_max = 0.15
+# per_expiry_max = 0.10
+# per_strike_bucket_max = 0.10
 # kill_drawdown = 0.10              # stop new buys: NAV −10% in 7d
 # kill_window_days = 7.0
 

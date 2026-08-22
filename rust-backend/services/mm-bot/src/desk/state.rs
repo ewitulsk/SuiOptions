@@ -92,6 +92,13 @@ pub struct ExposureDto {
     pub premium_by_expiry: HashMap<u64, f64>,
     /// [<90%, 90–110%, >110%] moneyness buckets.
     pub premium_by_strike_bucket: [f64; 3],
+    /// Composition surfaces (doc 08 §4.5, SO-431).
+    pub call_premium: f64,
+    pub put_premium: f64,
+    pub delta_units_positive: f64,
+    pub delta_units_negative: f64,
+    pub gamma_units_calls: f64,
+    pub gamma_units_puts: f64,
     pub kill_switch: bool,
     pub stress_blocked: bool,
     /// SO-418: the vault is risk-off (capital risk state / commitment
@@ -561,6 +568,12 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             theta_cost_per_day: exposure.theta_cost_per_day,
             premium_by_expiry: exposure.premium_by_expiry.clone(),
             premium_by_strike_bucket: exposure.premium_by_strike_bucket,
+            call_premium: exposure.call_premium,
+            put_premium: exposure.put_premium,
+            delta_units_positive: exposure.delta_units_positive,
+            delta_units_negative: exposure.delta_units_negative,
+            gamma_units_calls: exposure.gamma_units_calls,
+            gamma_units_puts: exposure.gamma_units_puts,
             kill_switch: exposure.kill_switch,
             stress_blocked,
             risk_off,
@@ -663,7 +676,7 @@ mod tests {
             ..Default::default()
         };
         let u = utilization(&cfg, &x);
-        assert!((u.premium - 3e6 / 3e8).abs() < 1e-12);
+        assert!((u.premium - 3e6 / 2.5e8).abs() < 1e-12);
         assert!((u.vega - 1e5 / 5e6).abs() < 1e-12);
         assert!((u.theta - 1e4 / 1e6).abs() < 1e-12);
         // NAV 0 → all zeros, no NaNs.
