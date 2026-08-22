@@ -155,6 +155,13 @@ sui-data-ingestion-core = { git = "https://github.com/mystenlabs/sui", package =
 shared-crypto = { git = "https://github.com/mystenlabs/sui", package = "shared-crypto", branch = "framework/mainnet" }
 sui-package-alt = { git = "https://github.com/mystenlabs/sui", package = "sui-package-alt", branch = "framework/mainnet" }
 move-core-types = { git = "https://github.com/mystenlabs/sui", package = "move-core-types", branch = "framework/mainnet" }
+# zkLogin types (JwkId/JWK/ZkLoginEnv) for auth-service's local signature
+# verification (SO-423). MUST stay on the exact rev sui-types pins (see
+# Cargo.lock) — a divergent rev is a loud compile error, not silent drift.
+fastcrypto-zkp = { git = "https://github.com/MystenLabs/fastcrypto", rev = "5f87e04bb21d295ef6b39375a06615d45cbb906c" }
+# VerifyParams carries its JWK map as an im::HashMap; pinned loosely —
+# Cargo unifies with sui-types'.
+im = "15"
 # gRPC chain access (replaces the deactivated JSON-RPC). Same pin as the
 # crates above, so the proto types convert to/from `sui-types` for free.
 sui-rpc-api = { git = "https://github.com/mystenlabs/sui", package = "sui-rpc-api", branch = "framework/mainnet" }

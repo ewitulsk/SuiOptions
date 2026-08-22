@@ -21,6 +21,13 @@ protocol-types = { workspace = true }
 token-info-client = { workspace = true }
 reqwest = { workspace = true }
 
+# Local verification of every Sui signature scheme incl. zkLogin (SO-423):
+# the validator-grade GenericSignature::verify_authenticator path.
+sui-types = { workspace = true }
+shared-crypto = { workspace = true }
+fastcrypto-zkp = { workspace = true }
+im = { workspace = true }
+
 config = { version = "0.14", features = ["toml"] }
 clap = { workspace = true }
 chrono = { workspace = true }

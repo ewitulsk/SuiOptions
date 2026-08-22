@@ -24,12 +24,19 @@ export async function fetchChallenge(): Promise<string> {
 }
 
 /** Exchange a signed challenge for a JWT. `signature` and `bytes` come
- *  straight from dapp-kit's `signPersonalMessage` result (both base64). */
-export async function login(signature: string, bytes: string): Promise<TokenResp> {
+ *  straight from dapp-kit's `signPersonalMessage` result (both base64).
+ *  `address` is the connected wallet — REQUIRED for zkLogin signatures
+ *  (their address is not recoverable server-side); a cross-check for
+ *  every other scheme. */
+export async function login(
+  signature: string,
+  bytes: string,
+  address?: string,
+): Promise<TokenResp> {
   const res = await fetch(`${base}/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ signature, bytes }),
+    body: JSON.stringify({ signature, bytes, address }),
   });
   if (!res.ok) {
     throw new Error(`login failed (${res.status}): ${await res.text()}`);
