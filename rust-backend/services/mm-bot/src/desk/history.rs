@@ -101,7 +101,7 @@ diesel::table! {
         symbol            -> Text,
         spot              -> Nullable<Double>,
         book_delta_units  -> Double,
-        hedge_short_units -> Double,
+        hedge_units       -> Double,
         net_delta_units   -> Double,
         band_units        -> Nullable<Double>,
     }
@@ -112,7 +112,7 @@ diesel::table! {
         time            -> Timestamptz,
         venue           -> Text,
         symbol          -> Text,
-        short_units     -> Double,
+        position_units  -> Double,
         funding_annual  -> Double,
         margin_headroom -> Double,
         notional        -> Double,
@@ -206,7 +206,7 @@ struct SymbolRow {
     symbol: String,
     spot: Option<f64>,
     book_delta_units: f64,
-    hedge_short_units: f64,
+    hedge_units: f64,
     net_delta_units: f64,
     band_units: Option<f64>,
 }
@@ -217,7 +217,7 @@ struct VenueRow {
     time: DateTime<Utc>,
     venue: String,
     symbol: String,
-    short_units: f64,
+    position_units: f64,
     funding_annual: f64,
     margin_headroom: f64,
     notional: f64,
@@ -702,7 +702,7 @@ impl History {
             #[diesel(sql_type = Double)]
             book_delta_units: f64,
             #[diesel(sql_type = Double)]
-            hedge_short_units: f64,
+            hedge_units: f64,
             #[diesel(sql_type = Double)]
             net_delta_units: f64,
             #[diesel(sql_type = Nullable<Double>)]
@@ -712,7 +712,7 @@ impl History {
         let rows = diesel::sql_query(
             "SELECT time_bucket(make_interval(secs => $1), time) AS bucket, symbol, \
                     avg(spot) AS spot, avg(book_delta_units) AS book_delta_units, \
-                    avg(hedge_short_units) AS hedge_short_units, \
+                    avg(hedge_units) AS hedge_units, \
                     avg(net_delta_units) AS net_delta_units, avg(band_units) AS band_units \
              FROM desk_symbol_samples \
              WHERE time >= $2 AND time < $3 AND ($4 = '' OR symbol = $4) \
@@ -732,7 +732,7 @@ impl History {
                     "symbol": r.symbol,
                     "spot": r.spot,
                     "bookDeltaUnits": r.book_delta_units,
-                    "hedgeShortUnits": r.hedge_short_units,
+                    "hedgeUnits": r.hedge_units,
                     "netDeltaUnits": r.net_delta_units,
                     "bandUnits": r.band_units,
                 })
@@ -756,7 +756,7 @@ impl History {
             #[diesel(sql_type = Text)]
             symbol: String,
             #[diesel(sql_type = Double)]
-            short_units: f64,
+            position_units: f64,
             #[diesel(sql_type = Double)]
             funding_annual: f64,
             #[diesel(sql_type = Double)]
@@ -769,7 +769,7 @@ impl History {
         let mut conn = self.conn()?;
         let rows = diesel::sql_query(
             "SELECT time_bucket(make_interval(secs => $1), time) AS bucket, venue, symbol, \
-                    avg(short_units) AS short_units, avg(funding_annual) AS funding_annual, \
+                    avg(position_units) AS position_units, avg(funding_annual) AS funding_annual, \
                     min(margin_headroom) AS margin_headroom, avg(notional) AS notional, \
                     last(realized_pnl, time) AS realized_pnl \
              FROM desk_venue_samples \
@@ -789,7 +789,7 @@ impl History {
                     "timeMs": r.bucket.timestamp_millis(),
                     "venue": r.venue,
                     "symbol": r.symbol,
-                    "shortUnits": r.short_units,
+                    "positionUnits": r.position_units,
                     "fundingRateAnnual": r.funding_annual,
                     "marginHeadroom": r.margin_headroom,
                     "notional": r.notional,
@@ -1031,7 +1031,7 @@ fn rows_from_snapshot(
             symbol: s.symbol.clone(),
             spot: dto.markets.iter().find(|m| m.symbol == s.symbol).and_then(|m| m.spot),
             book_delta_units: s.book_delta_units,
-            hedge_short_units: s.hedge_short_units,
+            hedge_units: s.hedge_units,
             net_delta_units: s.net_units,
             band_units: s.band_units,
         })
@@ -1045,7 +1045,7 @@ fn rows_from_snapshot(
             time,
             venue: v.name.clone(),
             symbol: v.symbol.clone(),
-            short_units: v.short_units,
+            position_units: v.position_units,
             funding_annual: v.funding_rate_annual,
             margin_headroom: v.margin_headroom,
             notional: v.notional,

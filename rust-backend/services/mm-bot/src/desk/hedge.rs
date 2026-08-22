@@ -2,8 +2,14 @@
 //! fills at oracle spot, real accounting persisted to disk), and the
 //! band rebalancer (00-plan V1 §3 — bands not clocks).
 //!
-//! Real venues (Bluefin) are follow-ups behind the same trait; nothing
-//! else in the desk knows which venue is wired.
+//! SIGNED positions (SO-428, doc 08 §4.2): `position_units > 0` is a
+//! LONG perp, `< 0` a short; the neutral target is `-book_delta` for
+//! call, put, and mixed books. The venue interface is order/event
+//! oriented — commands in, acknowledgement/fill/reject events out — so
+//! live venues (Bluefin) and the backtester's simulated venues share one
+//! seam. The paper venue resolves every order synchronously (ack + full
+//! fill in the returned events); a live venue returns what it has and
+//! delivers the rest through its event stream.
 
 use std::path::PathBuf;
 
@@ -11,16 +17,58 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// A short-perp (or equivalent) venue hedging one underlying.
+/// Client-assigned hedge order id (unique per process run).
+pub type OrderId = u64;
+
+/// One hedge order: signed market-style size in underlying units
+/// (positive = buy / increase position, negative = sell).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HedgeOrder {
+    pub id: OrderId,
+    /// Signed size, underlying units. Positive buys.
+    pub size_units: f64,
+    /// Reference spot the caller priced the order at.
+    pub spot: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HedgeCommand {
+    Submit(HedgeOrder),
+    Cancel(OrderId),
+    Replace { old: OrderId, new: HedgeOrder },
+}
+
+/// One (possibly partial) fill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fill {
+    pub order: OrderId,
+    /// Signed size filled (same sign convention as the order).
+    pub size_units: f64,
+    pub price: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum HedgeEvent {
+    Acknowledged(OrderId),
+    PartiallyFilled(Fill),
+    Filled(Fill),
+    Rejected { order: OrderId, reason: String },
+    Cancelled(OrderId),
+}
+
+/// A perp (or equivalent) venue hedging one underlying.
 #[async_trait]
 pub trait HedgeVenue: Send + Sync {
     fn name(&self) -> &str;
-    /// Current SHORT position in underlying units (positive = short).
+    /// Current SIGNED perp position in underlying units
+    /// (positive = long, negative = short).
     async fn position_units(&self) -> Result<f64>;
-    /// Adjust the short to `target_short_units` at (about) `spot`.
-    async fn adjust_to(&self, target_short_units: f64, spot: f64) -> Result<()>;
-    /// Annualized funding rate as seen by the short: positive = the short
-    /// RECEIVES funding, negative = it pays.
+    /// Execute one command. The returned events are everything the venue
+    /// resolved synchronously; async outcomes arrive through the venue's
+    /// own event stream when a live venue lands behind this seam.
+    async fn execute(&self, cmd: HedgeCommand) -> Result<Vec<HedgeEvent>>;
+    /// Annualized funding rate, market convention: positive = longs PAY
+    /// shorts (a short receives, a long pays).
     async fn funding_rate_annual(&self) -> Result<f64>;
     /// Margin headroom as a fraction of the position's requirement
     /// (1.0 = fully free; 0.0 = at margin call).
@@ -155,16 +203,18 @@ pub fn band_units_for(pct: f64, nav: f64, spot: f64) -> f64 {
     (pct / 100.0) * nav / spot
 }
 
-/// The rebalance decision: rebalance to delta-neutral (target short =
-/// book delta) only when the net-of-hedge delta leaves the band.
+/// The rebalance decision: rebalance to delta-neutral
+/// (`target_perp = -book_delta`, signed) only when the net delta
+/// (`book_delta + perp_position`) leaves the band. A negative book delta
+/// (puts) targets a LONG perp.
 pub fn rebalance_target(
     book_delta_units: f64,
-    hedge_short_units: f64,
+    perp_position_units: f64,
     band_units: f64,
 ) -> Option<f64> {
-    let net = book_delta_units - hedge_short_units;
+    let net = book_delta_units + perp_position_units;
     if net.abs() > band_units {
-        Some(book_delta_units.max(0.0))
+        Some(-book_delta_units)
     } else {
         None
     }
@@ -174,9 +224,9 @@ pub fn rebalance_target(
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PaperState {
-    /// Current short size, underlying units.
-    pub short_units: f64,
-    /// Volume-weighted average entry price of the open short.
+    /// Signed perp position, underlying units (positive = long).
+    pub position_units: f64,
+    /// Volume-weighted average entry price of the open position.
     pub avg_entry: f64,
     /// Realized P&L (settlement raw units), fills only.
     pub realized_pnl: f64,
@@ -203,15 +253,26 @@ impl PaperVenue {
     }
 
     /// A paper venue with an explicit monitor label (multi-venue roster).
+    /// Legacy (pre-SO-428) state files stored `short_units` with
+    /// positive = short; they migrate to the signed convention on load.
     pub fn load_named(
         name: impl Into<String>,
         path: PathBuf,
         slippage_bps: f64,
         funding_rate_annual: f64,
     ) -> Self {
-        let state: PaperState = std::fs::read_to_string(&path)
+        let state = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .map(|mut v| {
+                // Sign-flip migration: `short_units: 10` ⇒ position −10.
+                if let Some(short) = v.get("short_units").and_then(|s| s.as_f64()) {
+                    if v.get("position_units").is_none() {
+                        v["position_units"] = serde_json::json!(-short);
+                    }
+                }
+                serde_json::from_value::<PaperState>(v).unwrap_or_default()
+            })
             .unwrap_or_default();
         Self {
             name: name.into(),
@@ -230,38 +291,50 @@ impl PaperVenue {
             .with_context(|| format!("writing {}", self.path.display()))
     }
 
-    /// Apply one fill to the state (pure w.r.t. the struct; extracted for
-    /// unit tests). `delta_units > 0` increases the short.
-    fn apply_fill(state: &mut PaperState, delta_units: f64, spot: f64, slippage_bps: f64) {
+    /// Apply one signed fill to the state (extracted for unit tests).
+    /// `delta_units > 0` buys (extends a long / reduces a short). Returns
+    /// the fill price, or `None` for a no-op. Handles extend, reduce,
+    /// close, and direction reversal (the closed slice realizes P&L; the
+    /// remainder re-opens at the fill price).
+    fn apply_fill(
+        state: &mut PaperState,
+        delta_units: f64,
+        spot: f64,
+        slippage_bps: f64,
+    ) -> Option<f64> {
         if delta_units == 0.0 || spot <= 0.0 {
-            return;
+            return None;
         }
         let slip = spot * slippage_bps / 10_000.0;
-        // Increasing a short sells (worse = lower price); reducing buys
-        // back (worse = higher price).
-        let px = if delta_units > 0.0 { spot - slip } else { spot + slip };
-        let notional = delta_units.abs() * spot;
-        state.traded_notional += notional;
+        // Buys pay above spot; sells receive below it.
+        let px = spot + slip * delta_units.signum();
+        state.traded_notional += delta_units.abs() * spot;
         state.slippage_paid += delta_units.abs() * slip;
-        if delta_units > 0.0 {
-            // Extend the short: new VWAP entry.
-            let new_size = state.short_units + delta_units;
-            state.avg_entry = if new_size > 0.0 {
-                (state.avg_entry * state.short_units + px * delta_units) / new_size
-            } else {
-                0.0
-            };
-            state.short_units = new_size;
+        let pos = state.position_units;
+        if pos == 0.0 || pos.signum() == delta_units.signum() {
+            // Extend: new VWAP entry.
+            let new = pos + delta_units;
+            state.avg_entry = (state.avg_entry * pos.abs() + px * delta_units.abs()) / new.abs();
+            state.position_units = new;
         } else {
-            // Buy back: realize (entry − exit) × size on a short.
-            let close = delta_units.abs().min(state.short_units);
-            state.realized_pnl += (state.avg_entry - px) * close;
-            state.short_units -= close;
-            if state.short_units <= 1e-12 {
-                state.short_units = 0.0;
+            // Reduce / close / reverse. Realize on the closed slice:
+            // long realizes (exit − entry), short (entry − exit).
+            let close = delta_units.abs().min(pos.abs());
+            state.realized_pnl += (px - state.avg_entry) * close * pos.signum();
+            let new = pos + delta_units;
+            if new.abs() <= 1e-12 {
+                state.position_units = 0.0;
                 state.avg_entry = 0.0;
+            } else if new.signum() != pos.signum() {
+                // Reversal: the surviving remainder opened at this fill.
+                state.position_units = new;
+                state.avg_entry = px;
+            } else {
+                // Plain reduce: entry unchanged.
+                state.position_units = new;
             }
         }
+        Some(px)
     }
 
     /// Current state snapshot (monitors / P&L attribution).
@@ -277,22 +350,52 @@ impl HedgeVenue for PaperVenue {
     }
 
     async fn position_units(&self) -> Result<f64> {
-        Ok(self.state.lock().await.short_units)
+        Ok(self.state.lock().await.position_units)
     }
 
-    async fn adjust_to(&self, target_short_units: f64, spot: f64) -> Result<()> {
-        let mut state = self.state.lock().await;
-        let delta = target_short_units.max(0.0) - state.short_units;
-        Self::apply_fill(&mut state, delta, spot, self.slippage_bps);
-        self.persist(&state)?;
-        tracing::info!(
-            venue = %self.name,
-            target = target_short_units,
-            short = state.short_units,
-            realized = state.realized_pnl,
-            "hedge adjusted"
-        );
-        Ok(())
+    async fn execute(&self, cmd: HedgeCommand) -> Result<Vec<HedgeEvent>> {
+        match cmd {
+            HedgeCommand::Submit(order) => {
+                if order.size_units == 0.0 || order.spot <= 0.0 {
+                    return Ok(vec![HedgeEvent::Rejected {
+                        order: order.id,
+                        reason: "zero size or non-positive spot".into(),
+                    }]);
+                }
+                let mut state = self.state.lock().await;
+                let px = Self::apply_fill(
+                    &mut state,
+                    order.size_units,
+                    order.spot,
+                    self.slippage_bps,
+                )
+                .expect("nonzero order fills on the paper venue");
+                self.persist(&state)?;
+                tracing::info!(
+                    venue = %self.name,
+                    order = order.id,
+                    size = order.size_units,
+                    position = state.position_units,
+                    realized = state.realized_pnl,
+                    "hedge order filled (paper)"
+                );
+                Ok(vec![
+                    HedgeEvent::Acknowledged(order.id),
+                    HedgeEvent::Filled(Fill {
+                        order: order.id,
+                        size_units: order.size_units,
+                        price: px,
+                    }),
+                ])
+            }
+            // Paper orders fill instantly; nothing ever rests.
+            HedgeCommand::Cancel(id) => Ok(vec![HedgeEvent::Cancelled(id)]),
+            HedgeCommand::Replace { old, new } => {
+                let mut events = vec![HedgeEvent::Cancelled(old)];
+                events.extend(self.execute(HedgeCommand::Submit(new)).await?);
+                Ok(events)
+            }
+        }
     }
 
     async fn funding_rate_annual(&self) -> Result<f64> {
@@ -327,35 +430,65 @@ mod tests {
     }
 
     #[test]
-    fn rebalance_only_outside_band() {
-        // Inside the band: hold.
-        assert_eq!(rebalance_target(100.0, 60.0, 50.0), None);
-        // Outside: rebalance to neutral (short = book delta).
-        assert_eq!(rebalance_target(100.0, 30.0, 50.0), Some(100.0));
-        // Over-hedged beyond the band: buy back down to neutral.
-        assert_eq!(rebalance_target(10.0, 200.0, 50.0), Some(10.0));
-        // Negative book delta targets a flat short, never a long.
-        assert_eq!(rebalance_target(-80.0, 0.0, 50.0), Some(0.0));
+    fn rebalance_only_outside_band_signed() {
+        // Long calls (book delta +100), short −60 → net +40, inside 50: hold.
+        assert_eq!(rebalance_target(100.0, -60.0, 50.0), None);
+        // Net +70 outside the band: target the full short (−100).
+        assert_eq!(rebalance_target(100.0, -30.0, 50.0), Some(-100.0));
+        // Over-hedged beyond the band: buy back up to −10.
+        assert_eq!(rebalance_target(10.0, -200.0, 50.0), Some(-10.0));
+        // Long puts (book delta −80): target a LONG perp (+80).
+        assert_eq!(rebalance_target(-80.0, 0.0, 50.0), Some(80.0));
+        // A mixed book already netted needs no trade.
+        assert_eq!(rebalance_target(-80.0, 80.0, 50.0), None);
     }
 
     #[test]
-    fn paper_fill_accounting_round_trips() {
+    fn paper_fill_accounting_round_trips_short() {
         let mut s = PaperState::default();
-        // Open 10 short at spot 100, 10bps slip → entry 99.9.
-        PaperVenue::apply_fill(&mut s, 10.0, 100.0, 10.0);
-        assert!((s.short_units - 10.0).abs() < 1e-12);
+        // Sell 10 at spot 100, 10bps slip → entry 99.9, position −10.
+        PaperVenue::apply_fill(&mut s, -10.0, 100.0, 10.0);
+        assert!((s.position_units - -10.0).abs() < 1e-12);
         assert!((s.avg_entry - 99.9).abs() < 1e-9);
-        // Extend 10 more at 110 → entry VWAP (99.9 + 109.89)/2.
-        PaperVenue::apply_fill(&mut s, 10.0, 110.0, 10.0);
+        // Extend the short 10 more at 110 → entry VWAP (99.9 + 109.89)/2.
+        PaperVenue::apply_fill(&mut s, -10.0, 110.0, 10.0);
         assert!((s.avg_entry - (99.9 + 109.89) / 2.0).abs() < 1e-9);
         // Buy the whole 20 back at 90 (pays 90.09): pnl = (entry − exit)×20.
-        PaperVenue::apply_fill(&mut s, -20.0, 90.0, 10.0);
+        PaperVenue::apply_fill(&mut s, 20.0, 90.0, 10.0);
         let expected = ((99.9 + 109.89) / 2.0 - 90.09) * 20.0;
         assert!((s.realized_pnl - expected).abs() < 1e-6, "{}", s.realized_pnl);
-        assert_eq!(s.short_units, 0.0);
+        assert_eq!(s.position_units, 0.0);
         assert_eq!(s.avg_entry, 0.0);
         // Slippage: 10×0.1 + 10×0.11 + 20×0.09 = 3.9.
         assert!((s.slippage_paid - 3.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn paper_fill_accounting_round_trips_long() {
+        let mut s = PaperState::default();
+        // Buy 10 at 100 (pays 100.1), sell at 110 (receives 109.89).
+        PaperVenue::apply_fill(&mut s, 10.0, 100.0, 10.0);
+        assert!((s.position_units - 10.0).abs() < 1e-12);
+        assert!((s.avg_entry - 100.1).abs() < 1e-9);
+        PaperVenue::apply_fill(&mut s, -10.0, 110.0, 10.0);
+        assert!((s.realized_pnl - (109.89 - 100.1) * 10.0).abs() < 1e-9);
+        assert_eq!(s.position_units, 0.0);
+    }
+
+    #[test]
+    fn paper_reversal_realizes_closed_slice_and_reopens_remainder() {
+        let mut s = PaperState::default();
+        // Short 10 at 100 (no slip), then buy 25 at 90: closes the 10
+        // (pnl +100), leaves a 15 long opened at 90.
+        PaperVenue::apply_fill(&mut s, -10.0, 100.0, 0.0);
+        PaperVenue::apply_fill(&mut s, 25.0, 90.0, 0.0);
+        assert!((s.realized_pnl - 100.0).abs() < 1e-9);
+        assert!((s.position_units - 15.0).abs() < 1e-12);
+        assert!((s.avg_entry - 90.0).abs() < 1e-12);
+        // Sell the 15 long at 95: +75 more.
+        PaperVenue::apply_fill(&mut s, -15.0, 95.0, 0.0);
+        assert!((s.realized_pnl - 175.0).abs() < 1e-9);
+        assert_eq!(s.position_units, 0.0);
     }
 
     #[test]
@@ -411,14 +544,68 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         {
             let v = PaperVenue::load(path.clone(), 0.0, 0.0);
-            v.adjust_to(42.0, 100.0).await.unwrap();
-            assert!((v.position_units().await.unwrap() - 42.0).abs() < 1e-12);
+            let events = v
+                .execute(HedgeCommand::Submit(HedgeOrder { id: 1, size_units: -42.0, spot: 100.0 }))
+                .await
+                .unwrap();
+            assert!(matches!(events[0], HedgeEvent::Acknowledged(1)));
+            assert!(
+                matches!(events[1], HedgeEvent::Filled(Fill { order: 1, size_units, .. }) if (size_units - -42.0).abs() < 1e-12)
+            );
+            assert!((v.position_units().await.unwrap() - -42.0).abs() < 1e-12);
         }
         {
             let v = PaperVenue::load(path.clone(), 0.0, 0.0);
-            assert!((v.position_units().await.unwrap() - 42.0).abs() < 1e-12);
+            assert!((v.position_units().await.unwrap() - -42.0).abs() < 1e-12);
             assert!((v.snapshot().await.avg_entry - 100.0).abs() < 1e-12);
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn legacy_short_units_state_file_migrates_to_signed() {
+        let path = std::env::temp_dir().join(format!(
+            "mm-desk-paper-migrate-test-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{"short_units": 42.0, "avg_entry": 99.5, "realized_pnl": 7.0,
+                "slippage_paid": 1.0, "traded_notional": 4200.0}"#,
+        )
+        .unwrap();
+        let v = PaperVenue::load(path.clone(), 0.0, 0.0);
+        // 42 short (legacy) = signed −42.
+        assert!((v.position_units().await.unwrap() - -42.0).abs() < 1e-12);
+        assert!((v.snapshot().await.avg_entry - 99.5).abs() < 1e-12);
+        assert!((v.realized_pnl().await.unwrap() - 7.0).abs() < 1e-12);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn paper_rejects_zero_size_and_replace_cancels_then_fills() {
+        let path = std::env::temp_dir().join(format!(
+            "mm-desk-paper-events-test-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let v = PaperVenue::load(path.clone(), 0.0, 0.0);
+        let events = v
+            .execute(HedgeCommand::Submit(HedgeOrder { id: 7, size_units: 0.0, spot: 100.0 }))
+            .await
+            .unwrap();
+        assert!(matches!(&events[0], HedgeEvent::Rejected { order: 7, .. }));
+        let events = v
+            .execute(HedgeCommand::Replace {
+                old: 7,
+                new: HedgeOrder { id: 8, size_units: 5.0, spot: 100.0 },
+            })
+            .await
+            .unwrap();
+        assert!(matches!(events[0], HedgeEvent::Cancelled(7)));
+        assert!(matches!(events[1], HedgeEvent::Acknowledged(8)));
+        assert!(matches!(events[2], HedgeEvent::Filled(_)));
+        assert!((v.position_units().await.unwrap() - 5.0).abs() < 1e-12);
         let _ = std::fs::remove_file(&path);
     }
 }

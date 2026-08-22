@@ -51,7 +51,7 @@ function RosterCard({ state }: { state: DeskState }) {
               <tr>
                 <th>Venue</th>
                 <th>Symbol</th>
-                <th className="num">Short (units)</th>
+                <th className="num">Position (units)</th>
                 <th className="num">Notional</th>
                 <th className="num">Funding (ann.)</th>
                 <th className="num">Margin headroom</th>
@@ -77,7 +77,7 @@ function RosterCard({ state }: { state: DeskState }) {
                       {!v.readOk && <span className="neg"> read failed</span>}
                     </td>
                     <td>{v.symbol}</td>
-                    <td className="num">{fmtAmount(v.shortUnits / 10 ** udec, 4)}</td>
+                    <td className="num">{fmtAmount(v.positionUnits / 10 ** udec, 4)}</td>
                     <td className="num">{fmtAmount(fromRaw(v.notional, dec))}</td>
                     <td className="num">{fmtPct(v.fundingRateAnnual)}</td>
                     <td className="num">{v.simulated ? "n/a (paper)" : fmtPct(v.marginHeadroom)}</td>

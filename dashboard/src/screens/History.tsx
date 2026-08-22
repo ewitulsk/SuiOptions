@@ -158,8 +158,8 @@ function symbolLines(points: SymbolPoint[]): ChartLine[] {
         points: mine.map((p) => ({ timeMs: p.timeMs, value: p.bookDeltaUnits })),
       },
       {
-        name: `${sym} hedge short`,
-        points: mine.map((p) => ({ timeMs: p.timeMs, value: p.hedgeShortUnits })),
+        name: `${sym} hedge position`,
+        points: mine.map((p) => ({ timeMs: p.timeMs, value: p.hedgeUnits })),
       },
       {
         name: `${sym} net`,

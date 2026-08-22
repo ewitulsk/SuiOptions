@@ -1302,6 +1302,9 @@ fn spawn_rebalancer(p: RebalancerParams) {
         // Seed from the venue so a restart doesn't re-attribute the whole
         // persisted realized P&L as fresh scalp.
         let mut last_realized = p.venue.realized_pnl().await.unwrap_or(0.0);
+        // Process-local order ids (unique per run; the funnel/event log
+        // carries the venue name alongside).
+        let mut next_order_id: hedge::OrderId = 0;
         loop {
             ticker.tick().await;
             // The venue's own funding drives THIS band decision; the
@@ -1332,7 +1335,7 @@ fn spawn_rebalancer(p: RebalancerParams) {
                 .get(&p.coin_type)
                 .copied()
                 .unwrap_or(0.0);
-            let short = match p.venue.position_units().await {
+            let position = match p.venue.position_units().await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "hedge position read failed");
@@ -1340,16 +1343,42 @@ fn spawn_rebalancer(p: RebalancerParams) {
                 }
             };
             let band = hedge::band_units(&p.hedge_cfg, nav, spot, funding);
-            if let Some(target) = hedge::rebalance_target(delta, short, band) {
-                if let Err(e) = p.venue.adjust_to(target, spot).await {
-                    tracing::error!(
-                        alert_id = "tx-failed-mm-bot-desk",
-                        venue = p.venue.name(),
-                        symbol = %p.symbol,
-                        error = %format!("{e:#}"),
-                        "hedge adjust failed"
-                    );
+            if let Some(target) = hedge::rebalance_target(delta, position, band) {
+                let size = target - position;
+                if size == 0.0 {
                     continue;
+                }
+                next_order_id += 1;
+                let cmd = hedge::HedgeCommand::Submit(hedge::HedgeOrder {
+                    id: next_order_id,
+                    size_units: size,
+                    spot,
+                });
+                match p.venue.execute(cmd).await {
+                    Ok(events) => {
+                        for ev in &events {
+                            if let hedge::HedgeEvent::Rejected { order, reason } = ev {
+                                tracing::error!(
+                                    alert_id = "tx-failed-mm-bot-desk",
+                                    venue = p.venue.name(),
+                                    symbol = %p.symbol,
+                                    order,
+                                    %reason,
+                                    "hedge order rejected"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            alert_id = "tx-failed-mm-bot-desk",
+                            venue = p.venue.name(),
+                            symbol = %p.symbol,
+                            error = %format!("{e:#}"),
+                            "hedge order failed"
+                        );
+                        continue;
+                    }
                 }
                 // Long-gamma rebalancing sells high / buys low: realized
                 // hedge P&L is the scalp line.
