@@ -491,21 +491,21 @@ bookTicker.
 - **No flash-loan borrow ceiling from any of this** (§7.3). No poller in
   this document produces `quote_balance`; it needs an on-chain read.
 
-## 4.1 What is not wired: telemetry
+## 4.1 Telemetry (wired in S0)
 
 The collector exports `dataroom_collector_messages_total` and
-`dataroom_collector_last_message_unix_seconds` on `:9100`, but **nothing
-scrapes the data-room host** — there is no data-room job in
-`rust-backend/deployment/monitoring/prometheus.yml`. The
-`dataroom-collector-stalled` alert referenced in the spec's R1 gate and
-in the runbook exists only as a string; there is no rule anywhere in the
-repo.
+`dataroom_collector_last_message_unix_seconds` on `:9100`. S0 wired the
+`services-data-room` scrape job in
+`rust-backend/deployment/monitoring/prometheus.yml` (private IP, covered
+by the existing `scrape-target-down` rule) and the
+`dataroom-collector-stalled` Grafana rule
+(`time() - max by (exchange) (dataroom_collector_last_message_unix_seconds) > 600`).
 
-Consequence for every gate in this document: **check bronze in S3
-directly** (`aws s3 ls s3://options-data-room-20260813122351104900000001/bronze/v1/…`).
-Do not plan on a metric firing. Wiring the scrape plus the stall rule is
-worth its own step, and it should precede S2 — a Bluefin socket that dies
-quietly is exactly the failure this is missing.
+Residual gap: the stall rule aggregates `max by (exchange)`, so a single
+dead stream is masked while any sibling stream on the same exchange is
+alive. Tighten to per-stream granularity (doc 08 §3.2). Gate checks may
+still verify bronze in S3 directly
+(`aws s3 ls s3://options-data-room-20260813122351104900000001/bronze/v1/…`).
 
 ---
 
@@ -644,4 +644,4 @@ person does not have to re-derive them:
 - Bucket `options-data-room-20260813122351104900000001`.
 - Lifecycle: bronze → STANDARD_IA at 30 d → GLACIER_IR at 180 d.
 - Disk alarm at 80%; no SNS action (Grafana handles alerting).
-- No Prometheus scrape of this host (§4.1).
+- Prometheus scrapes `:9100` via the `services-data-room` job (§4.1).

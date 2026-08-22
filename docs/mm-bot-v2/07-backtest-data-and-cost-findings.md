@@ -1,17 +1,21 @@
 # Backtest data inventory & execution-cost findings
 
 Status: **RESEARCH FINDINGS, 2026-08-15.** Nothing here is implemented.
-This records what the data room can and cannot answer about the V1
-strategy, and — more importantly — three measured results that change
+This records what the data room can and cannot answer about the call leg
+of the strategy, and — more importantly — three measured results that change
 parameters already written into `00-plan.md` and `hedge.rs`. Companion
 docs: `00-plan.md` (strategy spec), `01-perps-venues.md` (venue
 findings), `06-dbm-removal.md` (why Bluefin), `TODO.md`.
 
-The strategy under examination is V1 as clarified 2026-08-15: the bot
-buys covered calls from retail on the Earn page, lists them on the
-exchange orderbook for resale, and delta-hedges the inventory with perps
-while it holds it. SUI is the launch underlying. The RFQ API is gated so
-only makers may respond; all other flow arrives through our own frontend.
+The measurements in this document cover the call leg only: the bot buys
+covered calls from retail on the Earn page, lists them on the exchange
+orderbook for resale, and delta-hedges the inventory with perps while it
+holds it. The agreed strategy now also buys cash-secured puts written on
+the Earn page. None of the call-only turnover, exercise, or P&L figures
+below validate that put leg; the framework in `08-backtesting-framework.md`
+must measure calls, puts, and mixed books separately. SUI is the launch
+underlying. The RFQ API is gated so only makers may respond; all other flow
+arrives through our own frontend.
 
 ---
 
@@ -99,7 +103,8 @@ only real quote data we will ever get for SUI, and it is the only way to
   (quotes), so no fill quality and no flow toxicity.
 - **Binance funding stops 2026-07-31** — monthly dump publication lag,
   not a bug.
-- **`tools/backtester` + `crates/vault-sim` are the wrong engine** —
+- **`rust-backend/tools/backtester` + `rust-backend/crates/vault-sim` are
+  the wrong engine** —
   daily OHLC CSVs, synthetic paths, targeting the deprecated
   covered-call vault. Daily bars destroy the intraday rebalancing that
   the P&L actually lives in. (Being cut separately.)
@@ -252,8 +257,9 @@ cannot remove**.
 
 This is the standard result — optimal hedge bandwidth scales roughly as
 (cost/gamma)^⅓, so tight bands are only correct when costs are near zero.
-`00-plan.md` lists ±1.5% NAV under "V1 starting parameters (revisit after
-60–90 days)" with no cost model behind it.
+The original `00-plan.md` listed ±1.5% NAV under "Starting parameters
+(revisit after 60–90 days)" with no cost model behind it; the plan now uses
+the provisional call-only correction below.
 
 **Action:** `hedge.rs` defaults `band_pct_nav: 1.5` / `band_wide_pct_nav:
 2.5` should become roughly `15` / `25`. Revisit before launch, not after.
@@ -367,7 +373,7 @@ buy-as-it-falls — mechanically identical to passive two-sided quoting.
 Because the bot buys calls it is structurally long gamma, so its hedge is
 naturally passive-executable. (A short-gamma book must buy high and sell
 low, which resting orders cannot express — short-gamma hedging is
-intrinsically taker. Relevant for V2.)
+intrinsically taker. The agreed desk does not write options.)
 
 Gaps are survivable: a resting order gapped through still fills at *our*
 price, better than where the market ended up. The failure mode is running
@@ -636,9 +642,9 @@ controlled is the **bid on the Earn page**.
 
 ## 11. Corrections to existing docs
 
-| Doc | Says | Should say |
+| Location | Previous value | Resolution |
 |---|---|---|
-| `00-plan.md` | delta band ±1.5% NAV (2.5% wide) | ~15% / 25% — §5 |
+| `00-plan.md` | delta band ±1.5% NAV (2.5% wide) | Corrected to provisional call bands ~15% / 25%; put/mixed bands remain backtest-gated — §5 |
 | `hedge.rs` | `band_pct_nav: 1.5`, `band_wide_pct_nav: 2.5` | same |
 | `hedge.rs` | `paper_slippage_bps: 5.0` | 3.5 bp taker + spread; sweep it |
 | `01-perps-venues.md` | Bluefin "SUI taker 0.1%" | 0.035% flat — §6.1 |
