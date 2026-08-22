@@ -11,26 +11,33 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// `[desk.limits]` — defaults are the 00-plan V1 starting parameters.
+/// `[desk.limits]` — defaults are the 00-plan starting parameters
+/// (retrofit to the long-only strategy, doc 08 §0.4/§4.5: soft 25 /
+/// hard 30 total, 20% per side, 10% per expiry and strike bucket).
 /// `Serialize` so `/desk/state` can echo the effective limits (SO-348).
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LimitsConfig {
     /// Soft premium budget, fraction of NAV (inventory penalty ramps
-    /// against this). 00-plan: 30%.
+    /// against this). 00-plan: 25%.
     pub premium_budget_soft: f64,
-    /// Hard premium budget, fraction of NAV. 00-plan: 35%.
+    /// Hard premium budget, fraction of NAV. 00-plan: 30%.
     pub premium_budget_hard: f64,
+    /// Max premium in CALLS, fraction of NAV (doc 08 §0.4: 20%).
+    pub call_premium_max: f64,
+    /// Max premium in PUTS, fraction of NAV (doc 08 §0.4: 20%).
+    pub put_premium_max: f64,
     /// Net vega cap: fraction of NAV per vol point. 00-plan: 0.5%.
     pub vega_cap_nav_per_volpt: f64,
     /// Theta governor soft throttle, NAV fraction per day. 00-plan: 10bps.
     pub theta_soft_nav_per_day: f64,
     /// Theta governor hard cap, NAV fraction per day. 00-plan: 15bps.
     pub theta_hard_nav_per_day: f64,
-    /// Max premium per expiry, fraction of NAV. 00-plan: 30%.
+    /// Max premium per expiry (calls + puts), fraction of NAV.
+    /// 00-plan retrofit: 10%.
     pub per_expiry_max: f64,
     /// Max premium per strike-moneyness bucket, fraction of NAV.
-    /// 00-plan: 15% (buckets <90 / 90–110 / >110%).
+    /// 00-plan retrofit: 10% (buckets <90 / 90–110 / >110%).
     pub per_strike_bucket_max: f64,
     /// Kill switch: stop new buys if NAV drops this fraction within
     /// `kill_window_days`. 00-plan: 10% in 7d.
@@ -41,13 +48,15 @@ pub struct LimitsConfig {
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
-            premium_budget_soft: 0.30,
-            premium_budget_hard: 0.35,
+            premium_budget_soft: 0.25,
+            premium_budget_hard: 0.30,
+            call_premium_max: 0.20,
+            put_premium_max: 0.20,
             vega_cap_nav_per_volpt: 0.005,
             theta_soft_nav_per_day: 0.0010,
             theta_hard_nav_per_day: 0.0015,
-            per_expiry_max: 0.30,
-            per_strike_bucket_max: 0.15,
+            per_expiry_max: 0.10,
+            per_strike_bucket_max: 0.10,
             kill_drawdown: 0.10,
             kill_window_days: 7.0,
         }
@@ -87,6 +96,18 @@ pub struct BookExposure {
     pub premium_by_expiry: HashMap<u64, f64>,
     /// Premium per strike-moneyness bucket (see [`strike_bucket`]).
     pub premium_by_strike_bucket: [f64; 3],
+    /// Marked premium held in CALLS (composition sublimit — SO-431).
+    pub call_premium: f64,
+    /// Marked premium held in PUTS.
+    pub put_premium: f64,
+    /// Positive-delta inventory (Σ of per-line delta·amount where > 0),
+    /// underlying units — composition surface, doc 08 §4.5.
+    pub delta_units_positive: f64,
+    /// Negative-delta inventory (Σ where < 0; stored negative).
+    pub delta_units_negative: f64,
+    /// Gamma by option type, underlying units per 1.0 spot move.
+    pub gamma_units_calls: f64,
+    pub gamma_units_puts: f64,
     /// Kill switch already latched (from [`KillSwitch::check`]).
     pub kill_switch: bool,
 }
@@ -96,6 +117,8 @@ pub struct BookExposure {
 pub struct ProposedFill {
     /// Premium the fill would deploy, settlement raw.
     pub premium: f64,
+    /// Put or call — drives the per-side premium sublimit.
+    pub is_put: bool,
     /// Vega the fill would add, settlement raw per vol pt.
     pub vega_per_volpt: f64,
     /// Theta cost the fill would add, per day.
@@ -118,6 +141,8 @@ pub struct Utilization {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HardDecline {
     PremiumBudget,
+    CallPremiumBudget,
+    PutPremiumBudget,
     VegaCap,
     ThetaGovernor,
     ExpiryConcentration,
@@ -129,6 +154,8 @@ impl HardDecline {
     pub fn as_str(self) -> &'static str {
         match self {
             HardDecline::PremiumBudget => "premium budget hard cap",
+            HardDecline::CallPremiumBudget => "call premium sublimit",
+            HardDecline::PutPremiumBudget => "put premium sublimit",
             HardDecline::VegaCap => "net vega cap",
             HardDecline::ThetaGovernor => "theta governor hard cap",
             HardDecline::ExpiryConcentration => "per-expiry concentration cap",
@@ -154,6 +181,15 @@ pub fn evaluate(
     let premium_after = x.premium_deployed + x.reserved + fill.premium;
     if premium_after > cfg.premium_budget_hard * x.nav {
         return Err(HardDecline::PremiumBudget);
+    }
+    // Per-side sublimits (doc 08 §0.4/§4.5): calls and puts each capped
+    // so one side can never consume the whole book.
+    if fill.is_put {
+        if x.put_premium + fill.premium > cfg.put_premium_max * x.nav {
+            return Err(HardDecline::PutPremiumBudget);
+        }
+    } else if x.call_premium + fill.premium > cfg.call_premium_max * x.nav {
+        return Err(HardDecline::CallPremiumBudget);
     }
     let vega_after = x.net_vega_per_volpt + fill.vega_per_volpt;
     let vega_cap = cfg.vega_cap_nav_per_volpt * x.nav;
@@ -241,6 +277,7 @@ mod tests {
     fn fill() -> ProposedFill {
         ProposedFill {
             premium: 1e6,
+            is_put: false,
             vega_per_volpt: 1e5,
             theta_cost_per_day: 1e4,
             expiry_ms: 42,
@@ -251,8 +288,8 @@ mod tests {
     #[test]
     fn happy_path_reports_utilizations() {
         let u = evaluate(&cfg(), &base(), &fill()).unwrap();
-        // premium: 1e6 / (0.30 × 1e9) ≈ 0.0033
-        assert!((u.premium - 1e6 / 3e8).abs() < 1e-9);
+        // premium: 1e6 / (0.25 × 1e9) = 0.004
+        assert!((u.premium - 1e6 / 2.5e8).abs() < 1e-9);
         // vega: 1e5 / (0.005 × 1e9) = 0.02
         assert!((u.vega - 0.02).abs() < 1e-9);
         // theta: 1e4 / (0.0010 × 1e9) = 0.01
@@ -262,13 +299,34 @@ mod tests {
     #[test]
     fn premium_hard_cap_trips() {
         let mut x = base();
-        x.premium_deployed = 0.34 * 1e9;
+        x.premium_deployed = 0.29 * 1e9;
         x.reserved = 0.005 * 1e9;
         let mut f = fill();
-        f.premium = 0.006 * 1e9; // 34% + 0.5% + 0.6% > 35%
+        f.premium = 0.006 * 1e9; // 29% + 0.5% + 0.6% > 30%
         assert_eq!(evaluate(&cfg(), &x, &f), Err(HardDecline::PremiumBudget));
         // Reservations count against the budget.
         x.reserved = 0.0;
+        assert!(evaluate(&cfg(), &x, &f).is_ok());
+    }
+
+    #[test]
+    fn per_side_sublimits_trip_independently(){
+        // Call-heavy book: the next call breaches the 20% call cap while
+        // an identical put is still welcome (mixed books keep quoting).
+        let mut x = base();
+        x.call_premium = 0.199 * 1e9;
+        x.premium_deployed = 0.199 * 1e9;
+        let mut f = fill();
+        f.premium = 0.002 * 1e9;
+        assert_eq!(evaluate(&cfg(), &x, &f), Err(HardDecline::CallPremiumBudget));
+        f.is_put = true;
+        assert!(evaluate(&cfg(), &x, &f).is_ok());
+        // Put-heavy book mirrors it.
+        let mut x = base();
+        x.put_premium = 0.199 * 1e9;
+        x.premium_deployed = 0.199 * 1e9;
+        assert_eq!(evaluate(&cfg(), &x, &f), Err(HardDecline::PutPremiumBudget));
+        f.is_put = false;
         assert!(evaluate(&cfg(), &x, &f).is_ok());
     }
 
@@ -298,7 +356,7 @@ mod tests {
     #[test]
     fn concentration_caps_trip() {
         let mut x = base();
-        x.premium_by_expiry.insert(42, 0.299 * 1e9);
+        x.premium_by_expiry.insert(42, 0.099 * 1e9);
         let mut f = fill();
         f.premium = 0.002 * 1e9;
         assert_eq!(evaluate(&cfg(), &x, &f), Err(HardDecline::ExpiryConcentration));
@@ -307,7 +365,7 @@ mod tests {
         assert!(evaluate(&cfg(), &x, &f).is_ok());
         // Strike bucket.
         let mut x = base();
-        x.premium_by_strike_bucket[2] = 0.149 * 1e9;
+        x.premium_by_strike_bucket[2] = 0.099 * 1e9;
         f.expiry_ms = 42;
         f.strike_bucket = 2;
         assert_eq!(evaluate(&cfg(), &x, &f), Err(HardDecline::StrikeConcentration));

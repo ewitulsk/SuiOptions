@@ -994,6 +994,20 @@ fn spawn_book_refresher(p: RefresherParams) {
                 exposure.theta_cost_per_day += (-g.theta * amt).max(0.0);
                 *exposure.premium_by_expiry.entry(h.expiry_ms).or_default() += mark * amt;
                 exposure.premium_by_strike_bucket[limits::strike_bucket(k, spot)] += mark * amt;
+                // Composition surfaces (doc 08 §4.5, SO-431).
+                if h.is_put {
+                    exposure.put_premium += mark * amt;
+                    exposure.gamma_units_puts += g.gamma * amt;
+                } else {
+                    exposure.call_premium += mark * amt;
+                    exposure.gamma_units_calls += g.gamma * amt;
+                }
+                let line_delta = g.delta * amt;
+                if line_delta >= 0.0 {
+                    exposure.delta_units_positive += line_delta;
+                } else {
+                    exposure.delta_units_negative += line_delta;
+                }
                 *delta_by_coin.entry(h.asset_coin_type.clone()).or_default() += g.delta * amt;
             }
             // Written lines subtract their full greeks so quoting sees

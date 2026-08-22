@@ -1716,8 +1716,10 @@ mod config_tests {
                 );
                 assert!(cfg.desk.mm_release_enabled, "{name}: enabled desk needs mm release");
             }
-            // Defaults are the 00-plan starting parameters.
-            assert_eq!(cfg.desk.limits.premium_budget_hard, 0.35, "{name}");
+            // Defaults are the 00-plan starting parameters (long-only
+            // retrofit, doc 08 §0.4).
+            assert_eq!(cfg.desk.limits.premium_budget_hard, 0.30, "{name}");
+            assert_eq!(cfg.desk.limits.call_premium_max, 0.20, "{name}");
             assert_eq!(cfg.desk.v1.base_spread_volpts, 0.05, "{name}");
         }
         // Prod has no provisioned vault yet — desk stays off there.
