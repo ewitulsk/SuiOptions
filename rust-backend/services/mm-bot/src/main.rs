@@ -9,8 +9,8 @@
 //! catalog, per-market vol buffers fed from the oracle-service WS price
 //! cache, on-chain QuoteSigner (created + funded on first run).
 //!
-//! Phase 2: the desk (`mm_bot::desk`) — V1 delta-hedged long-vol fund
-//! (V2 two-sided maker behind `[desk.v2]`): book reconstructed from VAULT
+//! Phase 2: the desk (`mm_bot::desk`) — delta-hedged long-vol fund
+//! (long-only: the desk never writes options, SO-426): book reconstructed from VAULT
 //! custody, limits engine, paper-hedged delta bands, on-chain auction
 //! bidder, exit ladder, monitors + nightly stress. The WS serve loop
 //! authenticates with the quoting service and prices RFQs through the
@@ -177,7 +177,7 @@ struct BotConfig {
     #[serde(default)]
     pyth: PythConfig,
 
-    /// The vol desk (SO-299) — V1 long-vol fund, V2 behind `[desk.v2]`.
+    /// The vol desk (SO-299) — long-only vol fund (never writes, SO-426).
     #[serde(default)]
     desk: mm_bot::desk::DeskConfig,
 
@@ -1719,7 +1719,6 @@ mod config_tests {
             // Defaults are the 00-plan starting parameters.
             assert_eq!(cfg.desk.limits.premium_budget_hard, 0.35, "{name}");
             assert_eq!(cfg.desk.v1.base_spread_volpts, 0.05, "{name}");
-            assert!(!cfg.desk.v2.enabled, "{name}: v2 must ship disabled");
         }
         // Prod has no provisioned vault yet — desk stays off there.
         assert!(!parse("config.prod.toml").desk.enabled, "prod desk must ship disabled");

@@ -1,5 +1,6 @@
-//! The vol desk (SO-299): V1 delta-hedged long-vol fund, V2 two-sided
-//! maker behind a config gate. Replaces every legacy strategy module.
+//! The vol desk (SO-299): delta-hedged long-vol fund. Long-only — the
+//! desk never writes options (SO-426, doc 08 §4.1); trader-flow RFQs
+//! decline unconditionally. Replaces every legacy strategy module.
 //!
 //! Standing product decision (doc 05): the bot trades ONLY as the trading
 //! vault's curator — quotes route collateral from the vault
@@ -43,7 +44,7 @@ use crate::pricing::{compute_spot_from_cache, Staleness};
 
 use book::{Book, PnlLine};
 use limits::{BookExposure, LimitsConfig};
-use model::{MarketModel, SurfaceConfig, V1BidParams, V2Params};
+use model::{MarketModel, SurfaceConfig, V1BidParams};
 use quote::{Decision, FlowContext, RfqInputs};
 
 // ── config ─────────────────────────────────────────────────────────────
@@ -75,7 +76,6 @@ pub struct DeskConfig {
     pub surface: SurfaceTomlConfig,
     pub limits: LimitsConfig,
     pub v1: V1Config,
-    pub v2: V2Config,
     pub hedge: hedge::HedgeConfig,
     pub auctions: auctions::AuctionsConfig,
     pub exits: exits::ExitsConfig,
@@ -103,7 +103,6 @@ impl Default for DeskConfig {
             surface: SurfaceTomlConfig::default(),
             limits: LimitsConfig::default(),
             v1: V1Config::default(),
-            v2: V2Config::default(),
             hedge: hedge::HedgeConfig::default(),
             auctions: auctions::AuctionsConfig::default(),
             exits: exits::ExitsConfig::default(),
@@ -215,67 +214,6 @@ impl From<V1Config> for V1BidParams {
     }
 }
 
-/// `[desk.v2]` — the two-sided maker (00-plan V2 starting parameters).
-/// Disabled by default; trader-flow RFQs decline while off.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(default)]
-pub struct V2Config {
-    pub enabled: bool,
-    /// ±3 vol pt base spread (0.03 — netting allows tighter than V1).
-    pub base_spread_volpts: f64,
-    /// Signed vega band: +0.5% NAV/vol pt long…
-    pub vega_band_long: f64,
-    /// …to −0.15% NAV/vol pt short.
-    pub vega_band_short: f64,
-    /// Inventory-skew strength: mid shift = k × (net vega / band width),
-    /// in vol (decimal). NEGATIVE k shifts the mid down when long (sell
-    /// inventory) and up when short (buy it back) — the useful direction.
-    pub skew_k: f64,
-    /// Asymmetric size caps, % NAV: write 3 / buy 5.
-    pub write_cap_pct_nav: f64,
-    pub buy_cap_pct_nav: f64,
-    /// Near-expiry ATM throttle: inside 48h, 2× spread and ½ size.
-    pub near_expiry_hours: f64,
-    pub near_expiry_spread_mult: f64,
-    pub near_expiry_size_mult: f64,
-    /// Naked short vega hard cap, NAV fraction per vol pt. 00-plan: 0.1%.
-    pub naked_vega_cap_nav_per_volpt: f64,
-}
-
-impl Default for V2Config {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            base_spread_volpts: 0.03,
-            vega_band_long: 0.005,
-            vega_band_short: 0.0015,
-            skew_k: -0.01,
-            write_cap_pct_nav: 3.0,
-            buy_cap_pct_nav: 5.0,
-            near_expiry_hours: 48.0,
-            near_expiry_spread_mult: 2.0,
-            near_expiry_size_mult: 0.5,
-            naked_vega_cap_nav_per_volpt: 0.001,
-        }
-    }
-}
-
-impl From<V2Config> for V2Params {
-    fn from(c: V2Config) -> Self {
-        V2Params {
-            base_spread_volpts: c.base_spread_volpts,
-            vega_band_long: c.vega_band_long,
-            vega_band_short: c.vega_band_short,
-            skew_k: c.skew_k,
-            write_cap_pct_nav: c.write_cap_pct_nav,
-            buy_cap_pct_nav: c.buy_cap_pct_nav,
-            near_expiry_hours: c.near_expiry_hours,
-            near_expiry_spread_mult: c.near_expiry_spread_mult,
-            near_expiry_size_mult: c.near_expiry_size_mult,
-        }
-    }
-}
-
 // ── shared runtime state ───────────────────────────────────────────────
 
 /// Per-bucket mark snapshot written by the book refresher: model fair,
@@ -315,7 +253,10 @@ pub struct DeskShared {
     pub exposure: RwLock<BookExposure>,
     /// Net book delta per underlying coin type, underlying raw units.
     pub book_delta_units: RwLock<HashMap<String, f64>>,
-    /// Naked written units across the book (V2 budget usage).
+    /// Naked written units across the book — legacy written-inventory
+    /// detection only (SO-426): the desk never writes options, so any
+    /// nonzero value is pre-existing inventory that blocks new quotes
+    /// until unwound.
     pub naked_written_units: RwLock<u64>,
     /// Last observed hedge funding rate (annualized).
     pub funding_rate_annual: RwLock<f64>,
@@ -351,8 +292,6 @@ impl DeskShared {
             funding_rate_annual: *self.funding_rate_annual.read(),
             expected_holding_years: self.expected_holding_years,
             slippage_bps: self.slippage_bps,
-            naked_written_units: *self.naked_written_units.read(),
-            stress_blocked: self.stress_blocked.load(Ordering::Relaxed),
         }
     }
 }
@@ -390,23 +329,24 @@ pub struct Desk {
     pub settlement_coin_type: String,
     pub settlement_decimals: u8,
     v1: V1BidParams,
-    v2: Option<V2Params>,
     limits: LimitsConfig,
     quote_ttl_ms: u64,
 }
 
 impl Desk {
-    /// Price one WS RFQ. `Side::Writer` = retail writes (the desk buys —
-    /// V1 writer flow); `Side::Trader` = retail buys (the desk writes —
-    /// V2 trader flow). With `reserve`, a writer-flow quote reserves its
-    /// premium for the quote TTL (pass false for indicative bulk views —
-    /// nothing is signed there).
     /// The model's vol for one market at a point on the surface — the input
     /// the moneyness guard sizes its band from, so the band widens and
     /// narrows with the same surface the pricing uses.
     pub fn model_sigma(&self, model_index: usize, spot: f64, strike: f64, t_years: f64) -> f64 {
         self.models[model_index].sigma(spot, strike, t_years).0
     }
+
+    /// Price one WS RFQ. `Side::Writer` = retail writes (the desk buys).
+    /// `Side::Trader` = retail buys — the desk NEVER writes options
+    /// (SO-426, doc 08 §4.1), so trader RFQs always decline. With
+    /// `reserve`, a writer-flow quote reserves its premium for the quote
+    /// TTL (pass false for indicative bulk views — nothing is signed
+    /// there).
 
     pub async fn price_ws_rfq(
         &self,
@@ -423,6 +363,17 @@ impl Desk {
         if self.shared.risk_off.load(Ordering::Relaxed) {
             return Decision::Decline {
                 reason: "vault risk-off (capital risk state / commitment breach)".into(),
+            };
+        }
+        // Legacy written inventory is a migration problem, not a
+        // strategy: surface it and block new quoting until it is
+        // unwound (doc 08 §4.1 gate).
+        let naked = *self.shared.naked_written_units.read();
+        if naked > 0 {
+            return Decision::Decline {
+                reason: format!(
+                    "legacy written inventory present ({naked} naked units); quoting blocked until unwound"
+                ),
             };
         }
         let model = &self.models[model_index];
@@ -446,37 +397,10 @@ impl Desk {
                 }
                 d
             }
-            Side::Trader => {
-                let cover = self.cover_available(&inputs);
-                quote::price_trader_flow(
-                    model,
-                    self.v2.as_ref(),
-                    self.cfg.v2.naked_vega_cap_nav_per_volpt,
-                    &ctx,
-                    &inputs,
-                    cover,
-                    now_ms,
-                )
-            }
+            Side::Trader => Decision::Decline {
+                reason: "desk does not write options (long-only strategy)".into(),
+            },
         }
-    }
-
-    /// Held long units in the same series (strike/expiry/kind) available
-    /// to cover a proposed write. Units resting as exchange asks
-    /// (SO-416) are excluded — they may sell at any moment, so they
-    /// cannot double as cover.
-    fn cover_available(&self, inputs: &RfqInputs) -> u64 {
-        let book = self.book.read();
-        book.holdings
-            .iter()
-            .filter(|h| {
-                h.is_put == inputs.is_put
-                    && h.strike == inputs.strike
-                    && h.strike_scale == inputs.strike_scale
-                    && h.expiry_ms == inputs.expiry_ms
-            })
-            .map(|h| h.amount().saturating_sub(book.listed_units(&h.bucket_id)))
-            .sum()
     }
 }
 
@@ -875,7 +799,6 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         curator_cap = resolved.curator_cap.is_some(),
         markets = p.markets.len(),
         hedge_venues = venue_specs.len(),
-        v2 = p.cfg.v2.enabled,
         "desk started (vault-only maker)"
     );
     let market_meta = p
@@ -890,7 +813,6 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         .collect();
     Ok(Arc::new(Desk {
         v1: p.cfg.v1.into(),
-        v2: p.cfg.v2.enabled.then(|| p.cfg.v2.into()),
         limits: p.cfg.limits,
         quote_ttl_ms: p.quote_ttl_ms,
         cfg: p.cfg,

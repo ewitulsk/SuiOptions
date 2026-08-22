@@ -172,7 +172,9 @@ export type DeskState = {
     expectedHoldingYears: number;
     surface: Record<string, number | null>;
     v1: Record<string, number>;
-    v2: Record<string, number | boolean>;
+    // Removed server-side with the option-writing strategy (SO-426);
+    // optional so older bots that still echo it stay parseable.
+    v2?: Record<string, number | boolean>;
     monitors: Record<string, number>;
     auctionsEnabled: boolean;
     exitsEnabled: boolean;

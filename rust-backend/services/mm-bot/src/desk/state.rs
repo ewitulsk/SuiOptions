@@ -19,7 +19,7 @@ use super::hedge;
 use super::limits::LimitsConfig;
 use super::model::Greeks;
 use super::monitors::{read_venue, MonitorsConfig};
-use super::{Desk, StressSnapshot, SurfaceTomlConfig, V1Config, V2Config};
+use super::{Desk, StressSnapshot, SurfaceTomlConfig, V1Config};
 
 /// Static per-market metadata captured at desk boot (aligned with
 /// `Desk::models`).
@@ -321,7 +321,6 @@ pub struct ConfigEchoDto {
     pub expected_holding_years: f64,
     pub surface: SurfaceTomlConfig,
     pub v1: V1Config,
-    pub v2: V2Config,
     pub monitors: MonitorsConfig,
     pub auctions_enabled: bool,
     pub exits_enabled: bool,
@@ -607,7 +606,6 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             expected_holding_years: desk.cfg.expected_holding_years,
             surface: desk.cfg.surface,
             v1: desk.cfg.v1,
-            v2: desk.cfg.v2,
             monitors: desk.cfg.monitors,
             auctions_enabled: desk.cfg.auctions.enabled,
             exits_enabled: desk.cfg.exits.enabled,

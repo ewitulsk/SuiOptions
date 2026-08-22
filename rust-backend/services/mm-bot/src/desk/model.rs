@@ -18,7 +18,7 @@ use pyth_client::RollingVolBuffer;
 
 pub use pricing::american::AmericanInputs;
 pub use pricing::Greeks;
-pub use pricing::desk::{BidContext, V1BidParams, V2Params, VolDiscount};
+pub use pricing::desk::{BidContext, V1BidParams, VolDiscount};
 use pricing::surface::{SurfaceParams, VolSurface, WindowSample};
 
 /// CRR binomial steps for greeks / exercise-boundary reads. 128 is well
@@ -260,21 +260,4 @@ impl MarketModel {
     pub fn v1_vol_discount(&self, ctx: &BidContext, params: &V1BidParams) -> Option<VolDiscount> {
         pricing::desk::v1_vol_discount(ctx, params)
     }
-}
-
-/// V2 skewed effective sigmas `(bid_sigma, ask_sigma)` for two-sided
-/// quoting. `None` = short-vol capacity exhausted (at/past the short
-/// band edge — no writing).
-pub fn v2_effective_sigmas(
-    sigma_fair: f64,
-    net_vega_per_nav_volpt: f64,
-    t_years: f64,
-    params: &V2Params,
-) -> Option<(f64, f64)> {
-    pricing::desk::v2_effective_sigmas(sigma_fair, net_vega_per_nav_volpt, t_years, params)
-}
-
-/// V2 write-size scale (→ 0 at the short edge of the vega band).
-pub fn v2_write_size_scale(net_vega_per_nav_volpt: f64, params: &V2Params) -> f64 {
-    pricing::desk::v2_write_size_scale(net_vega_per_nav_volpt, params)
 }
