@@ -239,7 +239,7 @@ async fn main() -> anyhow::Result<()> {
                     "exchange" => poller.exchange.clone(), "stream" => poller.stream.clone())
                 .increment(1);
                 metrics::gauge!("dataroom_collector_last_message_unix_seconds",
-                    "exchange" => poller.exchange.clone())
+                    "exchange" => poller.exchange.clone(), "stream" => poller.stream.clone())
                 .set(ts as f64 / 1e9);
                 let closed = {
                     let mut s = spool.lock().unwrap();
@@ -495,7 +495,7 @@ async fn capture_once(
                     "exchange" => conn.exchange.clone(), "stream" => stream.clone())
                 .increment(1);
                 metrics::gauge!("dataroom_collector_last_message_unix_seconds",
-                    "exchange" => conn.exchange.clone())
+                    "exchange" => conn.exchange.clone(), "stream" => stream.clone())
                 .set(ts as f64 / 1e9);
                 let closed = {
                     let mut s = spool.lock().unwrap();

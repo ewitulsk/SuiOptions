@@ -1,6 +1,6 @@
 # Grafana alert-rule provisioning (SO-180).
 #
-# Four rules:
+# Five rules:
 #  1. alert-id-errors — ANY error!() log carrying an `alert_id` field, in any
 #     service, fires within a minute, grouped by alert_id. Adding a new alert
 #     is purely `error!(alert_id = "stable-id", ...)` in code — no infra.
@@ -8,6 +8,8 @@
 #  3. scrape-target-down — Prometheus `up == 0` for any service.
 #  4. dataroom-collector-stalled — a data-room capture feed that has gone
 #     quiet while the process is still up (SO-402).
+#  5. dataroom-stream-stalled — ONE fixed-cadence poller stream quiet
+#     while sibling streams on the same exchange stay live (SO-427).
 #
 # Contact points / notification policies are NOT provisioned — configure
 # them in the Grafana UI (they persist in the grafana data volume); these
@@ -144,6 +146,48 @@ groups:
             datasourceUid: prometheus
             model:
               expr: 'time() - max by (exchange) (dataroom_collector_last_message_unix_seconds) > 600'
+              instant: true
+              intervalMs: 15000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 0, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [A] }
+                  reducer: { type: last, params: [] }
+
+      # Per-STREAM stall (SO-427): the exchange-level rule above
+      # aggregates `max by (exchange)`, so one dead poller hides behind a
+      # live sibling stream on the same exchange. Scoped to fixed-cadence
+      # streams only (chain./book./ticker./route. — pollers at 30–300s
+      # plus the continuous Bluefin diff-depth): 15m is ≥3 missed cycles
+      # of the slowest 300s ladder poll. Event-driven streams (trades.*,
+      # control.*) can legitimately gap and stay under the exchange rule.
+      # Needs the `stream` label on the freshness gauge (collector
+      # ≥ SO-427).
+      - uid: dataroom-stream-stalled
+        title: data-room collector stream stalled
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: 'data-room stream {{ $labels.exchange }}/{{ $labels.stream }} has produced no messages for >15m while its exchange is otherwise live'
+        labels:
+          source: dataroom_collector
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'time() - max by (exchange, stream) (dataroom_collector_last_message_unix_seconds{stream=~"(chain|book|ticker|route)\\..*"}) > 900'
               instant: true
               intervalMs: 15000
               maxDataPoints: 43200

@@ -501,10 +501,12 @@ by the existing `scrape-target-down` rule) and the
 `dataroom-collector-stalled` Grafana rule
 (`time() - max by (exchange) (dataroom_collector_last_message_unix_seconds) > 600`).
 
-Residual gap: the stall rule aggregates `max by (exchange)`, so a single
-dead stream is masked while any sibling stream on the same exchange is
-alive. Tighten to per-stream granularity (doc 08 §3.2). Gate checks may
-still verify bronze in S3 directly
+SO-427 closed the residual per-stream gap: the freshness gauge now
+carries a `stream` label and `dataroom-stream-stalled` fires when one
+fixed-cadence stream (`chain./book./ticker./route.`) goes quiet >15m
+while its exchange stays live. Event-driven streams (`trades.*`,
+`control.*`) can legitimately gap and stay under the exchange-level
+rule. Gate checks may still verify bronze in S3 directly
 (`aws s3 ls s3://options-data-room-20260813122351104900000001/bronze/v1/…`).
 
 ---
