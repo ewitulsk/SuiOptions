@@ -95,13 +95,26 @@ pub fn price_writer_flow(
         Err(hard) => return decline_hard(hard),
     };
 
+    // Direction-aware expected hedge cost (doc 08 §4.3): funding on the
+    // fill's SIGNED incremental hedge notional (puts carry negative
+    // delta → a LONG hedge that PAYS positive funding), never on premium.
+    let incremental_delta_units = greeks.delta * amount;
     let bid_ctx = BidContext {
         nav: ctx.exposure.nav,
         premium_notional: fair_pu * amount,
         vega_utilization: util.vega,
-        funding_rate_annual: ctx.funding_rate_annual,
-        expected_holding_years: ctx.expected_holding_years,
-        slippage_cost: greeks.delta.abs() * ctx.spot * amount * ctx.slippage_bps / 10_000.0,
+        hedge_cost: pricing::desk::ExpectedHedgeCost {
+            funding: pricing::desk::expected_funding_cost(
+                incremental_delta_units,
+                ctx.spot,
+                ctx.funding_rate_annual,
+                ctx.expected_holding_years,
+                v1.funding_income_credit,
+            ),
+            venue_fees: 0.0,
+            slippage: greeks.delta.abs() * ctx.spot * amount * ctx.slippage_bps / 10_000.0,
+            fixed_cost: 0.0,
+        },
     };
     let Some((total_bid, _sigma)) =
         model.v1_bid_total(inputs.is_put, ctx.spot, strike, t, amount, &bid_ctx, v1)
@@ -287,4 +300,32 @@ mod tests {
         assert!(matches!(&d, Decision::Decline { .. }), "{d:?}");
     }
 
+
+    #[test]
+    fn funding_sign_flows_into_the_bid_by_direction() {
+        let m = model();
+        let limits = LimitsConfig::default();
+        let put = RfqInputs { is_put: true, ..atm(1_000_000) };
+        let call = atm(1_000_000);
+        let mut pos_funding = ctx();
+        pos_funding.funding_rate_annual = 0.30;
+        let mut neg_funding = ctx();
+        neg_funding.funding_rate_annual = -0.30;
+
+        // Positive funding: the long-perp PUT hedge pays → bid drops.
+        let flat_p = premium_of(&price_writer_flow(&m, &v1(), &limits, &ctx(), &put, 0));
+        let pay_p = premium_of(&price_writer_flow(&m, &v1(), &limits, &pos_funding, &put, 0));
+        assert!(pay_p < flat_p, "put bid {pay_p} !< {flat_p} under positive funding");
+        // The short-perp CALL hedge RECEIVES it — income is not priced
+        // (funding_income_credit = 0), so the call bid is unchanged.
+        let flat_c = premium_of(&price_writer_flow(&m, &v1(), &limits, &ctx(), &call, 0));
+        let earn_c = premium_of(&price_writer_flow(&m, &v1(), &limits, &pos_funding, &call, 0));
+        assert_eq!(flat_c, earn_c, "call bid must not price in funding income");
+        // Negative funding reverses both: the call hedge now pays…
+        let pay_c = premium_of(&price_writer_flow(&m, &v1(), &limits, &neg_funding, &call, 0));
+        assert!(pay_c < flat_c, "call bid {pay_c} !< {flat_c} under negative funding");
+        // …and the put hedge would earn (uncredited → unchanged).
+        let earn_p = premium_of(&price_writer_flow(&m, &v1(), &limits, &neg_funding, &put, 0));
+        assert_eq!(flat_p, earn_p, "put bid must not price in funding income");
+    }
 }

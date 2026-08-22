@@ -186,6 +186,9 @@ pub struct V1Config {
     pub inventory_penalty_start_util: f64,
     /// Max single fill, % of NAV in premium. 00-plan: 5.
     pub max_single_fill_pct_nav: f64,
+    /// Fraction of expected funding INCOME credited into the bid
+    /// (doc 08 §4.3). 0 = conservative: income is upside, never priced.
+    pub funding_income_credit: f64,
 }
 
 impl Default for V1Config {
@@ -197,6 +200,7 @@ impl Default for V1Config {
             inventory_penalty_max_volpts: 0.10,
             inventory_penalty_start_util: 0.6,
             max_single_fill_pct_nav: 5.0,
+            funding_income_credit: 0.0,
         }
     }
 }
@@ -210,6 +214,7 @@ impl From<V1Config> for V1BidParams {
             inventory_penalty_max_volpts: c.inventory_penalty_max_volpts,
             inventory_penalty_start_util: c.inventory_penalty_start_util,
             max_single_fill_pct_nav: c.max_single_fill_pct_nav,
+            funding_income_credit: c.funding_income_credit,
         }
     }
 }
