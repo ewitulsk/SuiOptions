@@ -42,6 +42,11 @@ pub enum Decision {
     Quote {
         /// Premium in settlement smallest-units.
         premium: u64,
+        /// Model fair TOTAL premium at the decision's surface vol —
+        /// diagnostics for the RFQ funnel (SO-425), never the bid.
+        model_fair: f64,
+        /// Surface vol the decision priced at, annualized.
+        surface_vol: f64,
     },
     Decline {
         reason: String,
@@ -118,7 +123,11 @@ pub fn price_writer_flow(
             reason: "priced to zero".into(),
         };
     }
-    Decision::Quote { premium: premium as u64 }
+    Decision::Quote {
+        premium: premium as u64,
+        model_fair: fair_pu * amount,
+        surface_vol: sigma,
+    }
 }
 
 /// V2 trader flow: the desk writes to retail. `v2` is `None` while
@@ -201,7 +210,11 @@ pub fn price_trader_flow(
             reason: "priced to zero".into(),
         };
     }
-    Decision::Quote { premium: premium as u64 }
+    Decision::Quote {
+        premium: premium as u64,
+        model_fair: model.fair_per_unit(inputs.is_put, ctx.spot, strike, t, sigma_fair) * amount,
+        surface_vol: ask_sigma,
+    }
 }
 
 fn decline_hard(hard: HardDecline) -> Decision {
@@ -279,7 +292,7 @@ mod tests {
 
     fn premium_of(d: &Decision) -> u64 {
         match d {
-            Decision::Quote { premium } => *premium,
+            Decision::Quote { premium, .. } => *premium,
             other => panic!("expected Quote, got {other:?}"),
         }
     }
@@ -296,6 +309,12 @@ mod tests {
         let fair = m.fair_per_unit(false, 100.0, 100.0, 30.0 / 365.0, 0.60) * 1e6;
         assert!((premium as f64) < fair, "premium {premium} !< fair {fair}");
         assert!((premium as f64) > fair * 0.5, "premium {premium} collapsed vs fair {fair}");
+        // Funnel diagnostics (SO-425): the reported model fair is the
+        // pre-discount fair and the surface vol is the one priced at.
+        let Decision::Quote { model_fair, surface_vol, .. } = d else { unreachable!() };
+        assert!((model_fair - fair).abs() < 1.0, "model_fair {model_fair} != fair {fair}");
+        assert!((premium as f64) <= model_fair, "bid above its own model fair");
+        assert!((surface_vol - 0.60).abs() < 1e-9, "surface_vol {surface_vol} != 0.60");
     }
 
     #[test]

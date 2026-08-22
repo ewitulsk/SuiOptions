@@ -776,6 +776,7 @@ async fn main() -> Result<()> {
             integration_registry,
             deepbook,
             deep_coin_type,
+            history: history.clone(),
         })
         .await?;
         // The resolved vault, which is not `cfg.desk.vault_id` when the
@@ -1002,7 +1003,25 @@ async fn main() -> Result<()> {
                         payload: protocol_types::messages::DeclinePayload { reason },
                     };
 
+                    // RFQ funnel (SO-425): one durable row per decision.
+                    let mut rfq_row = mm_bot::desk::history::RfqOutcomeRow::base(
+                        request_id.clone(),
+                        "ws",
+                        payload.spec.is_put,
+                        match payload.side {
+                            protocol_types::sides::Side::Writer => "writer",
+                            protocol_types::sides::Side::Trader => "trader",
+                        },
+                        payload.spec.strike_scaled(),
+                        payload.spec.expiry_ms,
+                        payload.write_amount,
+                        now,
+                    );
+
                     let (Some(desk_ref), Some(routing)) = (&desk, &vault_routing) else {
+                        if let Some(h) = &history {
+                            h.record_rfq(rfq_row.clone().declined("desk disabled".into(), now));
+                        }
                         if let Err(e) =
                             ws_client::send_json(&mut ws, &decline("desk disabled".into())).await
                         {
@@ -1040,12 +1059,17 @@ async fn main() -> Result<()> {
                         metrics::counter!("mm_bot_quote_failures_total", "reason" => "pair_not_served")
                             .increment(1);
                         tracing::debug!(?request_id, %reason, "declining");
+                        if let Some(h) = &history {
+                            h.record_rfq(rfq_row.clone().declined(reason.clone(), now));
+                        }
                         if let Err(e) = ws_client::send_json(&mut ws, &decline(reason)).await {
                             tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
                             break 'serve;
                         }
                         continue 'serve;
                     };
+
+                    rfq_row.symbol = Some(markets[mi].symbol.clone());
 
                     // Live spot scaled into the bucket's units.
                     let spot = match compute_spot_from_cache(
@@ -1061,6 +1085,12 @@ async fn main() -> Result<()> {
                             metrics::counter!("mm_bot_quote_failures_total", "reason" => "stale_price")
                                 .increment(1);
                             tracing::debug!(?request_id, reason = e.as_str(), "declining: stale market data");
+                            if let Some(h) = &history {
+                                h.record_rfq(rfq_row.clone().declined(
+                                    format!("stale market data: {}", e.as_str()),
+                                    now,
+                                ));
+                            }
                             if let Err(e) = ws_client::send_json(
                                 &mut ws,
                                 &decline(format!("stale market data: {}", e.as_str())),
@@ -1074,6 +1104,8 @@ async fn main() -> Result<()> {
                         }
                     };
 
+                    rfq_row.spot_at_request = Some(spot);
+
                     // Admissibility BEFORE the model. A permissionless spec
                     // surface is a new risk surface, not just new plumbing —
                     // see `desk::guards`.
@@ -1084,6 +1116,9 @@ async fn main() -> Result<()> {
                         metrics::counter!("mm_bot_quote_failures_total", "reason" => refusal.label())
                             .increment(1);
                         tracing::debug!(?request_id, refusal = refusal.label(), "declining");
+                        if let Some(h) = &history {
+                            h.record_rfq(rfq_row.clone().declined(refusal.reason(), now));
+                        }
                         if let Err(e) =
                             ws_client::send_json(&mut ws, &decline(refusal.reason())).await
                         {
@@ -1097,6 +1132,9 @@ async fn main() -> Result<()> {
                         metrics::counter!("mm_bot_quote_failures_total", "reason" => refusal.label())
                             .increment(1);
                         tracing::debug!(?request_id, "declining: spec rate limit");
+                        if let Some(h) = &history {
+                            h.record_rfq(rfq_row.clone().declined(refusal.reason(), now));
+                        }
                         if let Err(e) =
                             ws_client::send_json(&mut ws, &decline(refusal.reason())).await
                         {
@@ -1117,7 +1155,7 @@ async fn main() -> Result<()> {
                         .price_ws_rfq(payload.side, mi, inputs, spot, true, now)
                         .await
                     {
-                        Decision::Quote { premium } => {
+                        Decision::Quote { premium, model_fair, surface_vol } => {
                             nonce_counter = nonce_counter.wrapping_add(1);
                             // Vault-only routing: collateral from the vault's
                             // `vault_mm` release; outputs to the vault.
@@ -1174,12 +1212,26 @@ async fn main() -> Result<()> {
                             metrics::counter!("mm_bot_quotes_signed_total").increment(1);
                             metrics::histogram!("mm_bot_rfq_response_duration_seconds")
                                 .record(rfq_start.elapsed().as_secs_f64());
+                            if let Some(h) = &history {
+                                rfq_row.response_latency_ms =
+                                    Some(rfq_start.elapsed().as_secs_f64() * 1000.0);
+                                h.record_rfq(rfq_row.clone().quoted(
+                                    premium,
+                                    model_fair,
+                                    surface_vol,
+                                    now.saturating_add(cfg.quote_ttl_ms),
+                                    Some(nonce_counter),
+                                ));
+                            }
                             tracing::info!(premium, nonce = nonce_counter, "quote sent");
                         }
                         Decision::Decline { reason } => {
                             metrics::counter!("mm_bot_quote_failures_total", "reason" => "price_declined")
                                 .increment(1);
                             tracing::debug!(?request_id, %reason, "declining");
+                            if let Some(h) = &history {
+                                h.record_rfq(rfq_row.clone().declined(reason.clone(), now));
+                            }
                             if let Err(e) = ws_client::send_json(&mut ws, &decline(reason)).await {
                                 tracing::warn!(error = %e, "ws send (decline) failed; reconnecting");
                                 break 'serve;
@@ -1256,7 +1308,7 @@ async fn main() -> Result<()> {
                             };
                             // Indicative only: nothing is signed, no nonce is
                             // burned, no premium is reserved.
-                            if let Decision::Quote { premium } = desk_ref
+                            if let Decision::Quote { premium, .. } = desk_ref
                                 .price_ws_rfq(payload.side, mi, inputs, spot, false, now)
                                 .await
                             {

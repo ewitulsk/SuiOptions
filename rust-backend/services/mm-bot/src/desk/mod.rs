@@ -430,7 +430,7 @@ impl Desk {
         match side {
             Side::Writer => {
                 let d = quote::price_writer_flow(model, &self.v1, &self.limits, &ctx, &inputs, now_ms);
-                if let (true, Decision::Quote { premium }) = (reserve, &d) {
+                if let (true, Decision::Quote { premium, .. }) = (reserve, &d) {
                     // Reserve the premium while the quote is live; TTL
                     // expiry frees it if the quote is never executed.
                     if self
@@ -536,6 +536,9 @@ pub struct DeskParams {
     pub deepbook: Option<DeepBookHandles>,
     /// The deployment's DEEP token type (token-info `deep_coin_type`).
     pub deep_coin_type: Option<String>,
+    /// Desk history DB — the fill poller closes RFQ-funnel rows through
+    /// it (SO-425). `None` ⇒ funnel recording off, trading unaffected.
+    pub history: Option<Arc<history::History>>,
 }
 
 /// Resolved on-chain identities for curator-session PTBs (vault-funded
@@ -741,6 +744,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         settlement_decimals: p.settlement_decimals,
         staleness: p.staleness,
         vault_id: protocol_types::ids::ObjectId::new(vault_id.into_bytes()),
+        history: p.history.clone(),
     });
 
     // Hedge rebalancers (bands, not clocks) — primary venue per market.
@@ -1144,6 +1148,7 @@ struct FillPollerParams {
     settlement_decimals: u8,
     staleness: Staleness,
     vault_id: protocol_types::ids::ObjectId,
+    history: Option<Arc<history::History>>,
 }
 
 /// How a detected fill priced this tick.
@@ -1293,6 +1298,22 @@ fn spawn_fill_poller(p: FillPollerParams) {
                 book::apply_fills(&mut b, &mut cur, &cursor_path, &priced, now)
             };
             cursor = Some(cur);
+            // Close the RFQ-funnel rows these fills belong to (SO-425).
+            // Idempotent updates — a replayed batch re-marks the same
+            // rows filled.
+            if let Some(h) = &p.history {
+                for (f, _) in &priced {
+                    let key = match &f.link {
+                        book::FillLink::WsQuote { nonce } => {
+                            history::RfqFillKey::Nonce(*nonce)
+                        }
+                        book::FillLink::AuctionTicket { ticket } => {
+                            history::RfqFillKey::Request(ticket.to_hex())
+                        }
+                    };
+                    h.record_rfq_filled(key, f.sequence, now);
+                }
+            }
             if applied > 0 {
                 tracing::info!(applied, cursor = cur.last_sequence, "fills attributed to spread line");
             }
