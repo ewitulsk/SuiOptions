@@ -29,7 +29,8 @@ export type SymbolPoint = {
   symbol: string;
   spot: number | null;
   bookDeltaUnits: number;
-  hedgeShortUnits: number;
+  // Signed hedge position (positive = long — SO-428).
+  hedgeUnits: number;
   netDeltaUnits: number;
   bandUnits: number | null;
 };
@@ -38,7 +39,8 @@ export type VenuePoint = {
   timeMs: number;
   venue: string;
   symbol: string;
-  shortUnits: number;
+  // Signed perp position (positive = long — SO-428).
+  positionUnits: number;
   fundingRateAnnual: number;
   marginHeadroom: number;
   notional: number;

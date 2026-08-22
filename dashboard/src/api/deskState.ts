@@ -78,7 +78,8 @@ export type DeskVenue = {
   name: string;
   symbol: string;
   simulated: boolean;
-  shortUnits: number;
+  // Signed perp position (positive = long — SO-428).
+  positionUnits: number;
   fundingRateAnnual: number;
   marginHeadroom: number;
   notional: number;
@@ -89,7 +90,8 @@ export type DeskVenue = {
 export type SymbolHedge = {
   symbol: string;
   bookDeltaUnits: number;
-  hedgeShortUnits: number;
+  // Signed hedge position (positive = long — SO-428).
+  hedgeUnits: number;
   netUnits: number;
   bandUnits: number | null;
 };

@@ -106,7 +106,7 @@ function DeltaCard({ state }: { state: DeskState }) {
             <div className="dash-meter__row">
               <span>
                 <b style={{ fontFamily: "inherit" }}>{s.symbol}</b>
-                {"  "}book {scale(s.bookDeltaUnits)} · hedge short {scale(s.hedgeShortUnits)} ·
+                {"  "}book {scale(s.bookDeltaUnits)} · hedge {scale(s.hedgeUnits)} ·
                 net {scale(s.netUnits)}
               </span>
               <b>

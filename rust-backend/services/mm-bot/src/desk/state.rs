@@ -265,10 +265,11 @@ pub struct VenueDto {
     /// funding is a config constant and margin headroom a placeholder.
     /// Flips per-venue when a real venue (Bluefin) lands.
     pub simulated: bool,
-    pub short_units: f64,
+    /// Signed perp position, underlying units (positive = long — SO-428).
+    pub position_units: f64,
     pub funding_rate_annual: f64,
     pub margin_headroom: f64,
-    /// |short| × spot, settlement raw.
+    /// |position| × spot, settlement raw.
     pub notional: f64,
     pub realized_pnl: f64,
     /// `None` when a venue read failed this snapshot.
@@ -280,7 +281,8 @@ pub struct VenueDto {
 pub struct SymbolHedgeDto {
     pub symbol: String,
     pub book_delta_units: f64,
-    pub hedge_short_units: f64,
+    /// Signed hedge position (positive = long — SO-428).
+    pub hedge_units: f64,
     pub net_units: f64,
     /// Current band width, underlying units (funding-widened when
     /// applicable). `None` when spot is unavailable.
@@ -468,7 +470,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
                 name: r.name,
                 symbol: r.symbol,
                 simulated: true,
-                short_units: r.short_units,
+                position_units: r.position_units,
                 funding_rate_annual: r.funding_annual,
                 margin_headroom: r.margin_headroom,
                 notional: r.notional,
@@ -479,7 +481,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
                 name: mv.venue.name().to_string(),
                 symbol: mv.symbol.clone(),
                 simulated: true,
-                short_units: 0.0,
+                position_units: 0.0,
                 funding_rate_annual: 0.0,
                 margin_headroom: 0.0,
                 notional: 0.0,
@@ -494,10 +496,10 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
         .map(|m| {
             let book_delta =
                 book_delta_units.get(&m.coin_type).copied().unwrap_or(0.0);
-            let hedge_short: f64 = venues
+            let hedge_units: f64 = venues
                 .iter()
                 .filter(|v| v.symbol == m.symbol)
-                .map(|v| v.short_units)
+                .map(|v| v.position_units)
                 .sum();
             let band_units = spots.get(&m.symbol).map(|s| {
                 hedge::band_units(&desk.cfg.hedge, exposure.nav, s.spot, funding_rate_annual)
@@ -505,8 +507,8 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             SymbolHedgeDto {
                 symbol: m.symbol.clone(),
                 book_delta_units: book_delta,
-                hedge_short_units: hedge_short,
-                net_units: book_delta - hedge_short,
+                hedge_units,
+                net_units: book_delta + hedge_units,
                 band_units,
             }
         })

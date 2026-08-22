@@ -13,7 +13,7 @@
 //!
 //! Multi-venue aggregation (SO-299): the monitors hold the whole hedge
 //! roster. The delta band compares each underlying's book delta against
-//! the TOTAL short across that underlying's venues; margin headroom is
+//! the TOTAL signed position across that underlying's venues; margin headroom is
 //! the MIN across venues; the funding rate fed to pricing
 //! (`DeskShared::funding_rate_annual`) is the notional-weighted average
 //! across venues (simple mean while every venue is flat). Gauges carry
@@ -83,19 +83,20 @@ pub struct MonitorVenue {
 pub struct VenueReading {
     pub name: String,
     pub symbol: String,
-    /// Short position, underlying units (positive = short).
-    pub short_units: f64,
+    /// Signed perp position, underlying units (positive = long — SO-428).
+    pub position_units: f64,
     pub funding_annual: f64,
     pub margin_headroom: f64,
-    /// |short| × spot, settlement raw — the funding weight.
+    /// |position| × spot, settlement raw — the funding weight.
     pub notional: f64,
 }
 
 /// Cross-venue aggregates the monitors act on.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VenueAggregate {
-    /// Total hedge short per underlying symbol (delta-band input).
-    pub short_by_symbol: HashMap<String, f64>,
+    /// Total SIGNED hedge position per underlying symbol
+    /// (delta-band input; positive = long).
+    pub position_by_symbol: HashMap<String, f64>,
     /// The venue with the least margin room: (venue name, headroom).
     pub min_headroom: Option<(String, f64)>,
     /// Notional-weighted funding across venues; simple mean when every
@@ -109,7 +110,7 @@ pub fn aggregate_venues(readings: &[VenueReading]) -> VenueAggregate {
     let mut weighted_sum = 0.0;
     let mut weight = 0.0;
     for r in readings {
-        *agg.short_by_symbol.entry(r.symbol.clone()).or_default() += r.short_units;
+        *agg.position_by_symbol.entry(r.symbol.clone()).or_default() += r.position_units;
         weighted_sum += r.funding_annual * r.notional;
         weight += r.notional;
         let worse = match &agg.min_headroom {
@@ -133,16 +134,16 @@ pub fn aggregate_venues(readings: &[VenueReading]) -> VenueAggregate {
 /// Read one venue's snapshot at `spot` (its underlying's price); `None`
 /// when any venue call errors (the tick logs and moves on).
 pub async fn read_venue(mv: &MonitorVenue, spot: f64) -> Option<VenueReading> {
-    let short_units = mv.venue.position_units().await.ok()?;
+    let position_units = mv.venue.position_units().await.ok()?;
     let funding_annual = mv.venue.funding_rate_annual().await.ok()?;
     let margin_headroom = mv.venue.margin_headroom().await.ok()?;
     Some(VenueReading {
         name: mv.venue.name().to_string(),
         symbol: mv.symbol.clone(),
-        short_units,
+        position_units,
         funding_annual,
         margin_headroom,
-        notional: short_units.abs() * spot.max(0.0),
+        notional: position_units.abs() * spot.max(0.0),
     })
 }
 
@@ -302,8 +303,8 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
     let spots = spots_by_symbol(p);
     let readings = read_all_venues(p, &spots).await;
     for r in &readings {
-        metrics::gauge!("mm_desk_hedge_short_units", "venue" => r.name.clone(), "symbol" => r.symbol.clone())
-            .set(r.short_units);
+        metrics::gauge!("mm_desk_hedge_position_units", "venue" => r.name.clone(), "symbol" => r.symbol.clone())
+            .set(r.position_units);
         metrics::gauge!("mm_desk_funding_rate_annual", "venue" => r.name.clone(), "symbol" => r.symbol.clone())
             .set(r.funding_annual);
         metrics::gauge!("mm_desk_margin_headroom", "venue" => r.name.clone(), "symbol" => r.symbol.clone())
@@ -329,8 +330,8 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
         *p.shared.funding_rate_annual.write() = agg.funding_weighted;
     }
 
-    // Delta vs band, per market, against the TOTAL short across that
-    // market's venues.
+    // Delta vs band, per market, against the TOTAL signed position
+    // across that market's venues.
     let deltas = p.shared.book_delta_units.read().clone();
     for model in p.models.iter() {
         let delta_units = deltas.get(&model.coin_type).copied().unwrap_or(0.0);
@@ -339,9 +340,9 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
         let Some(spot) = spots.get(&model.symbol).copied() else {
             continue;
         };
-        let hedge_short = agg.short_by_symbol.get(&model.symbol).copied().unwrap_or(0.0);
+        let hedge_position = agg.position_by_symbol.get(&model.symbol).copied().unwrap_or(0.0);
         let band = super::hedge::band_units_for(p.hedge_band_pct_nav, nav, spot);
-        let net = delta_units - hedge_short;
+        let net = delta_units + hedge_position;
         metrics::gauge!("mm_desk_delta_net_of_hedge_units", "symbol" => model.symbol.clone())
             .set(net);
         if net.abs() > band && band.is_finite() {
@@ -379,8 +380,9 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
 }
 
 /// Revalue the live book under the 00-plan stress scenarios and set the
-/// V2 gate. Results are logged + exported as gauges. Hedge legs use the
-/// per-underlying total short across venues at that underlying's spot.
+/// stress gate. Results are logged + exported as gauges. Hedge legs use
+/// the per-underlying total SIGNED position across venues at that
+/// underlying's spot.
 async fn stress_tick(p: &MonitorsParams) {
     let holdings = p.book.read().holdings.clone();
     let nav = p.shared.exposure.read().nav;
@@ -397,11 +399,19 @@ async fn stress_tick(p: &MonitorsParams) {
     let spots = spots_by_symbol(p);
     let readings = read_all_venues(p, &spots).await;
     let agg = aggregate_venues(&readings);
-    // Per-symbol hedge notional (short × that symbol's spot).
+    // Per-symbol SIGNED hedge notional (position × that symbol's spot;
+    // negative = net short) and the short-only slice (funding stress:
+    // only shorts RECEIVE positive funding, so only they lose income
+    // when it halves).
     let hedge_notional: f64 = agg
-        .short_by_symbol
+        .position_by_symbol
         .iter()
-        .map(|(sym, short)| short * spots.get(sym).copied().unwrap_or(0.0))
+        .map(|(sym, pos)| pos * spots.get(sym).copied().unwrap_or(0.0))
+        .sum();
+    let short_notional: f64 = agg
+        .position_by_symbol
+        .iter()
+        .map(|(sym, pos)| (-pos * spots.get(sym).copied().unwrap_or(0.0)).max(0.0))
         .sum();
 
     // Spot gaps: −60% / +80%, book delta-hedged (each underlying's hedge
@@ -423,8 +433,9 @@ async fn stress_tick(p: &MonitorsParams) {
             let after = p.models[mi].fair_per_unit(h.is_put, spot * (1.0 + gap), k, t, sigma);
             pnl += (after - before) * h.amount() as f64;
         }
-        // Hedge legs: a short gains when spot falls, per underlying.
-        pnl += -hedge_notional * gap;
+        // Hedge legs: signed — a long gains when spot rises, a short
+        // when it falls.
+        pnl += hedge_notional * gap;
         let drawdown = (-pnl / nav).max(0.0);
         worst_drawdown = worst_drawdown.max(drawdown);
         gap_drawdowns[usize::from(gap > 0.0)] = drawdown;
@@ -442,7 +453,7 @@ async fn stress_tick(p: &MonitorsParams) {
     // projection window.
     let funding = agg.funding_weighted;
     let funding_hit = if funding > 0.0 {
-        (funding * 0.5 * hedge_notional * (30.0 / 365.0) / nav).max(0.0)
+        (funding * 0.5 * short_notional * (30.0 / 365.0) / nav).max(0.0)
     } else {
         0.0
     };
@@ -477,27 +488,27 @@ mod tests {
     use super::*;
     use crate::desk::hedge::PaperVenue;
 
-    fn reading(name: &str, symbol: &str, short: f64, funding: f64, headroom: f64, spot: f64) -> VenueReading {
+    fn reading(name: &str, symbol: &str, position: f64, funding: f64, headroom: f64, spot: f64) -> VenueReading {
         VenueReading {
             name: name.into(),
             symbol: symbol.into(),
-            short_units: short,
+            position_units: position,
             funding_annual: funding,
             margin_headroom: headroom,
-            notional: short.abs() * spot,
+            notional: position.abs() * spot,
         }
     }
 
     #[test]
-    fn aggregate_sums_shorts_takes_min_headroom_and_weights_funding() {
+    fn aggregate_sums_positions_takes_min_headroom_and_weights_funding() {
         let readings = vec![
-            reading("paper", "TBTC", 10.0, 0.10, 0.50, 100.0), // notional 1000
-            reading("paper-b", "TBTC", 5.0, 0.40, 0.20, 100.0), // notional 500
-            reading("paper", "TWAL", 7.0, 0.10, 0.90, 0.0),     // flat weight
+            reading("paper", "TBTC", -10.0, 0.10, 0.50, 100.0), // notional 1000
+            reading("paper-b", "TBTC", -5.0, 0.40, 0.20, 100.0), // notional 500
+            reading("paper", "TWAL", 7.0, 0.10, 0.90, 0.0),      // flat weight
         ];
         let agg = aggregate_venues(&readings);
-        assert!((agg.short_by_symbol["TBTC"] - 15.0).abs() < 1e-9);
-        assert!((agg.short_by_symbol["TWAL"] - 7.0).abs() < 1e-9);
+        assert!((agg.position_by_symbol["TBTC"] - -15.0).abs() < 1e-9);
+        assert!((agg.position_by_symbol["TWAL"] - 7.0).abs() < 1e-9);
         // Min headroom names the venue.
         assert_eq!(agg.min_headroom, Some(("paper-b".into(), 0.20)));
         // Weighted funding: (0.10×1000 + 0.40×500) / 1500 = 0.20.
@@ -525,8 +536,13 @@ mod tests {
         let _ = std::fs::remove_file(&path_b);
         let a = PaperVenue::load_named("paper", path_a.clone(), 0.0, 0.10);
         let b = PaperVenue::load_named("paper-b", path_b.clone(), 0.0, 0.30);
-        a.adjust_to(10.0, 100.0).await.unwrap();
-        b.adjust_to(5.0, 100.0).await.unwrap();
+        use crate::desk::hedge::{HedgeCommand, HedgeOrder};
+        a.execute(HedgeCommand::Submit(HedgeOrder { id: 1, size_units: -10.0, spot: 100.0 }))
+            .await
+            .unwrap();
+        b.execute(HedgeCommand::Submit(HedgeOrder { id: 2, size_units: -5.0, spot: 100.0 }))
+            .await
+            .unwrap();
         let venues = vec![
             MonitorVenue { symbol: "TBTC".into(), venue: Arc::new(a) },
             MonitorVenue { symbol: "TBTC".into(), venue: Arc::new(b) },
@@ -536,8 +552,8 @@ mod tests {
             readings.push(read_venue(mv, 100.0).await.unwrap());
         }
         let agg = aggregate_venues(&readings);
-        // Summed short across both venues on the same underlying.
-        assert!((agg.short_by_symbol["TBTC"] - 15.0).abs() < 1e-9);
+        // Summed signed position across both venues on the same underlying.
+        assert!((agg.position_by_symbol["TBTC"] - -15.0).abs() < 1e-9);
         // Paper margin never binds: min is 1.0 and still names a venue.
         assert_eq!(agg.min_headroom.as_ref().map(|(_, h)| *h), Some(1.0));
         // Weighted funding: (0.10×1000 + 0.30×500) / 1500.
