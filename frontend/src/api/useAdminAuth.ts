@@ -6,7 +6,7 @@
 // re-signing) when it's close to expiry via `getValidToken`.
 
 import { useCallback, useState } from "react";
-import { useSignPersonalMessage } from "@mysten/dapp-kit";
+import { useCurrentAccount, useSignPersonalMessage } from "@mysten/dapp-kit";
 
 import {
   clearStoredToken,
@@ -24,6 +24,7 @@ const REFRESH_SKEW_SECS = 300;
 
 export function useAdminAuth() {
   const { mutateAsync: signPersonalMessage } = useSignPersonalMessage();
+  const currentAccount = useCurrentAccount();
   const [token, setToken] = useState<string | null>(() => getStoredToken());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,9 +39,10 @@ export function useAdminAuth() {
       const message = await fetchChallenge();
       const bytes = new TextEncoder().encode(message);
       // dapp-kit returns { signature, bytes } — both base64, exactly what
-      // auth-service /login expects.
+      // auth-service /login expects. The address is required for zkLogin
+      // wallets (not recoverable server-side) and a cross-check otherwise.
       const signed = await signPersonalMessage({ message: bytes });
-      const resp = await login(signed.signature, signed.bytes);
+      const resp = await login(signed.signature, signed.bytes, currentAccount?.address);
       setStoredToken(resp.token);
       setToken(resp.token);
     } catch (e) {
@@ -49,7 +51,7 @@ export function useAdminAuth() {
     } finally {
       setBusy(false);
     }
-  }, [signPersonalMessage]);
+  }, [signPersonalMessage, currentAccount]);
 
   const signOut = useCallback(() => {
     clearStoredToken();

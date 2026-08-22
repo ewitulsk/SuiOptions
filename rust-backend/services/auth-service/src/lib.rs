@@ -20,6 +20,8 @@ pub mod jwt;
 pub mod router;
 pub mod state;
 pub mod sui_sig;
+pub mod verifier;
+pub mod zk_inputs;
 
 pub use config::Config;
 pub use state::AppState;

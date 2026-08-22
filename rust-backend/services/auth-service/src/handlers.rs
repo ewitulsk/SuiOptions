@@ -14,7 +14,6 @@ use tracing::{info, warn};
 use crate::allowlist;
 use crate::jwt::{self, Claims};
 use crate::state::AppState;
-use crate::sui_sig;
 
 type ApiError = (StatusCode, String);
 
@@ -46,6 +45,11 @@ pub struct LoginReq {
     pub signature: String,
     /// Base64 of the signed message (`signPersonalMessage().bytes`).
     pub bytes: String,
+    /// The signer's address. REQUIRED for zkLogin signatures (their address
+    /// is not recoverable from the authenticator; verification proves the
+    /// binding). Optional cross-check for every other scheme.
+    #[serde(default)]
+    pub address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -93,7 +97,10 @@ async fn login_inner(
         return Err((StatusCode::BAD_REQUEST, "unknown or expired challenge".into()));
     }
 
-    let address = sui_sig::recover_and_verify(&req.signature, &message)
+    let address = state
+        .verifier
+        .verify(&req.signature, &message, req.address.as_deref())
+        .await
         .map_err(|e| (StatusCode::UNAUTHORIZED, e.to_string()))?;
 
     if !allowlist::is_allowed(&state.admin_addresses, &address) {

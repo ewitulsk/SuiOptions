@@ -42,10 +42,20 @@ async fn main() -> Result<()> {
         tracing::warn!("admin_addresses is empty and cap check disabled — no wallet will be able to log in");
     }
 
+    // Local verification for every Sui signature scheme (SO-423). zkLogin
+    // needs its chain-sourced public inputs (JWK registry + epoch) and is
+    // enabled only when sui_graphql_url is configured; classic schemes
+    // verify fully offline either way.
+    let verifier = auth_service::verifier::SigVerifier::new(cfg.sui_graphql_url.as_deref());
+    if cfg.sui_graphql_url.is_none() {
+        info!("zkLogin logins disabled (sui_graphql_url unset)");
+    }
+
     let state = Arc::new(AppState::new(
         jwt_secret,
         cfg.admin_addresses.clone(),
         cap_check,
+        verifier,
         cfg.challenge_ttl_secs,
         cfg.token_ttl_secs,
         cfg.refresh_max_secs,
