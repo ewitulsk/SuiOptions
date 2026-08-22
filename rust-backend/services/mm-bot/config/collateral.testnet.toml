@@ -1,4 +1,4 @@
 network = "testnet"
-package_id = "0xaa88d34f5033839e123ef8ceb99cd4484415dc93e8a3c7707d5f1e3dffc9ffb9"
-account_id = "0x970c193ddb6bf502a6e7070b9a0e391bee4512f595b2bd308b8b3211fd5f5cb1"
-upgrade_cap = "0x647fc6381af1c8f0ed535d6bec2292e21fdcab5fa8116d3ceba1a60ec25f962a"
+package_id = "0x246aaec88ebf3f25eb7af9ab1ffaa9b14b5aa74ac286b8b85e80443ffa3d6883"
+account_id = "0x84c0f2655b45ef06f959fe216a586c82d5602bfcdbefdd5de6c0a21dd0710b1e"
+upgrade_cap = "0xd2560c20f0797377410e2a0eaad3ad7b8f17455ca321de7fdcc7f6559fd9c94c"
