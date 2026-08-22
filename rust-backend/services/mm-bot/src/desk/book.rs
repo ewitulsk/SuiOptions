@@ -843,6 +843,17 @@ pub struct DetectedFill {
     /// our winning bid) or received (Wrote: net of protocol fee),
     /// settlement raw.
     pub premium: u64,
+    /// Join key back to the RFQ funnel row this fill closes (SO-425).
+    pub link: FillLink,
+}
+
+/// How a detected fill relates back to the quote that authorized it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FillLink {
+    /// WS-signed quote: the quote nonce echoed by `(Put)WriteExecuted`.
+    WsQuote { nonce: u64 },
+    /// Auction win: the redeemed `BidTicket` id.
+    AuctionTicket { ticket: ObjectId },
 }
 
 /// Classify one indexed event as a desk fill, or `None` when it isn't
@@ -863,6 +874,7 @@ pub fn classify_fill(ev: &IndexedEvent, vault: ObjectId) -> Option<DetectedFill>
                 side,
                 amount: w.write_amount,
                 premium,
+                link: FillLink::WsQuote { nonce: w.nonce },
             })
         }
         ChainEvent::PutWriteExecuted(w) if w.collateral_source == vault => {
@@ -877,6 +889,7 @@ pub fn classify_fill(ev: &IndexedEvent, vault: ObjectId) -> Option<DetectedFill>
                 side,
                 amount: w.write_amount,
                 premium,
+                link: FillLink::WsQuote { nonce: w.nonce },
             })
         }
         _ => None,
@@ -912,6 +925,7 @@ pub fn classify_ticket_win(
         side: FillSide::Bought,
         amount: placed.win_amount,
         premium: placed.escrow_amount,
+        link: FillLink::AuctionTicket { ticket: r.ticket_id },
     })
 }
 

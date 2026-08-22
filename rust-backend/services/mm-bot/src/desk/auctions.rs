@@ -459,7 +459,7 @@ async fn tick(
             &inputs,
             now,
         ) {
-            Decision::Quote { premium } => premium,
+            Decision::Quote { premium, .. } => premium,
             Decision::Decline { reason } => {
                 tracing::debug!(rfq = %rfq.rfq_id.to_hex(), %reason, "declined to price auction");
                 continue;

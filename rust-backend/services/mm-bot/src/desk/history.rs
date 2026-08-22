@@ -149,6 +149,32 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    desk_rfq_outcomes (time, request_id) {
+        time                -> Timestamptz,
+        request_id          -> Text,
+        source              -> Text,
+        auction_id          -> Nullable<Text>,
+        symbol              -> Nullable<Text>,
+        option_type         -> Text,
+        side                -> Text,
+        strike              -> Double,
+        expiry_ms           -> Int8,
+        size_units          -> Int8,
+        spot_at_request     -> Nullable<Double>,
+        model_fair          -> Nullable<Double>,
+        surface_vol         -> Nullable<Double>,
+        quoted_premium      -> Nullable<Int8>,
+        valid_until_ms      -> Nullable<Int8>,
+        nonce               -> Nullable<Int8>,
+        response_latency_ms -> Nullable<Double>,
+        outcome             -> Text,
+        outcome_at          -> Nullable<Timestamptz>,
+        reason              -> Nullable<Text>,
+        fill_sequence       -> Nullable<Int8>,
+    }
+}
+
 // ── row types ──────────────────────────────────────────────────────────
 
 #[derive(Insertable, Debug, Clone)]
@@ -230,6 +256,112 @@ struct PnlJsonlRecord {
     note: String,
 }
 
+/// One RFQ-funnel row (SO-425, doc 08 §3.1): a WS RFQ decision or a
+/// vault-funded auction bid, inserted as `declined` (terminal) or
+/// `quoted` (pending). Pending rows are swept to `expired` by the
+/// recorder after the quote TTL and upgraded to `filled` by the fill
+/// poller — a detected fill is ground truth and always wins.
+#[derive(Insertable, Debug, Clone)]
+#[diesel(table_name = desk_rfq_outcomes)]
+pub struct RfqOutcomeRow {
+    pub time: DateTime<Utc>,
+    pub request_id: String,
+    pub source: String,
+    pub auction_id: Option<String>,
+    pub symbol: Option<String>,
+    pub option_type: String,
+    pub side: String,
+    pub strike: f64,
+    pub expiry_ms: i64,
+    pub size_units: i64,
+    pub spot_at_request: Option<f64>,
+    pub model_fair: Option<f64>,
+    pub surface_vol: Option<f64>,
+    pub quoted_premium: Option<i64>,
+    pub valid_until_ms: Option<i64>,
+    pub nonce: Option<i64>,
+    pub response_latency_ms: Option<f64>,
+    pub outcome: String,
+    pub outcome_at: Option<DateTime<Utc>>,
+    pub reason: Option<String>,
+    pub fill_sequence: Option<i64>,
+}
+
+impl RfqOutcomeRow {
+    /// A base row at request-received time; callers fill the rest via
+    /// the builder methods below before recording.
+    #[allow(clippy::too_many_arguments)]
+    pub fn base(
+        request_id: String,
+        source: &str,
+        is_put: bool,
+        side: &str,
+        strike: f64,
+        expiry_ms: u64,
+        size_units: u64,
+        received_at_ms: u64,
+    ) -> Self {
+        Self {
+            time: ms_to_dt(received_at_ms as i64),
+            request_id,
+            source: source.to_string(),
+            auction_id: None,
+            symbol: None,
+            option_type: if is_put { "put" } else { "call" }.to_string(),
+            side: side.to_string(),
+            strike,
+            expiry_ms: expiry_ms as i64,
+            size_units: size_units as i64,
+            spot_at_request: None,
+            model_fair: None,
+            surface_vol: None,
+            quoted_premium: None,
+            valid_until_ms: None,
+            nonce: None,
+            response_latency_ms: None,
+            outcome: String::new(),
+            outcome_at: None,
+            reason: None,
+            fill_sequence: None,
+        }
+    }
+
+    /// Terminal decline at `at_ms`.
+    pub fn declined(mut self, reason: String, at_ms: u64) -> Self {
+        self.outcome = "declined".to_string();
+        self.outcome_at = Some(ms_to_dt(at_ms as i64));
+        self.reason = Some(reason);
+        self
+    }
+
+    /// Pending signed quote; the sweep/fill poller supplies the terminal.
+    pub fn quoted(
+        mut self,
+        premium: u64,
+        model_fair: f64,
+        surface_vol: f64,
+        valid_until_ms: u64,
+        nonce: Option<u64>,
+    ) -> Self {
+        self.outcome = "quoted".to_string();
+        self.quoted_premium = Some(premium as i64);
+        self.model_fair = Some(model_fair);
+        self.surface_vol = Some(surface_vol);
+        self.valid_until_ms = Some(valid_until_ms as i64);
+        self.nonce = nonce.map(|n| n as i64);
+        self
+    }
+}
+
+/// How a detected fill joins back to its funnel row.
+#[derive(Debug, Clone)]
+pub enum RfqFillKey {
+    /// WS quote: the signed quote nonce (`WriteExecuted.nonce`).
+    Nonce(u64),
+    /// Auction bid: the `BidTicket` id hex used as the row's request_id.
+    Request(String),
+}
+
 // ── the handle ─────────────────────────────────────────────────────────
 
 pub struct History {
@@ -264,6 +396,144 @@ impl History {
         conn.run_pending_migrations(MIGRATIONS)
             .map_err(|e| anyhow::anyhow!("running desk history migrations: {e}"))?;
         Ok(())
+    }
+
+    // ── RFQ outcome funnel (SO-425) ───────────────────────────────────
+    //
+    // All funnel writes are fire-and-forget: spawned off the hot path,
+    // failures counted + logged, never propagated — the DB is not
+    // load-bearing for trading (same contract as the recorder).
+
+    /// Insert one funnel row.
+    pub fn record_rfq(self: &Arc<Self>, row: RfqOutcomeRow) {
+        let h = Arc::clone(self);
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || h.insert_rfq(row)).await;
+            if let Ok(Err(e)) | Err(e) = res.map_err(anyhow::Error::from) {
+                metrics::counter!("mm_desk_history_failures_total", "op" => "rfq")
+                    .increment(1);
+                tracing::warn!(error = %format!("{e:#}"), "rfq outcome insert failed");
+            }
+        });
+    }
+
+    /// Upgrade a `quoted` (or already swept `expired`) row to `filled`.
+    pub fn record_rfq_filled(self: &Arc<Self>, key: RfqFillKey, fill_sequence: u64, at_ms: u64) {
+        let h = Arc::clone(self);
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || {
+                h.mark_rfq_filled(&key, fill_sequence as i64, ms_to_dt(at_ms as i64))
+            })
+            .await;
+            if let Ok(Err(e)) | Err(e) = res.map_err(anyhow::Error::from) {
+                metrics::counter!("mm_desk_history_failures_total", "op" => "rfq")
+                    .increment(1);
+                tracing::warn!(error = %format!("{e:#}"), "rfq fill upgrade failed");
+            }
+        });
+    }
+
+    /// Move a still-`quoted` row to a terminal outcome (auction ticket
+    /// burns). A row the fill poller already upgraded is left alone.
+    pub fn record_rfq_terminal(
+        self: &Arc<Self>,
+        request_id: String,
+        outcome: &'static str,
+        reason: &'static str,
+        at_ms: u64,
+    ) {
+        let h = Arc::clone(self);
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || {
+                h.mark_rfq_terminal(&request_id, outcome, reason, ms_to_dt(at_ms as i64))
+            })
+            .await;
+            if let Ok(Err(e)) | Err(e) = res.map_err(anyhow::Error::from) {
+                metrics::counter!("mm_desk_history_failures_total", "op" => "rfq")
+                    .increment(1);
+                tracing::warn!(error = %format!("{e:#}"), "rfq terminal update failed");
+            }
+        });
+    }
+
+    fn insert_rfq(&self, row: RfqOutcomeRow) -> Result<()> {
+        let mut conn = self.conn()?;
+        diesel::insert_into(desk_rfq_outcomes::table).values(&row).execute(&mut conn)?;
+        Ok(())
+    }
+
+    fn mark_rfq_filled(&self, key: &RfqFillKey, fill_sequence: i64, at: DateTime<Utc>) -> Result<()> {
+        use desk_rfq_outcomes::dsl as t;
+        let mut conn = self.conn()?;
+        let assignments = (
+            t::outcome.eq("filled"),
+            t::outcome_at.eq(Some(at)),
+            t::fill_sequence.eq(Some(fill_sequence)),
+        );
+        match key {
+            RfqFillKey::Nonce(n) => diesel::update(
+                t::desk_rfq_outcomes
+                    .filter(t::nonce.eq(Some(*n as i64)))
+                    .filter(t::outcome.ne("declined")),
+            )
+            .set(assignments)
+            .execute(&mut conn)?,
+            RfqFillKey::Request(r) => diesel::update(
+                t::desk_rfq_outcomes
+                    .filter(t::request_id.eq(r))
+                    .filter(t::outcome.ne("declined")),
+            )
+            .set(assignments)
+            .execute(&mut conn)?,
+        };
+        Ok(())
+    }
+
+    fn mark_rfq_terminal(
+        &self,
+        request_id: &str,
+        outcome: &str,
+        reason: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        use desk_rfq_outcomes::dsl as t;
+        let mut conn = self.conn()?;
+        diesel::update(
+            t::desk_rfq_outcomes
+                .filter(t::request_id.eq(request_id))
+                .filter(t::outcome.eq("quoted")),
+        )
+        .set((
+            t::outcome.eq(outcome),
+            t::outcome_at.eq(Some(at)),
+            t::reason.eq(Some(reason)),
+        ))
+        .execute(&mut conn)?;
+        Ok(())
+    }
+
+    /// Sweep `quoted` rows whose TTL elapsed (plus a grace window for
+    /// fill-detection lag) to `expired`. A late-detected fill still
+    /// upgrades a swept row — see `mark_rfq_filled`.
+    fn sweep_expired_rfqs(&self, now_ms: i64) -> Result<usize> {
+        /// Fill-poller/indexer lag allowance before a live quote is
+        /// declared expired.
+        const GRACE_MS: i64 = 300_000;
+        use desk_rfq_outcomes::dsl as t;
+        let mut conn = self.conn()?;
+        let n = diesel::update(
+            t::desk_rfq_outcomes
+                .filter(t::outcome.eq("quoted"))
+                .filter(t::valid_until_ms.is_not_null())
+                .filter(t::valid_until_ms.lt(Some(now_ms - GRACE_MS))),
+        )
+        .set((
+            t::outcome.eq("expired"),
+            t::outcome_at.eq(Some(ms_to_dt(now_ms))),
+            t::reason.eq(Some("quote TTL elapsed with no detected fill")),
+        ))
+        .execute(&mut conn)?;
+        Ok(n)
     }
 
     // ── writes (recorder) ─────────────────────────────────────────────
@@ -659,7 +929,7 @@ pub struct HistoryResponse {
     pub points: Vec<serde_json::Value>,
 }
 
-fn ms_to_dt(ms: i64) -> DateTime<Utc> {
+pub(crate) fn ms_to_dt(ms: i64) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(ms).single().unwrap_or_else(Utc::now)
 }
 
@@ -711,6 +981,18 @@ pub fn spawn_recorder(history: Arc<History>, desk: Arc<Desk>, network: String) {
             if let Err(e) = ingest_pnl_jsonl(&history, &pnl_path).await {
                 metrics::counter!("mm_desk_history_failures_total", "op" => "pnl").increment(1);
                 tracing::warn!(error = %format!("{e:#}"), "desk pnl jsonl ingest failed");
+            }
+            // Sweep TTL-elapsed quotes in the RFQ funnel to `expired`.
+            {
+                let h = Arc::clone(&history);
+                let now_ms = Utc::now().timestamp_millis();
+                let res =
+                    tokio::task::spawn_blocking(move || h.sweep_expired_rfqs(now_ms)).await;
+                if let Ok(Err(e)) | Err(e) = res.map_err(anyhow::Error::from) {
+                    metrics::counter!("mm_desk_history_failures_total", "op" => "rfq")
+                        .increment(1);
+                    tracing::warn!(error = %format!("{e:#}"), "rfq expiry sweep failed");
+                }
             }
         }
     });
