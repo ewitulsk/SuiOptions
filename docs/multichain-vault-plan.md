@@ -1,96 +1,95 @@
-# Multichain Trading Vault: Sui Hub / EVM Spokes
+# Multichain Trading Vault: Sui Hub / Robinhood Spoke
 
-Status: DESIGN — reviewed with Evan 2026-08-28/29 over three rounds; all
-decisions below are locked. Not yet implemented.
+Status: FINAL DESIGN — all decisions locked with Evan, 2026-08-28/29.
+Implementation not yet started; build order in §10.
 
 ## Summary
 
-Extend trading-vault-v2 to a hub-and-spoke multichain vault. MVP scope:
+Extend trading-vault-v2 to a hub-and-spoke multichain vault:
 
 - **Sui is the hub.** The existing `TradingVault` remains the single source
   of truth for ALL accounting: share supply, NAV, valuations, entry/exit
   haircuts, lockups, performance fees, tranche waterfall, withdrawal
   ordering. Nothing changes for single-chain vaults.
-- **One spoke: Robinhood Chain.** Users deposit and withdraw **USDG** on the
-  spoke; shares are issued by the hub. The spoke is a deliberately **dumb
-  vault**: it custodies tokens, reports raw facts, and executes hub
+- **One spoke: Robinhood Chain.** Users deposit and withdraw **USDG** on
+  the spoke; shares are issued by the hub. The spoke is a deliberately
+  **dumb vault**: it custodies tokens, reports raw facts, and executes hub
   instructions. **A spoke never values anything and never computes shares
   or NAV** — it reports quantities ("user X deposited N of token T", "free
-  balance is F"), and the hub does every conversion. Every message in §2.1
+  balance is F"); the hub does every conversion. Every message in §2.1
   obeys this.
-- **No funds move between hub and spoke in MVP.** All vault-level bridging
-  is cut. Spoke deposits stay on the spoke; hub assets stay on the hub;
-  both count in one global NAV.
+- **No funds move between hub and spoke in MVP.** Spoke deposits stay on
+  the spoke; hub assets stay on the hub; both count in one global NAV.
 - **Curator controls funds on both sides.** On the hub, the existing
   session/adapter machinery is unchanged. On the spoke, the vault ships a
   **curator-controlled integration interface** (§6) — the only way funds
   can ever leave the spoke vault besides user payouts. MVP registers zero
-  integrations; **a rebalance integration (so the curator can move funds
+  integrations; **a rebalance integration (letting the curator move funds
   and fill withdrawal queues) is a hard launch gate for mainnet** — MVP
   ships to testnet without it, mainnet does not.
-- **Messaging is transport-agnostic**, and the protocol ships TWO real
-  transports: **LayerZero V2** and **Chainlink CCIP** endpoint modules —
-  both serve the Sui↔Robinhood lane end-to-end (§2.2). One endpoint is
-  active per spoke at a time, admin-switchable. A relayer-gated endpoint
-  is retained for local dev/test only, never production.
+- **Messaging is transport-agnostic**, and the protocol ships two real
+  transports: **LayerZero V2 (primary)** and **Chainlink CCIP (secondary)**
+  endpoint modules — both serve the Sui↔Robinhood lane end-to-end (§2.2).
+  Exactly one endpoint is active per spoke at a time, admin-switchable. A
+  relayer-gated endpoint exists for local dev/CI only, never production.
 
-### Locked decisions (2026-08-28/29 reviews)
+## Locked decisions
 
-1. Messaging: agnostic endpoint interface with **both LayerZero and CCIP
-   endpoint modules in the protocol** (§2.2); one active endpoint per
-   spoke, switchable; relayer-gated endpoint for dev/test only.
-2. Accounting: hub is master; spokes report raw quantities only — no
+1. **Messaging**: agnostic endpoint interface; LayerZero and CCIP endpoint
+   modules both in the protocol. **LayerZero is the primary transport,
+   CCIP the tested secondary/standby**; one active endpoint per spoke,
+   switchable by hub admin; relayer-gated endpoint for dev/test only.
+2. **Accounting**: hub is master; spokes report raw quantities only — no
    valuation, NAV, or share math on any spoke, ever.
-3. Withdrawals: hub-directed and share-denominated. The spoke notifies the
-   hub the moment a request lands; the hub burns in full at ACK; the spoke
-   **queues payouts it cannot fill** (FIFO) rather than the hub rationing
-   ACKs. **Queued-but-unpaid payouts are tracked on the hub as `payables`
-   and NAV is computed net of them** (§5.1). Accepted because the
-   rebalance integration exists before mainnet (launch gate above).
-4. Spoke depositor gating: a separate, per-chain whitelist on each
-   `SpokeVault` (the hub's Sui `Whitelist` is not consulted).
-5. Robinhood spoke deposit asset is **USDG**; testnet uses a
-   faucet-mintable **mock USDG**, modeled on the `test-tokens` Sui mocks.
-6. USDG valuation must be servable by **both** the Pyth and Switchboard
-   oracle adapters, switchable at will via the existing `OracleRegistry`
-   pin.
-7. **Tranching is supported on spoke vaults**; all tranche accounting stays
+3. **Withdrawals**: hub-directed and share-denominated. The spoke notifies
+   the hub the moment a request lands; the hub burns shares in full at
+   ACK; the spoke queues payouts it cannot fill (FIFO). Queued-but-unpaid
+   payouts are tracked on the hub as `payables` and NAV is computed net of
+   them (§5.1).
+4. **Message fees**: user-initiated spoke messages are paid from a
+   **vault-held fee pot** (§2.4) — users never attach fee value to a
+   deposit or withdrawal.
+5. **Depositor gating**: a separate, per-chain whitelist on each
+   `SpokeVault`; the hub's Sui `Whitelist` is not consulted for spoke
+   deposits.
+6. **Assets**: Robinhood spoke deposit asset is USDG; testnet uses a
+   faucet-mintable mock (`TUSDG`), modeled on the `test-tokens` Sui mocks.
+7. **Oracles**: USDG valuation servable by BOTH the Switchboard and Pyth
+   adapters, switchable at will via the existing `OracleRegistry` pin.
+8. **Tranching**: supported on spoke vaults; all tranche accounting stays
    on the hub — the spoke relays the user's tranche choice as an opaque
    code.
-8. Governance: composable role-based admin with transferable ownership on
-   both sides (§6.1) — Sui via capability objects, EVM via two-step
+9. **Governance**: composable role-based admin with transferable ownership
+   on both sides (§6.1) — Sui via capability objects, EVM via two-step
    transferable roles.
-9. Testnet-first; every network-dependent value in config profiles so
-   mainnet is a config flip (§9).
-10. 2026-08-29 descope: Hyperliquid (spoke, HyperCore/CoreWriter, Wormhole
-    lane) cut entirely; vault-level bridge integrations (CCTP, Across) cut.
-    Both return later as spoke integrations / endpoint modules.
+10. **Config**: testnet-first; every network-dependent value in config
+    profiles so mainnet is a config flip (§9).
+11. **Scope**: Hyperliquid (spoke, HyperCore/CoreWriter) and vault-level
+    bridging (CCTP, Across) are out of MVP; both return later as spoke
+    integrations. **Launch gate**: the curator rebalance integration must
+    exist before mainnet.
 
-### External facts this design depends on (verified 2026-08-29)
+## External facts this design depends on (verified 2026-08-29)
 
 - Robinhood Chain: EVM (Arbitrum Orbit), mainnet 2026-07-01, testnet since
   2026-02-10. Per docs.robinhood.com/chain/bridging, **LayerZero
   (OFT/Stargate)** and **Chainlink CCIP/Transporter** (token transfers +
-  arbitrary messaging) are live there — correcting this doc's earlier
-  wrong claim that no third-party messaging served Robinhood — alongside
-  the canonical Arbitrum bridge, Relay, Across, and LiFi/0x.
+  arbitrary messaging) are live there, alongside the canonical Arbitrum
+  bridge, Relay, Across, and LiFi/0x.
 - **LayerZero V2 is live on Sui** (Move OApp packages: `register_oapp`,
   per-pathway `MessagingChannel` shared objects) and **CCIP supports
-  Sui**, so BOTH stacks cover the Sui↔Robinhood messaging lane
-  end-to-end.
+  Sui** — both stacks cover the Sui↔Robinhood messaging lane end-to-end.
 - **USDG** (Paxos Global Dollar) is live on Robinhood Chain **as a
-  LayerZero OFT** — the natural rail for the future rebalance
-  integration. USDG does not exist on Sui today, so that integration must
-  still handle asset transformation for any hub leg.
-- LayerZero/CCIP availability on **Robinhood testnet** is unconfirmed —
-  check at phase-3 start; the dev relayer endpoint (§2.2) covers local/CI
-  either way.
-- A **Pyth USDG/USD feed is unconfirmed** in the public catalog — check at
-  phase-2 start. **Switchboard on-demand allows defining a USDG/USD feed
-  ourselves**, so the Switchboard adapter path is guaranteed; Pyth is added
-  the moment its catalog carries the pair (decision 6 is about the
-  abstraction supporting both, which the existing adapter/pin design
-  already does).
+  LayerZero OFT** — the natural rail for the future rebalance integration.
+  USDG does not exist on Sui today, so that integration must handle asset
+  transformation for any hub leg.
+- A **Pyth USDG/USD feed is unconfirmed** in the public catalog (check at
+  phase 2). **Switchboard on-demand allows defining a USDG/USD feed
+  ourselves**, so the Switchboard path is guaranteed; Pyth lights up the
+  moment its catalog carries the pair.
+- **LayerZero/CCIP availability on Robinhood testnet is unconfirmed**
+  (check at phase 5); the dev relayer endpoint covers earlier phases and
+  local/CI regardless.
 
 ## 1. Roles and fund states
 
@@ -128,8 +127,9 @@ adapters, with the active source chosen by the `OracleRegistry` pin
 
 Every message: `{src_chain_id, dst_chain_id, src_app, dst_app, seq, payload}`.
 `seq` is per (src, dst, app-pair) and strictly increasing; receivers keep
-`last_seq` and reject replays/out-of-order delivery (the relayer retries in
-order until landed).
+`last_seq` and reject replays/out-of-order delivery — our own ordering
+layer on top of whatever the transport guarantees, so semantics are
+identical across transports.
 
 Payloads (bcs on Sui / abi-encoded on EVM; one canonical byte layout in the
 schema crate, §8). Spoke→hub payloads are raw quantities; hub→spoke
@@ -142,15 +142,16 @@ Spoke → Hub (facts):
 - `WithdrawRequest { spoke_id, request_seq, user: bytes32, tranche: u8,
   shares, all: bool }` — sent the moment the request lands on the spoke.
 - `PayoutReceipt { spoke_id, request_seq, amount }`
-- `StateSync { spoke_id, per-asset {free, reserved}, integration_raw, ts }`
-  — `integration_raw` is raw venue data from any future integration (empty
-  in MVP), never a computed value; the hub turns raw data into value.
+- `StateSync { spoke_id, per-asset {free, reserved}, fee_pot_balance,
+  integration_raw, ts }` — `integration_raw` is raw venue data from any
+  future integration (empty in MVP), never a computed value.
 
 Hub → Spoke (instructions):
 - `DepositAck { deposit_seq, accepted: bool, shares }` — `shares` is
   hub-computed; the spoke records it verbatim for its UX mirror.
 - `WithdrawAck { request_seq, user: bytes32, pay_amount }`
-- `ConfigSync { paused, risk_off, curator: address, integrations_root }`
+- `ConfigSync { paused, risk_off, curator: address, endpoint,
+  integrations_root }`
 
 ### 2.2 Transports and trust model
 
@@ -159,33 +160,31 @@ end-to-end, so hub↔spoke messages ride third-party verification networks
 (LayerZero's configurable DVN set per pathway; CCIP's Chainlink DON) —
 our own infrastructure initiates and pays for messages but is never the
 thing the hub trusts. The protocol ships BOTH transports as endpoint
-modules behind the same interface; **exactly one endpoint is active per
-spoke at a time** (accepting two verifiers simultaneously would mean
-either one can forge — switchability is redundancy, dual-acceptance is
-double attack surface). Switching is an admin action on the hub,
-propagated via `ConfigSync` through the currently-active endpoint.
+modules behind one interface. **Exactly one endpoint is active per spoke
+at a time**: accepting two verifiers simultaneously would mean either one
+can forge, so switchability is the redundancy model, not dual-acceptance.
+Switching is a hub admin action propagated via `ConfigSync` through the
+currently-active endpoint. **LayerZero is primary; CCIP is the tested
+standby** — both must pass the full e2e suite before mainnet so a switch
+under incident conditions is routine, not novel.
 
 Hub-side structure: each transport is a witness-typed Move module
 allow-listed in a new `EndpointRegistry` (mirroring the oracle/integration
 adapter pattern). A transport verifies delivery through its own stack and
 constructs a `VerifiedMessage` hot potato that only `vault_v2::multichain`
 can consume; `multichain` checks the spoke binding (`spoke_id →
-(chain_id, spoke_vault_address, endpoint_type)`) and `seq` (our own
-ordering/replay layer on top of any transport), then applies the payload.
-Outbound: handlers hand an `OutboundMessage` to the active endpoint module
-in the same PTB (LayerZero/CCIP sends are on-chain calls with fees).
+(chain_id, spoke_vault_address, endpoint_type)`) and `seq`, then applies
+the payload. Outbound: handlers hand an `OutboundMessage` to the active
+endpoint module in the same PTB (LayerZero/CCIP sends are on-chain calls
+with fees, paid by the submitting crank service).
 
-- `endpoint-layerzero`: Sui Move OApp (`register_oapp`, per-pathway
-  `MessagingChannel`); verifies via the lane's configured DVN set.
-- `endpoint-ccip`: Sui CCIP client; verifies via the Chainlink DON.
-- `endpoint-relayer` (dev/test ONLY, never bound in production):
-  registered-sender gate for localnet/CI where neither stack exists.
-
-Message fees: LayerZero/CCIP charge per message (native token / LINK).
-Spoke→hub messages sent inside user transactions (deposit, withdraw
-request) need fee funding — either `msg.value` from the user or a
-vault-held fee pot topped up by ops; hub→spoke sends are paid by the crank
-service. Open item §11.
+- `endpoint-layerzero` (primary): Sui Move OApp (`register_oapp`,
+  per-pathway `MessagingChannel`); verifies via the lane's configured DVN
+  set.
+- `endpoint-ccip` (secondary): Sui CCIP client; verifies via the
+  Chainlink DON.
+- `endpoint-relayer` (dev/CI ONLY, never bound in production):
+  registered-sender gate for environments where neither stack exists.
 
 ### 2.3 Spoke side (EVM)
 
@@ -193,21 +192,33 @@ service. Open item §11.
 
 ```solidity
 interface IMessageEndpoint {
-    function send(bytes calldata envelopeAndPayload) external;   // outbound
-    // inbound: endpoint validates delivery, then calls
+    function send(bytes calldata envelopeAndPayload) external payable;
+    // inbound: endpoint verifies via its transport, then calls
     // spokeVault.handleMessage(envelope, payload); vault checks
-    // msg.sender == registered endpoint + seq.
+    // msg.sender == active endpoint + seq.
 }
 ```
 
-- `LayerZeroEndpoint.sol`: OApp wired to Robinhood's LayerZero endpoint;
-  peers pinned to the hub OApp.
-- `CCIPEndpoint.sol`: CCIP sender/receiver wired to Robinhood's
-  router; source chain/sender pinned to the hub.
-- `RelayerEndpoint.sol` (dev/test only): `msg.sender` must hold
+- `LayerZeroEndpoint.sol` (primary): OApp wired to Robinhood's LayerZero
+  endpoint; peers pinned to the hub OApp.
+- `CCIPEndpoint.sol` (secondary): CCIP sender/receiver wired to
+  Robinhood's router; source chain/sender pinned to the hub.
+- `RelayerEndpoint.sol` (dev/CI only): `msg.sender` must hold
   `RELAYER_ROLE` (§6.1).
 
 Endpoint per spoke set at deploy, changeable only via hub `ConfigSync`.
+
+### 2.4 Message-fee pot
+
+LayerZero/CCIP charge per message. Users never pay: `SpokeVault` holds a
+**native-token fee pot** that funds the transport fee for user-initiated
+messages (deposit notices, withdraw requests). Anyone can top it up
+(permissionless `fundFees()`); ops keeps it filled. `StateSync` reports
+the pot balance and `vault-messenger` alerts below a threshold, well
+before exhaustion. If the pot cannot cover a send, the user action reverts
+with a distinct error (nothing is escrowed in that case; alerting makes
+this an ops failure, not a user-facing norm). Hub-side sends are paid
+directly by the crank service submitting the PTB — no pot needed on Sui.
 
 ## 3. Hub accounting extensions (`vault_v2::multichain`)
 
@@ -235,9 +246,9 @@ New module(s) in the `trading-vault-v2` package (upgrade), keeping
   - **Appraisal extension**: `begin_appraisal` snapshots bound spokes into
     the `Appraisal` hot potato (like `external_pending`); a
     `record_spoke_state` leg per spoke (bound endpoint only,
-    freshness-checked) values per-asset balances at attested prices (USDG
-    via its pinned feed) plus `integration_value`, minus `payables`. NAV
-    cannot complete with a stale spoke → the safe failure mode.
+    freshness-checked) values per-asset balances at attested prices plus
+    `integration_value`, minus `payables` (§5.1). NAV cannot complete with
+    a stale spoke → the safe failure mode.
 - **Message handlers** (consume `VerifiedMessage`; valuation happens here,
   against a complete `Appraisal`):
   - `handle_deposit_notice`: vault open + not paused + tranche valid →
@@ -247,21 +258,22 @@ New module(s) in the `trading-vault-v2` package (upgrade), keeping
     `accepted: false` (spoke refunds).
   - `handle_withdraw_request`: validate holding + lockup + the same
     per-tranche gates hub withdrawals face (junior blocked in risk-off
-    states, generation wipe checks), value shares **in full** at current
-    NAV with exit haircut, crystallize perf fee vs basis, burn the shares,
+    states, generation wipe checks), value shares in full at current NAV
+    with exit haircut, crystallize perf fee vs basis, burn the shares,
     `payables += pay_amount` → `WithdrawAck`. Rejected → `pay_amount: 0`.
   - `handle_payout_receipt`: clear payable, deduct spoke balance.
-- **Gate propagation**: `ConfigSync` pushed on pause, risk-state flips from
-  `sync_capital`, curator rotation, integration-set changes. Spokes treat a
-  stale heartbeat (> N min) as `risk_off = true` locally — integrations
-  freeze; deposits and payouts continue.
+- **Gate propagation**: `ConfigSync` pushed on pause, risk-state flips
+  from `sync_capital`, curator rotation, endpoint switch,
+  integration-set changes. Spokes treat a stale heartbeat (> N min) as
+  `risk_off = true` locally — integrations freeze; deposits and payouts
+  continue.
 
 ## 4. Deposit flow (spoke)
 
 1. User (spoke-whitelisted): `SpokeVault.deposit(asset, amount, tranche)` →
    escrowed `pending`, local `deposit_seq`, `DepositNotice` sent
-   immediately. The spoke validates nothing about the tranche beyond
-   range — the hub owns policy.
+   immediately (fee pot pays the transport). The spoke validates nothing
+   about the tranche beyond range — the hub owns policy.
 2. Hub handler mints ledger shares (entry haircut, basis, hub-clock
    timestamp) → `DepositAck`.
 3. Spoke on ACK: `pending → active`; records the hub-stated share count in
@@ -283,7 +295,7 @@ API — the spoke computes nothing.
 
 1. User: `requestWithdraw(tranche, shares | all)` → spoke records the
    request (one in-flight per (user, tranche)) and sends `WithdrawRequest`
-   in the same transaction.
+   in the same transaction (fee pot pays).
 2. Hub: validates against the ledger, enforces lockup + tranche gates,
    prices the full request at current NAV with exit haircut, crystallizes
    fees, **burns the shares in full**, books `payables` →
@@ -291,9 +303,9 @@ API — the spoke computes nothing.
    asset at attested prices.
 3. Spoke on ACK: pay immediately from `free` if it can; otherwise move
    what exists to `reserved` and **queue the remainder FIFO**. While any
-   payout is queued, integration calls that move funds out revert, and all
-   funds arriving service the queue before becoming `active` — so once the
-   rebalance integration exists, refilling the queue is a curator
+   payout is queued, integration calls that move funds out revert, and
+   all funds arriving service the queue before becoming `active` — so once
+   the rebalance integration exists, refilling the queue is a curator
    obligation enforced by the trading freeze.
 4. On each payment: `PayoutReceipt` → hub clears the payable.
 
@@ -309,7 +321,7 @@ NAV = hub assets + Σ_spokes (free + reserved + integration_value)·px
       − Σ_spokes payables·px
 ```
 
-with `px` the attested price of each spoke asset — so a payable is a
+with `px` the attested price of each spoke asset — a payable is a
 liability marked at current prices until the spoke's `PayoutReceipt`
 clears it (which simultaneously removes the liability and the reserved
 balance backing it, net zero). Properties this buys:
@@ -323,9 +335,10 @@ balance backing it, net zero). Properties this buys:
 - A `StateSync` cross-check (`reserved` on the spoke vs `payables` on the
   hub) catches divergence and alarms.
 
-Accepted consequence (2026-08-29): in MVP-on-testnet the queue can only be
-filled by new deposits; on mainnet the rebalance integration (launch gate)
-gives the curator the means — and the freeze the obligation — to fill it.
+Accepted consequence: on testnet (pre-rebalance-integration) the queue can
+only drain from new deposits; on mainnet the rebalance integration
+(launch gate) gives the curator the means — and the freeze the
+obligation — to fill it.
 
 ## 6. Curator integration interface (spoke)
 
@@ -355,6 +368,10 @@ interface ISpokeIntegration {
   (oracle-registry slot) is part of registering any integration.
 - Curator identity on the spoke comes from `ConfigSync` (rotation
   propagates from the hub; the curator is NOT a spoke-local role).
+- The future rebalance integration's obvious rail is the USDG LayerZero
+  OFT; it will need destination restrictions to registered vault
+  addresses, in-flight accounting, and a hub-side valuation adapter —
+  designed in its own doc before mainnet.
 
 ### 6.1 Governance and admin ownership
 
@@ -363,35 +380,34 @@ decisions live on the hub, operational knobs live where they act.
 
 Hub (Sui): capability objects, already the repo's pattern and transferable
 by construction — `AdminCap` (protocol admin: `MultichainRegistry`,
-`EndpointRegistry` relayer set, integration registration co-sign) and
-`CuratorCap` (per-vault binding + integration co-sign, rotatable via the
-existing `rotate_curator_by_curator` machinery). Transferring hub admin =
-transferring the `AdminCap` object; nothing else to migrate.
+`EndpointRegistry`, endpoint switching, integration registration co-sign)
+and `CuratorCap` (per-vault binding + integration co-sign, rotatable via
+the existing `rotate_curator_by_curator` machinery). Transferring hub
+admin = transferring the `AdminCap` object; nothing else to migrate.
 
-EVM (`SpokeVault` + `RelayerEndpoint`): OpenZeppelin
+EVM (`SpokeVault` + endpoints): OpenZeppelin
 `AccessControlDefaultAdminRules` — one `DEFAULT_ADMIN_ROLE` root with
-built-in **two-step, time-delayed transfer** (deployer EOA at first, handed
-to a multisig later with no code change), administering three operational
+built-in two-step, time-delayed transfer (deployer EOA at first, handed to
+a multisig later with no code change), administering three operational
 roles:
 - `WHITELIST_ROLE` — manage the spoke depositor allowlist.
-- `RELAYER_ROLE` — accounts allowed to deliver messages (on the endpoint);
-  multiple accounts for redundancy, rotated without redeploys.
+- `RELAYER_ROLE` — dev/CI endpoint senders only (unused in production).
 - `PAUSER_ROLE` — local emergency pause (deposits/payouts halt; hub
   `ConfigSync` pause remains the governed path — this is the break-glass).
 
-Explicitly NOT spoke-local roles: curator identity and the integration set
-(both hub-propagated via `ConfigSync`), so spoke admin compromise cannot
-redirect funds — worst case it can pause, censor the whitelist, or stall
-relaying, all liveness not custody.
+Explicitly NOT spoke-local roles: curator identity, the active endpoint,
+and the integration set (all hub-propagated via `ConfigSync`), so spoke
+admin compromise cannot redirect funds — worst case it can pause, censor
+the whitelist, or drain nothing but the fee pot: liveness, not custody.
 
 ## 7. Spoke contracts (new `evm-contracts/` Foundry workspace)
 
 - `SpokeVault.sol` — per-asset fund states + depositor whitelist +
-  deposit/reclaim + per-tranche withdraw + payout queue + `handleMessage`
-  dispatch + endpoint binding + integration registry (§6) + roles (§6.1) +
-  pause/stale-heartbeat freeze.
+  deposit/reclaim + per-tranche withdraw + payout queue + fee pot (§2.4) +
+  `handleMessage` dispatch + endpoint binding + integration registry (§6)
+  + roles (§6.1) + pause/stale-heartbeat freeze.
 - `endpoints/LayerZeroEndpoint.sol`, `endpoints/CCIPEndpoint.sol`,
-  `endpoints/RelayerEndpoint.sol` (dev/test only) — all implementing
+  `endpoints/RelayerEndpoint.sol` (dev/CI only) — all implementing
   `IMessageEndpoint` (§2.3).
 - `TUSDG.sol` — faucet-mintable mock USDG for testnet (open `mint`, 6
   decimals), mirroring the `test-tokens` Sui pattern (TUSDC et al.);
@@ -402,19 +418,19 @@ relaying, all liveness not custody.
 ## 8. Off-chain
 
 - **New `rust-backend/services/vault-messenger`** (patterns: `cctp-relay`
-  watcher + existing service key handling): with LayerZero/CCIP carrying
-  verification, this service is an **initiator and fee payer, not a trust
-  gate** — it triggers hub-side sends (ACKs/ConfigSync PTBs through the
-  active endpoint, paying message fees), calls the spoke's permissionless
-  `syncState()` on an interval, watches both chains to confirm delivery,
-  and retries/escalates stuck messages (both stacks have retry/exec
-  semantics); per-chain service accounts in AWS Secrets;
+  watcher + existing service key handling): an **initiator and fee payer,
+  not a trust gate** — triggers hub-side sends (ACK/ConfigSync PTBs
+  through the active endpoint, paying message fees), calls the spoke's
+  permissionless `syncState()` on an interval, watches both chains to
+  confirm delivery, retries/escalates stuck messages (both stacks have
+  retry/exec semantics); per-chain service accounts in AWS Secrets;
   `error!(alert_id = "tx-failed-vault-messenger")` per the tx-alerting
-  convention; alerts on payout-queue age and undelivered-message age.
-  Full 9-spot deployment registration per repo convention.
+  convention; alerts on payout-queue age, undelivered-message age, and
+  fee-pot balance. Full 9-spot deployment registration per repo
+  convention.
 - Appraisal/crank flow gains the spoke legs: price attestations (incl.
   USDG/USD) + `record_spoke_state` per spoke + existing legs.
-- Oracle service: USDG/USD feed served through the **Switchboard** adapter
+- Oracle service: USDG/USD served through the **Switchboard** adapter
   (on-demand feed we define — guaranteed available) and through the
   **Pyth** adapter as soon as its catalog carries USDG/USD; the
   `OracleRegistry` pin selects the active one.
@@ -425,12 +441,14 @@ All network-dependent values live in per-network config profiles, never in
 code — the repo's existing pattern (`config.staging.toml`/`config.prod.toml`
 with a `network` profile, as cctp-relay does; `rust-backend/deployments.json`
 for published IDs; frontend per-network maps in `config.ts`):
-- Per-chain: RPC URLs, chain IDs, spoke vault + endpoint addresses, asset
-  addresses (USDG mainnet / TUSDG testnet), relayer accounts.
-- Hub: package/registry object IDs per Sui network.
-- One `network_set` selector (testnet-set vs mainnet-set) chooses the whole
-  coherent bundle; promotion is a config/deploy change with zero code
-  edits.
+- Per-chain: RPC URLs, chain IDs, spoke vault + endpoint addresses,
+  LayerZero endpoint/EID + CCIP router/chain-selector values, asset
+  addresses (USDG mainnet / TUSDG testnet), service accounts.
+- Hub: package/registry object IDs per Sui network, LayerZero OApp / CCIP
+  client object IDs.
+- One `network_set` selector (testnet-set vs mainnet-set) chooses the
+  whole coherent bundle; promotion is a config/deploy change with zero
+  code edits.
 
 ## 10. Build order
 
@@ -443,54 +461,45 @@ for published IDs; frontend per-network maps in `config.ts`):
    replay/staleness/refund-deadline/tranche-gate/payables-NAV cases.
 3. **`SpokeVault` + dev `RelayerEndpoint` + `TUSDG`** in `evm-contracts/`;
    roles, whitelist, deposits, reclaim, per-tranche withdraw + payout
-   queue, integration registry (empty), gates. Verify: Foundry tests.
-   Deploy Robinhood testnet.
+   queue, fee pot, integration registry (empty), gates. Verify: Foundry
+   tests. Deploy Robinhood testnet.
 4. **`vault-messenger`** + StateSync + crank integration, over the dev
    endpoint. Verify: e2e on Robinhood testnet — TUSDG deposit → ACK →
    active; withdraw → ACK → paid → receipt clears payable; underfunded
    withdraw queues FIFO and drains from a fresh deposit; chaos (reclaim
-   after timeout; freeze on stale heartbeat).
-5. **LayerZero endpoints** — `endpoint-layerzero` (Sui OApp) +
-   `LayerZeroEndpoint.sol`; bind the testnet spoke to it (or stay on the
-   dev endpoint if LayerZero is absent on Robinhood testnet, and verify
-   on a supported testnet lane). Verify: the phase-4 e2e suite re-run over
-   LayerZero, plus an endpoint-switch drill (dev → LZ via ConfigSync).
-6. **CCIP endpoints** — `endpoint-ccip` (Sui client) + `CCIPEndpoint.sol`;
-   same verification + an LZ → CCIP switch drill. Both transports must
-   pass before mainnet.
+   after timeout; freeze on stale heartbeat; fee-pot exhaustion alert +
+   revert).
+5. **LayerZero endpoints (primary)** — `endpoint-layerzero` (Sui OApp) +
+   `LayerZeroEndpoint.sol`; bind the testnet spoke to it (or verify on a
+   supported testnet lane if LayerZero is absent on Robinhood testnet).
+   Verify: the phase-4 e2e suite re-run over LayerZero, plus an
+   endpoint-switch drill (dev → LZ via ConfigSync).
+6. **CCIP endpoints (secondary)** — `endpoint-ccip` (Sui client) +
+   `CCIPEndpoint.sol`; same verification + an LZ → CCIP → LZ switch
+   drill. Both transports must pass before mainnet.
 7. **Frontend + deployment registration + staging rollout**; runbook
    (endpoint switching, spoke freeze/unfreeze, stuck-message recovery,
    fee-pot top-up, payout-queue-age alert response).
 
 Post-MVP, pre-mainnet (launch gate): the curator rebalance integration
-(§6) with its hub-side valuation adapter and in-flight accounting.
-Later: Hyperliquid spoke + HyperCore/CoreWriter; bridge integrations;
-third-party endpoint modules (Wormhole/LayerZero); ERC-20 spoke shares.
+(§6). Later: Hyperliquid spoke + HyperCore/CoreWriter; further bridge
+integrations; ERC-20 spoke shares.
 
-## 11. Open items
+## 11. Implementation-time checks and accepted limitations
 
-- **Pyth USDG/USD catalog check** (phase 2) — Switchboard path is
-  guaranteed either way; this only decides when the second oracle lights
-  up.
-- **Message-fee funding** (§2.2) — who pays LayerZero/CCIP fees on
-  user-initiated spoke messages: `msg.value` from the user vs a vault-held
-  fee pot topped up by ops. Recommendation: fee pot (cleaner UX, bounded
-  cost); needs Evan's confirmation.
-- **Primary transport per lane** — recommendation: LayerZero primary
-  (mature Sui Move OApp tooling; USDG already rides LayerZero on
-  Robinhood), CCIP as the tested standby; confirm before phase 5.
-- **LayerZero/CCIP availability on Robinhood testnet** — check at phase 5;
-  dev endpoint covers earlier phases regardless.
-- **Service account ops** — gas/LINK funding and rotation runbook for the
-  messenger's fee-paying accounts (ordinary service accounts, not trust
-  roots).
-- **Rebalance-integration design** (the launch gate) — deliberately not
-  designed here; the USDG LayerZero OFT is the obvious rail for its
-  spoke legs; it will need destination restrictions to registered vault
-  addresses, in-flight accounting, and a hub-side valuation adapter.
-- Accepted MVP limitations (signed off 2026-08-29): spoke funds are inert
-  until the rebalance integration ships; on testnet, payout queues can
-  only drain from new deposits; terminal close blocked while a spoke holds
-  assets/payables; dark spoke blocks vault-wide NAV (safe direction);
-  messaging trust rides the active transport's verifier network (LayerZero
+Checks (no decisions left — just facts to confirm when their phase
+starts):
+- Phase 2: Pyth USDG/USD catalog (Switchboard path guaranteed either way).
+- Phase 5: LayerZero/CCIP presence on Robinhood **testnet**; mainnet
+  presence is confirmed.
+- Ops: service-account gas/LINK funding levels, fee-pot thresholds.
+
+Accepted MVP limitations (signed off 2026-08-29):
+- Spoke funds are inert until the rebalance integration ships; on testnet,
+  payout queues can only drain from new deposits.
+- Terminal close (`initiate_close`) is blocked while a spoke holds assets
+  or payables — drain and unbind first.
+- A dark spoke (stale `StateSync`) blocks vault-wide NAV completion — the
+  safe direction to fail.
+- Messaging trust rides the active transport's verifier network (LayerZero
   DVN set / Chainlink DON) plus our per-lane security configuration.
