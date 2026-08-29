@@ -13033,6 +13033,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vault-messages"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "vault-sim"
 version = "0.1.0"
 dependencies = [

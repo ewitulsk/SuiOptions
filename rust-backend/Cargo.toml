@@ -16,6 +16,7 @@ members = [
     "crates/auth-client",
     "crates/switchboard-client",
     "crates/vault-sim",
+    "crates/vault-messages",
     "crates/observability",
     "crates/exchange-types",
     "crates/exchange-signing",

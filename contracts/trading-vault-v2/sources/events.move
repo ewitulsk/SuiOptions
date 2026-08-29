@@ -995,3 +995,332 @@ public(package) fun emit_protocol_config_updated(
 public(package) fun emit_registrar_pubkey_set(pubkey: vector<u8>) {
     event::emit(RegistrarPubkeySet { pubkey });
 }
+
+// ─────────────────────── multichain (hub/spoke) ───────────────────────
+// Spoke reject codes (SpokeDepositProcessed / SpokeWithdrawProcessed):
+// 0=accepted 1=paused 2=vault-not-open 3=unknown-asset 4=amount-invalid
+// 5=tranche-invalid 6=ack-deadline-passed 7=blocked-by-risk-state
+// 8=senior-buffer 9=zero-shares-or-dead 10=no-holding 11=still-locked
+// 12=generation-wiped 13=junior-blocked 14=shares-exceed-holding
+
+public struct EndpointAllowed has copy, drop { endpoint: TypeName }
+
+public struct EndpointDisallowed has copy, drop { endpoint: TypeName }
+
+public struct RelayerAdded has copy, drop { relayer: address }
+
+public struct RelayerRemoved has copy, drop { relayer: address }
+
+/// A hub→spoke message consumed by its transport. For the dev relayer
+/// endpoint this event IS the shipping channel; for LayerZero/CCIP it
+/// is an audit record beside the transport's own send.
+public struct OutboundMessage has copy, drop {
+    endpoint: TypeName,
+    dst_chain_id: u64,
+    dst_app: address,
+    seq: u64,
+    msg_type: u8,
+    bytes: vector<u8>,
+}
+
+public struct SpokeBound has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    chain_id: u64,
+    spoke_vault: address,
+    endpoint: TypeName,
+    endpoint_code: u8,
+    payout_asset: u8,
+    marker: TypeName,
+    max_sync_age_ms: u64,
+    ack_deadline_ms: u64,
+}
+
+public struct SpokeUnbound has copy, drop { vault_id: ID, spoke_id: u64 }
+
+public struct SpokeAssetAdded has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    asset_code: u8,
+    marker: TypeName,
+}
+
+public struct SpokeCuratorSet has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    curator: address,
+}
+
+public struct SpokeIntegrationsRootSet has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    root: address,
+}
+
+public struct SpokeDepositProcessed has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    deposit_seq: u64,
+    depositor: address,
+    asset_code: u8,
+    amount: u64,
+    tranche: u8,
+    reject_code: u8,
+    value: u64,
+    shares: u128,
+    generation: u64,
+    locked_until_ms: u64,
+}
+
+public struct SpokeWithdrawProcessed has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    request_seq: u64,
+    user: address,
+    tranche: u8,
+    reject_code: u8,
+    shares: u128,
+    value: u64,
+    basis: u64,
+    gross_fee: u64,
+    protocol_cut: u64,
+    curator_net: u64,
+    pay_units: u64,
+    payable_after: u64,
+}
+
+public struct SpokePayoutSettled has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    request_seq: u64,
+    amount: u64,
+    /// Non-zero = books drifted (receipt exceeded payable/free): alarm.
+    unmatched: u64,
+}
+
+public struct SpokeStateSynced has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    ts_ms: u64,
+    fee_pot_balance: u128,
+    /// Reported (free+reserved) differed from the hub's event-sourced
+    /// `free_total` for at least one asset: reconciliation alarm.
+    divergent: bool,
+    integration_raw_len: u64,
+}
+
+public struct SpokeStateRecorded has copy, drop {
+    vault_id: ID,
+    spoke_id: u64,
+    contribution: u128,
+    liability: u128,
+}
+
+public struct SpokeProtocolFeeCredited has copy, drop {
+    vault_id: ID,
+    tranche: u8,
+    shares: u128,
+    value: u64,
+}
+
+public struct SpokeProtocolFeeClaimed has copy, drop {
+    vault_id: ID,
+    position_id: ID,
+    recipient: address,
+}
+
+public(package) fun emit_endpoint_allowed(endpoint: TypeName) {
+    event::emit(EndpointAllowed { endpoint });
+}
+
+public(package) fun emit_endpoint_disallowed(endpoint: TypeName) {
+    event::emit(EndpointDisallowed { endpoint });
+}
+
+public(package) fun emit_relayer_added(relayer: address) {
+    event::emit(RelayerAdded { relayer });
+}
+
+public(package) fun emit_relayer_removed(relayer: address) {
+    event::emit(RelayerRemoved { relayer });
+}
+
+public(package) fun emit_outbound_message(
+    endpoint: TypeName,
+    dst_chain_id: u64,
+    dst_app: address,
+    seq: u64,
+    msg_type: u8,
+    bytes: vector<u8>,
+) {
+    event::emit(OutboundMessage { endpoint, dst_chain_id, dst_app, seq, msg_type, bytes });
+}
+
+public(package) fun emit_spoke_bound(
+    vault_id: ID,
+    spoke_id: u64,
+    chain_id: u64,
+    spoke_vault: address,
+    endpoint: TypeName,
+    endpoint_code: u8,
+    payout_asset: u8,
+    marker: TypeName,
+    max_sync_age_ms: u64,
+    ack_deadline_ms: u64,
+) {
+    event::emit(SpokeBound {
+        vault_id,
+        spoke_id,
+        chain_id,
+        spoke_vault,
+        endpoint,
+        endpoint_code,
+        payout_asset,
+        marker,
+        max_sync_age_ms,
+        ack_deadline_ms,
+    });
+}
+
+public(package) fun emit_spoke_unbound(vault_id: ID, spoke_id: u64) {
+    event::emit(SpokeUnbound { vault_id, spoke_id });
+}
+
+public(package) fun emit_spoke_asset_added(
+    vault_id: ID,
+    spoke_id: u64,
+    asset_code: u8,
+    marker: TypeName,
+) {
+    event::emit(SpokeAssetAdded { vault_id, spoke_id, asset_code, marker });
+}
+
+public(package) fun emit_spoke_curator_set(vault_id: ID, spoke_id: u64, curator: address) {
+    event::emit(SpokeCuratorSet { vault_id, spoke_id, curator });
+}
+
+public(package) fun emit_spoke_integrations_root_set(
+    vault_id: ID,
+    spoke_id: u64,
+    root: address,
+) {
+    event::emit(SpokeIntegrationsRootSet { vault_id, spoke_id, root });
+}
+
+public(package) fun emit_spoke_deposit_processed(
+    vault_id: ID,
+    spoke_id: u64,
+    deposit_seq: u64,
+    depositor: address,
+    asset_code: u8,
+    amount: u64,
+    tranche: u8,
+    reject_code: u8,
+    value: u64,
+    shares: u128,
+    generation: u64,
+    locked_until_ms: u64,
+) {
+    event::emit(SpokeDepositProcessed {
+        vault_id,
+        spoke_id,
+        deposit_seq,
+        depositor,
+        asset_code,
+        amount,
+        tranche,
+        reject_code,
+        value,
+        shares,
+        generation,
+        locked_until_ms,
+    });
+}
+
+public(package) fun emit_spoke_withdraw_processed(
+    vault_id: ID,
+    spoke_id: u64,
+    request_seq: u64,
+    user: address,
+    tranche: u8,
+    reject_code: u8,
+    shares: u128,
+    value: u64,
+    basis: u64,
+    gross_fee: u64,
+    protocol_cut: u64,
+    curator_net: u64,
+    pay_units: u64,
+    payable_after: u64,
+) {
+    event::emit(SpokeWithdrawProcessed {
+        vault_id,
+        spoke_id,
+        request_seq,
+        user,
+        tranche,
+        reject_code,
+        shares,
+        value,
+        basis,
+        gross_fee,
+        protocol_cut,
+        curator_net,
+        pay_units,
+        payable_after,
+    });
+}
+
+public(package) fun emit_spoke_payout_settled(
+    vault_id: ID,
+    spoke_id: u64,
+    request_seq: u64,
+    amount: u64,
+    unmatched: u64,
+) {
+    event::emit(SpokePayoutSettled { vault_id, spoke_id, request_seq, amount, unmatched });
+}
+
+public(package) fun emit_spoke_state_synced(
+    vault_id: ID,
+    spoke_id: u64,
+    ts_ms: u64,
+    fee_pot_balance: u128,
+    divergent: bool,
+    integration_raw_len: u64,
+) {
+    event::emit(SpokeStateSynced {
+        vault_id,
+        spoke_id,
+        ts_ms,
+        fee_pot_balance,
+        divergent,
+        integration_raw_len,
+    });
+}
+
+public(package) fun emit_spoke_state_recorded(
+    vault_id: ID,
+    spoke_id: u64,
+    contribution: u128,
+    liability: u128,
+) {
+    event::emit(SpokeStateRecorded { vault_id, spoke_id, contribution, liability });
+}
+
+public(package) fun emit_spoke_protocol_fee_credited(
+    vault_id: ID,
+    tranche: u8,
+    shares: u128,
+    value: u64,
+) {
+    event::emit(SpokeProtocolFeeCredited { vault_id, tranche, shares, value });
+}
+
+public(package) fun emit_spoke_protocol_fee_claimed(
+    vault_id: ID,
+    position_id: ID,
+    recipient: address,
+) {
+    event::emit(SpokeProtocolFeeClaimed { vault_id, position_id, recipient });
+}

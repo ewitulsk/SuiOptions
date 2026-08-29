@@ -97,3 +97,36 @@ public fun deposits_blocked_by_state(): u64 { 135 }
 /// fulfillment no longer runs — the settlement pool replaces both
 /// (§8.7).
 public fun queue_settled(): u64 { 136 }
+
+// ───────────────────── multichain (hub/spoke) ─────────────────────
+
+/// No spoke bound under this spoke id.
+public fun spoke_not_bound(): u64 { 140 }
+/// A spoke is already bound under this spoke id.
+public fun spoke_already_bound(): u64 { 141 }
+/// The delivering endpoint is not the spoke's bound endpoint type.
+public fun wrong_endpoint(): u64 { 142 }
+/// Inbound message sequence is not exactly last applied + 1.
+public fun bad_sequence(): u64 { 143 }
+/// Message bytes fail canonical wire decoding.
+public fun wire_malformed(): u64 { 144 }
+/// The spoke's last applied StateSync is older than its max sync age —
+/// NAV cannot complete against a dark spoke.
+public fun spoke_stale(): u64 { 145 }
+/// The message names an asset code the spoke binding does not carry.
+public fun unknown_asset_code(): u64 { 146 }
+/// A wire u128 quantity exceeds the hub's u64 accounting range.
+public fun amount_overflow(): u64 { 147 }
+/// The endpoint witness type is not allow-listed in `EndpointRegistry`.
+public fun endpoint_not_allowed(): u64 { 148 }
+/// The transaction sender is not a registered relayer (dev endpoint).
+public fun relayer_not_allowed(): u64 { 149 }
+/// Envelope src/dst chain or app does not match the spoke binding.
+public fun wrong_lane(): u64 { 150 }
+/// Unbind (or vault close) attempted while the spoke still carries
+/// recognized assets, payables, or holdings.
+public fun spoke_not_drained(): u64 { 151 }
+/// The hub chain id has not been configured in `EndpointRegistry`.
+public fun hub_chain_unset(): u64 { 152 }
+/// No protocol-fee escrow position exists to claim.
+public fun protocol_escrow_missing(): u64 { 153 }

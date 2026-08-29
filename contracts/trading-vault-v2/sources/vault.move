@@ -39,6 +39,7 @@ use options_core::errors as core_errors;
 use options_core::treasury::{Self, Treasury};
 
 use vault_v2::capital::{Self, CapitalStructure, Tranche, TrancheBook};
+use vault_v2::spoke::Spoke;
 use vault_v2::errors;
 use vault_v2::events;
 use vault_v2::fees;
@@ -163,6 +164,11 @@ public struct TradingVault has key {
     curator_commitment_breached: bool,
     external: Option<ExternalAccount>,
     settlement: Option<SettlementPool>,
+    /// Bound spoke chains (multichain plan §3): hub-side event-sourced
+    /// books + holdings ledgers, keyed by spoke id. LAYOUT NOTE: this
+    /// field (with `Appraisal`'s spoke fields) is a layout-incompatible
+    /// change — ships via a fresh publish, not an in-place upgrade.
+    spokes: VecMap<u64, Spoke>,
 }
 
 /// Capital deployed to a venue the vault cannot custody at the Move
@@ -224,6 +230,12 @@ public struct Appraisal {
     mutation_seq_snapshot: u64,
     capital_seq_snapshot: u64,
     external_pending: bool,
+    /// Bound spokes whose state leg has not been recorded yet
+    /// (`multichain::record_spoke_state`); must drain to consume.
+    spokes_pending: VecSet<u64>,
+    /// Outstanding spoke payables (§5.1), valued at the batch prices —
+    /// subtracted from `total_value` at consumption (floored at zero).
+    spoke_liabilities: u128,
 }
 
 /// Fulfillment hot potato: one appraisal's per-tranche waterfall ratios
@@ -342,6 +354,7 @@ public fun create_vault<T>(
         curator_commitment_breached: false,
         external: option::none(),
         settlement: option::none(),
+        spokes: vec_map::empty(),
     };
     let vault_id = object::id(&vault);
     let cap = CuratorCap { id: object::new(ctx), vault_id };
@@ -1379,6 +1392,13 @@ public fun begin_appraisal<T>(vault: &TradingVault): Appraisal {
     if (remaining.contains(&vault.config.accounting_asset)) {
         remaining.remove(&vault.config.accounting_asset);
     };
+    let mut spokes_pending = vec_set::empty();
+    let mut i = 0;
+    while (i < vault.spokes.length()) {
+        let (spoke_id, _) = vault.spokes.get_entry_by_idx(i);
+        spokes_pending.insert(*spoke_id);
+        i = i + 1;
+    };
     Appraisal {
         vault_id: object::id(vault),
         total_value: accounting_balance as u128,
@@ -1389,6 +1409,8 @@ public fun begin_appraisal<T>(vault: &TradingVault): Appraisal {
         mutation_seq_snapshot: vault.mutation_seq,
         capital_seq_snapshot: vault.capital_seq,
         external_pending: vault.external.is_some() && vault.external.borrow().exposure > 0,
+        spokes_pending,
+        spoke_liabilities: 0,
     }
 }
 
@@ -1448,18 +1470,26 @@ fun consume_appraisal(vault: &TradingVault, a: Appraisal): u128 {
         mutation_seq_snapshot,
         capital_seq_snapshot,
         external_pending,
+        spokes_pending,
+        spoke_liabilities,
     } = a;
     assert!(vault_id == object::id(vault), errors::wrong_vault());
     assert!(remaining_types.is_empty(), errors::appraisal_incomplete());
     assert!(!external_pending, errors::appraisal_incomplete());
+    assert!(spokes_pending.is_empty(), errors::appraisal_incomplete());
     assert!(appraised_positions.length() == position_total, errors::appraisal_incomplete());
     // Nothing may have moved since begin (same-PTB mutations invalidate).
     assert!(position_total == vault.position_count, errors::appraisal_mismatch());
     assert!(types_snapshot == vault.asset_types, errors::appraisal_mismatch());
     assert!(mutation_seq_snapshot == vault.mutation_seq, errors::appraisal_mismatch());
     assert!(capital_seq_snapshot == vault.capital_seq, errors::appraisal_mismatch());
-    events::emit_vault_appraised(vault_id, total_value, position_total);
-    total_value
+    // Spoke payables are liabilities against global NAV (§5.1); shares
+    // cannot represent negative value, so NAV floors at zero.
+    let nav = if (spoke_liabilities >= total_value) { 0 } else {
+        total_value - spoke_liabilities
+    };
+    events::emit_vault_appraised(vault_id, nav, position_total);
+    nav
 }
 
 /// Permissionless mark refresh: validates like every other consume and
@@ -1956,8 +1986,170 @@ public fun initiate_close_admin(_: &AdminCap, vault: &mut TradingVault) {
 
 fun initiate_close_internal(vault: &mut TradingVault) {
     assert!(vault.state == VaultState::Open, errors::vault_not_open());
+    // Multichain plan §11: spokes must be drained and unbound before the
+    // vault can begin closing — a settlement pool cannot span chains.
+    assert!(vault.spokes.is_empty(), errors::spoke_not_drained());
     vault.state = VaultState::Closing;
     events::emit_vault_closing(object::id(vault));
+}
+
+// ══════════════════ multichain package surface (§3) ══════════════════
+// Targeted `public(package)` access for `vault_v2::multichain` — the
+// message handlers live there; the invariants (appraisal choke point,
+// capital sync, commitment escrow) stay here.
+
+public fun has_spoke(vault: &TradingVault, spoke_id: u64): bool {
+    vault.spokes.contains(&spoke_id)
+}
+
+public fun spoke_ref(vault: &TradingVault, spoke_id: u64): &Spoke {
+    assert!(vault.spokes.contains(&spoke_id), errors::spoke_not_bound());
+    let idx = vault.spokes.get_idx(&spoke_id);
+    let (_, s) = vault.spokes.get_entry_by_idx(idx);
+    s
+}
+
+public fun spoke_count(vault: &TradingVault): u64 { vault.spokes.length() }
+
+public(package) fun spoke_mut(vault: &mut TradingVault, spoke_id: u64): &mut Spoke {
+    assert!(vault.spokes.contains(&spoke_id), errors::spoke_not_bound());
+    let idx = vault.spokes.get_idx(&spoke_id);
+    let (_, s) = vault.spokes.get_entry_by_idx_mut(idx);
+    s
+}
+
+public(package) fun bind_spoke_internal(vault: &mut TradingVault, spoke_id: u64, s: Spoke) {
+    assert!(vault.state == VaultState::Open, errors::vault_not_open());
+    assert!(!vault.spokes.contains(&spoke_id), errors::spoke_already_bound());
+    vault.spokes.insert(spoke_id, s);
+}
+
+public(package) fun unbind_spoke_internal(vault: &mut TradingVault, spoke_id: u64): Spoke {
+    assert!(vault.spokes.contains(&spoke_id), errors::spoke_not_bound());
+    let (_, s) = vault.spokes.remove(&spoke_id);
+    s
+}
+
+public(package) fun mc_consume_appraisal(vault: &TradingVault, a: Appraisal): u128 {
+    consume_appraisal(vault, a)
+}
+
+public(package) fun mc_sync_capital(
+    vault: &mut TradingVault,
+    cfg: &VaultProtocolConfig,
+    nav: u128,
+    now_ms: u64,
+): (u128, u128) {
+    sync_capital(vault, cfg, nav, now_ms)
+}
+
+public(package) fun mc_book_mut(vault: &mut TradingVault): &mut TrancheBook {
+    &mut vault.book
+}
+
+public fun deposits_paused(vault: &TradingVault): bool { vault.config.deposits_paused }
+
+public(package) fun mc_bump_capital_seq(vault: &mut TradingVault) {
+    vault.capital_seq = vault.capital_seq + 1;
+}
+
+public(package) fun mc_assert_cap(vault: &TradingVault, cap: &CuratorCap) {
+    assert_current_cap(vault, cap)
+}
+
+public(package) fun mc_credit_commitment(
+    vault: &mut TradingVault,
+    tranche: &Tranche,
+    shares: u128,
+    basis: u64,
+    ctx: &mut TxContext,
+) {
+    credit_commitment(vault, tranche, shares, basis, ctx)
+}
+
+/// Re-test the curator commitment at an updated NAV (mirrors the
+/// post-deposit re-test in `deposit_internal`).
+public(package) fun mc_retest_commitment(
+    vault: &mut TradingVault,
+    cfg: &VaultProtocolConfig,
+    nav: u128,
+    junior_nav: u128,
+) {
+    vault.curator_commitment_breached = commitment_breached(vault, cfg, nav, junior_nav);
+}
+
+/// Record one spoke's appraisal leg (multichain plan §5.1): asset value
+/// in, payable value as a liability. Aborts if the spoke's leg was
+/// already recorded or never snapshotted.
+public(package) fun appraisal_record_spoke(
+    vault: &TradingVault,
+    a: &mut Appraisal,
+    spoke_id: u64,
+    contribution: u128,
+    liability: u128,
+) {
+    assert!(a.vault_id == object::id(vault), errors::wrong_vault());
+    assert!(a.spokes_pending.contains(&spoke_id), errors::already_appraised());
+    a.spokes_pending.remove(&spoke_id);
+    a.total_value = a.total_value + contribution;
+    a.spoke_liabilities = a.spoke_liabilities + liability;
+}
+
+/// Escrow slot for spoke-exit protocol fees (multichain plan §5): the
+/// protocol's cut of a spoke withdrawal cannot leave as cash (the cash
+/// is on the spoke), so it is minted as shares here — PPS-neutral and
+/// claimable by the admin as a normal transferable position.
+public struct ProtocolFeeKey has copy, drop, store { tranche: u8 }
+
+public(package) fun mc_credit_protocol_escrow(
+    vault: &mut TradingVault,
+    tranche: &Tranche,
+    shares: u128,
+    basis: u64,
+    ctx: &mut TxContext,
+) {
+    let tranche_code = capital::tranche_code(tranche);
+    let generation = if (capital::is_junior(tranche)) {
+        capital::active_junior_generation(&vault.book)
+    } else { 0 };
+    let key = ProtocolFeeKey { tranche: tranche_code };
+    if (dof::exists(&vault.id, key)) {
+        let wiped = {
+            let existing: &VaultPosition = dof::borrow(&vault.id, key);
+            capital::is_junior(&vault_position::tranche(existing))
+                && vault_position::capital_generation(existing) < generation
+        };
+        if (wiped) {
+            let old: VaultPosition = dof::remove(&mut vault.id, key);
+            let (old_id, _, old_shares, _, _, old_gen) = vault_position::consume(old);
+            events::emit_wiped_position_burned(object::id(vault), old_id, old_gen, old_shares);
+        } else {
+            let existing: &mut VaultPosition = dof::borrow_mut(&mut vault.id, key);
+            vault_position::credit(existing, shares, basis);
+            events::emit_spoke_protocol_fee_credited(object::id(vault), tranche_code, shares, basis);
+            return
+        }
+    };
+    let position =
+        vault_position::mint(object::id(vault), *tranche, shares, basis, 0, generation, ctx);
+    dof::add(&mut vault.id, key, position);
+    events::emit_spoke_protocol_fee_credited(object::id(vault), tranche_code, shares, basis);
+}
+
+/// Admin claim of the escrowed protocol-fee position for `tranche_code`
+/// — a normal transferable `VaultPosition`, redeemable through the
+/// standard queue like any holder's.
+public fun claim_spoke_protocol_fees(
+    _: &AdminCap,
+    vault: &mut TradingVault,
+    tranche_code: u8,
+    ctx: &TxContext,
+): VaultPosition {
+    let key = ProtocolFeeKey { tranche: tranche_code };
+    assert!(dof::exists(&vault.id, key), errors::protocol_escrow_missing());
+    let p: VaultPosition = dof::remove(&mut vault.id, key);
+    events::emit_spoke_protocol_fee_claimed(object::id(vault), object::id(&p), ctx.sender());
+    p
 }
 
 /// Permissionless: Closing → Closed once every position is gone, live
