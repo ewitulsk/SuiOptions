@@ -73,6 +73,10 @@ jobs:
           - trading-vault-v2
           - oracle-pyth
           - oracle-switchboard
+          # Multichain vault transport adapters (multichain-vault-plan §2.2):
+          # separate packages over pinned LayerZero-v2 / chainlink-sui deps.
+          - endpoint-layerzero
+          - endpoint-ccip
           - equity-oracle
           - options-adapter
           - deepbook-adapter
