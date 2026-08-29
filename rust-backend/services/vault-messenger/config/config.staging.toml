@@ -1,0 +1,57 @@
+# vault-messenger — staging. Runs the TESTNET set (Sui Testnet hub <->
+# Robinhood testnet spoke, dev relayer transport) per the multichain plan:
+# testnet-first, mainnet is a config flip (plan §9).
+#
+# Object ids/addresses are placeholders until the phase-2 (hub Move) and
+# phase-3 (SpokeVault) deployments publish; deploy fills them like every
+# other id in this file's git history.
+
+environment = "staging"
+network_set = "testnet-set"
+bind_addr   = "0.0.0.0:9021"
+
+database_url = "postgresql://vault_messenger_staging:${DB_PASSWORD}@${DB_HOST}:5432/vault_messenger_staging"
+db_pool_size = 4
+
+allowed_origins = ["*"]
+
+evm_poll_interval_secs    = 10
+hub_poll_interval_secs    = 10
+deliver_interval_secs     = 5
+state_sync_interval_secs  = 300
+config_sync_interval_secs = 900
+alert_interval_secs       = 60
+
+max_attempts      = 8
+backoff_base_secs = 10
+backoff_cap_secs  = 600
+
+queue_stalled_after_secs = 900
+payout_aged_after_secs   = 3600
+fee_pot_low_wei          = "100000000000000000"
+
+[hub]
+network              = "testnet"
+# In-cluster oracle-service (compose network name).
+oracle_url           = "http://oracle-service:9012"
+trading_vault_pkg    = "0x0000000000000000000000000000000000000000000000000000000000000000"
+vault_id             = "0x0000000000000000000000000000000000000000000000000000000000000000"
+protocol_config_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+endpoint_registry_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+oracle_registry_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+gas_budget           = 500000000
+
+[spoke]
+# Robinhood testnet — set the real RPC + EVM chain id at deploy time.
+rpc_url                  = "https://REPLACE_ME.robinhood-testnet"
+chain_id                 = 0
+spoke_id                 = 1
+spoke_vault_address      = "0x0000000000000000000000000000000000000000"
+relayer_endpoint_address = "0x0000000000000000000000000000000000000000"
+transport                = "dev-relayer"
+asset_marker_type        = "0x0000000000000000000000000000000000000000000000000000000000000000::asset_markers::USDG"
+gas_limit                = 1000000
+max_scan_blocks          = 5000
+
+[spoke.asset_codes]
+1 = "TUSDG"

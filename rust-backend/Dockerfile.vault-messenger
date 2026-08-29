@@ -1,0 +1,25 @@
+# Multi-stage build for vault-messenger. Mirrors Dockerfile.cctp-relay — see
+# the platform note in Dockerfile.indexer (no $BUILDPLATFORM pinning).
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake protobuf-compiler git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN cargo build --release -p vault-messenger
+
+FROM debian:bookworm-slim
+# libpq5: Postgres runtime lib for the diesel connection.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 libpq5 curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/target/release/vault-messenger /usr/local/bin/vault-messenger
+COPY services/vault-messenger/config/ /app/config/
+
+ENV APP_ENV=staging
+# --secrets carries the relayer keys ([sui] + [evm]) rendered to
+# /run/secrets/vault-messenger.toml by render-secrets.sh and bind-mounted by
+# compose. REQUIRED at runtime — the messenger cannot submit without keys.
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/vault-messenger --config /app/config/config.${APP_ENV}.toml --secrets /run/secrets/vault-messenger.toml"]

@@ -50,7 +50,7 @@ COMPOSE_FILE="docker-compose.${ENV}.yml"
 # Canonical service set + their .env tag-variable names + the compose
 # service name (mostly identical to the cargo crate name, except
 # quoting-service is referenced as `quoting` in compose).
-ALL_SERVICES=(indexer quoting-service mm-bot api-service token-info auth-service gas-station hedge-signer market-sim price-charting balance-monitor keeper oracle-service cctp-relay twitter-service social-bot orderbook staging-mm-bot leaderboard event-ingestor)
+ALL_SERVICES=(indexer quoting-service mm-bot api-service token-info auth-service gas-station hedge-signer market-sim price-charting balance-monitor keeper oracle-service cctp-relay vault-messenger twitter-service social-bot orderbook staging-mm-bot leaderboard event-ingestor)
 
 tag_var_for() {
   case "$1" in
@@ -68,6 +68,7 @@ tag_var_for() {
     keeper)           echo KEEPER_TAG ;;
     oracle-service)   echo ORACLE_SERVICE_TAG ;;
     cctp-relay)       echo CCTP_RELAY_TAG ;;
+    vault-messenger)  echo VAULT_MESSENGER_TAG ;;
     twitter-service)  echo TWITTER_SERVICE_TAG ;;
     social-bot)       echo SOCIAL_BOT_TAG ;;
     orderbook)        echo ORDERBOOK_TAG ;;
@@ -93,6 +94,7 @@ compose_name_for() {
     keeper)           echo keeper ;;
     oracle-service)   echo oracle-service ;;
     cctp-relay)       echo cctp-relay ;;
+    vault-messenger)  echo vault-messenger ;;
     twitter-service)  echo twitter-service ;;
     social-bot)       echo social-bot ;;
     orderbook)        echo orderbook ;;
@@ -285,6 +287,7 @@ health_path_for() {
     auth-service)     echo "/$ENV/auth/health" ;;
     price-charting)   echo "/$ENV/charts/health" ;;
     cctp-relay)       echo "/$ENV/cctp/health" ;;
+    vault-messenger)  echo "/$ENV/vault-messenger/health" ;;
     hedge-signer)     echo "/$ENV/hedge-signer/health" ;;
     market-sim)       echo "/$ENV/market-sim/health" ;;
     keeper)           echo "/$ENV/keeper/health" ;;

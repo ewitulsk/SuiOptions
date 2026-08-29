@@ -1,0 +1,64 @@
+# vault-messenger — local dev. Sui Testnet hub <-> Robinhood testnet spoke
+# over the dev relayer endpoint. Placeholder object ids: fill from the
+# phase-2/3 deployments before running (see the service README).
+
+environment = "dev"
+network_set = "testnet-set"
+bind_addr   = "0.0.0.0:9021"
+
+database_url = "postgresql://postgres:postgres@127.0.0.1:5432/vault_messenger_dev"
+db_pool_size = 4
+
+allowed_origins = ["*"]
+
+evm_poll_interval_secs    = 10
+hub_poll_interval_secs    = 10
+deliver_interval_secs     = 5
+state_sync_interval_secs  = 300   # spoke syncState() cadence (plan: 5 min)
+config_sync_interval_secs = 900   # hub ConfigSync heartbeat (plan: 15 min)
+alert_interval_secs       = 60
+
+max_attempts      = 8
+backoff_base_secs = 10
+backoff_cap_secs  = 600
+
+queue_stalled_after_secs = 900
+payout_aged_after_secs   = 3600
+# 0.1 native token (wei) — alert well before the pot can't pay a send.
+fee_pot_low_wei          = "100000000000000000"
+
+[hub]
+network              = "testnet"
+oracle_url           = "http://127.0.0.1:9012"
+trading_vault_pkg    = "0x0000000000000000000000000000000000000000000000000000000000000000"
+vault_id             = "0x0000000000000000000000000000000000000000000000000000000000000000"
+protocol_config_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+endpoint_registry_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+oracle_registry_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+gas_budget           = 500000000
+# Optional adapter packages for appraisal legs on non-cash hub vaults
+# (mirrors the keeper's AppraisalRefs); leave unset for a cash-only vault.
+#deepbook_adapter_pkg = ""
+#options_adapter_pkg  = ""
+#exchange_adapter_pkg = ""
+#equity_oracle_pkg    = ""
+#equity_book_id       = ""
+#vol_book_id          = ""
+
+[spoke]
+# Robinhood testnet (EVM / Arbitrum Orbit). PLACEHOLDERS — set the real
+# RPC endpoint + EVM chain id from docs.robinhood.com/chain at deploy time.
+rpc_url                  = "http://127.0.0.1:8545"
+chain_id                 = 31337
+spoke_id                 = 1
+spoke_vault_address      = "0x0000000000000000000000000000000000000000"
+relayer_endpoint_address = "0x0000000000000000000000000000000000000000"
+transport                = "dev-relayer"
+# Sui-side pricing marker bound for the spoke asset at bind_spoke (the
+# attestation the deposit/withdraw handlers consume).
+asset_marker_type        = "0x0000000000000000000000000000000000000000000000000000000000000000::asset_markers::USDG"
+gas_limit                = 1000000
+max_scan_blocks          = 5000
+# Spoke-local asset codes (display only; the hub binding owns meaning).
+[spoke.asset_codes]
+1 = "TUSDG"

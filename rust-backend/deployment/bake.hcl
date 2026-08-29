@@ -105,6 +105,14 @@ target "cctp-relay" {
   cache-to   = [{ type = "gha", mode = "max", scope = "cctp-relay" }]
 }
 
+target "vault-messenger" {
+  inherits   = ["_common"]
+  dockerfile = "Dockerfile.vault-messenger"
+  tags       = ["${ECR}/options/vault-messenger:${IMAGE_TAG}"]
+  cache-from = [{ type = "gha", scope = "vault-messenger" }]
+  cache-to   = [{ type = "gha", mode = "max", scope = "vault-messenger" }]
+}
+
 target "gas-station" {
   inherits   = ["_common"]
   dockerfile = "Dockerfile.gas-station"
@@ -190,5 +198,5 @@ target "event-ingestor" {
 }
 
 group "default" {
-  targets = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "twitter-service", "social-bot", "orderbook", "staging-mm-bot", "leaderboard", "event-ingestor"]
+  targets = ["indexer", "quoting-service", "mm-bot", "api-service", "token-info", "auth-service", "gas-station", "hedge-signer", "market-sim", "price-charting", "keeper", "balance-monitor", "oracle-service", "cctp-relay", "vault-messenger", "twitter-service", "social-bot", "orderbook", "staging-mm-bot", "leaderboard", "event-ingestor"]
 }

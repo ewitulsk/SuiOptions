@@ -1,0 +1,59 @@
+# vault-messenger — prod. The MAINNET set (Sui Mainnet hub <-> Robinhood
+# mainnet spoke). NOT deployable until:
+#   - the mainnet hub/spoke contracts are published (ids below),
+#   - a production transport is bound (LayerZero/CCIP — `transport` below
+#     must NOT be dev-relayer on mainnet; the hub refuses the dev endpoint
+#     on production spokes by policy),
+#   - the curator rebalance integration ships (mainnet launch gate).
+# Like cctp-relay, prod also needs the AWS secret + compose/nginx blocks
+# uncommented — see rust-backend/deployment/compose/docker-compose.prod.yml.
+
+environment = "prod"
+network_set = "mainnet-set"
+bind_addr   = "0.0.0.0:9021"
+
+database_url = "postgresql://vault_messenger_prod:${DB_PASSWORD}@${DB_HOST}:5432/vault_messenger_prod"
+db_pool_size = 4
+
+allowed_origins = ["*"]
+
+evm_poll_interval_secs    = 10
+hub_poll_interval_secs    = 10
+deliver_interval_secs     = 5
+state_sync_interval_secs  = 300
+config_sync_interval_secs = 900
+alert_interval_secs       = 60
+
+max_attempts      = 8
+backoff_base_secs = 10
+backoff_cap_secs  = 600
+
+queue_stalled_after_secs = 900
+payout_aged_after_secs   = 3600
+fee_pot_low_wei          = "100000000000000000"
+
+[hub]
+network              = "mainnet"
+oracle_url           = "http://oracle-service:9012"
+trading_vault_pkg    = "0x0000000000000000000000000000000000000000000000000000000000000000"
+vault_id             = "0x0000000000000000000000000000000000000000000000000000000000000000"
+protocol_config_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+endpoint_registry_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+oracle_registry_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+gas_budget           = 500000000
+
+[spoke]
+# Robinhood mainnet — set the real RPC + EVM chain id at deploy time.
+rpc_url                  = "https://REPLACE_ME.robinhood-mainnet"
+chain_id                 = 0
+spoke_id                 = 1
+spoke_vault_address      = "0x0000000000000000000000000000000000000000"
+relayer_endpoint_address = "0x0000000000000000000000000000000000000000"
+# Mainnet rides a verification network; this service only watches/confirms.
+transport                = "layerzero"
+asset_marker_type        = "0x0000000000000000000000000000000000000000000000000000000000000000::asset_markers::USDG"
+gas_limit                = 1000000
+max_scan_blocks          = 5000
+
+[spoke.asset_codes]
+1 = "USDG"
