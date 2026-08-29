@@ -1,12 +1,11 @@
 # Multichain Trading Vault: Sui Hub / EVM Spokes
 
-Status: DESIGN — reviewed with Evan 2026-08-28/29; descoped 2026-08-29 (cut
-Hyperliquid entirely; cut all vault-level bridging). Not yet implemented.
+Status: DESIGN — reviewed with Evan 2026-08-28/29 over three rounds; all
+decisions below are locked. Not yet implemented.
 
 ## Summary
 
-Extend trading-vault-v2 to a hub-and-spoke multichain vault. MVP scope after
-descope:
+Extend trading-vault-v2 to a hub-and-spoke multichain vault. MVP scope:
 
 - **Sui is the hub.** The existing `TradingVault` remains the single source
   of truth for ALL accounting: share supply, NAV, valuations, entry/exit
@@ -19,50 +18,62 @@ descope:
   or NAV** — it reports quantities ("user X deposited N of token T", "free
   balance is F"), and the hub does every conversion. Every message in §2.1
   obeys this.
-- **No funds move between hub and spoke.** All vault-level bridging (CCTP,
-  Across) is cut from MVP. Spoke deposits stay on the spoke; hub assets
-  stay on the hub. Both sides count in one global NAV.
+- **No funds move between hub and spoke in MVP.** All vault-level bridging
+  is cut. Spoke deposits stay on the spoke; hub assets stay on the hub;
+  both count in one global NAV.
 - **Curator controls funds on both sides.** On the hub, the existing
   session/adapter machinery is unchanged. On the spoke, the vault ships a
   **curator-controlled integration interface** (§6) — the only way funds
-  can ever leave the spoke vault besides user withdrawals. **MVP registers
-  zero integrations**, so spoke funds are inert until one is added; a
-  future bridge is just another integration behind this interface.
-- **Messaging is transport-agnostic**; the MVP transport is our attestor
-  (required for Robinhood regardless — no third-party messaging serves it).
+  can ever leave the spoke vault besides user payouts. MVP registers zero
+  integrations; **a rebalance integration (so the curator can move funds
+  and fill withdrawal queues) is a hard launch gate for mainnet** — MVP
+  ships to testnet without it, mainnet does not.
+- **Messaging is transport-agnostic**; the MVP transport is our
+  relayer-gated endpoint (§2.2) — no third-party messaging serves Robinhood.
 
 ### Locked decisions (2026-08-28/29 reviews)
 
-1. Messaging: agnostic endpoint interface; attestor transport for MVP.
+1. Messaging: agnostic endpoint interface; relayer-gated transport for MVP
+   (§2.2 — no separate attestor keypair).
 2. Accounting: hub is master; spokes report raw quantities only — no
    valuation, NAV, or share math on any spoke, ever.
-3. Withdrawals in scope, hub-directed and share-denominated (spoke asks,
-   waits, hub answers "pay user X amount A").
+3. Withdrawals: hub-directed and share-denominated. The spoke notifies the
+   hub the moment a request lands; the hub burns in full at ACK; the spoke
+   **queues payouts it cannot fill** (FIFO) rather than the hub rationing
+   ACKs. Accepted because the rebalance integration exists before mainnet
+   (launch gate above).
 4. Spoke depositor gating: a separate, per-chain whitelist on each
    `SpokeVault` (the hub's Sui `Whitelist` is not consulted).
-5. Robinhood spoke deposit asset is **USDG** (no liquid USDC there).
-6. **Tranching is supported on spoke vaults**; all tranche accounting stays
+5. Robinhood spoke deposit asset is **USDG**; testnet uses a
+   faucet-mintable **mock USDG**, modeled on the `test-tokens` Sui mocks.
+6. USDG valuation must be servable by **both** the Pyth and Switchboard
+   oracle adapters, switchable at will via the existing `OracleRegistry`
+   pin.
+7. **Tranching is supported on spoke vaults**; all tranche accounting stays
    on the hub — the spoke relays the user's tranche choice as an opaque
    code.
-7. Testnet-first; every network-dependent value in config profiles so
+8. Governance: composable role-based admin with transferable ownership on
+   both sides (§6.1) — Sui via capability objects, EVM via two-step
+   transferable roles.
+9. Testnet-first; every network-dependent value in config profiles so
    mainnet is a config flip (§9).
-8. **2026-08-29 descope:** Hyperliquid (spoke, HyperCore/CoreWriter,
-   Wormhole lane) cut entirely — nothing ships on Hyperliquid yet.
-   Vault-level bridge integrations (CCTP, Across) cut — no hub↔spoke fund
-   transfer path in MVP. The curator integration interface (§6) stays, with
-   zero registered integrations.
+10. 2026-08-29 descope: Hyperliquid (spoke, HyperCore/CoreWriter, Wormhole
+    lane) cut entirely; vault-level bridge integrations (CCTP, Across) cut.
+    Both return later as spoke integrations / endpoint modules.
 
 ### External facts this design depends on (verified 2026-08-29)
 
 - Robinhood Chain: EVM (Arbitrum Orbit), mainnet 2026-07-01, testnet since
-  2026-02-10. No Wormhole/LayerZero/CCTP → our attestor transport is
-  required. Chainlink is live there (unused by us — valuation is hub-side).
-- **USDG** (Paxos Global Dollar) is live on Robinhood Chain. USDG does
-  **not** exist on Sui — one reason no hub↔spoke transfer lane exists even
-  if we wanted one; a future bridge integration must handle asset
+  2026-02-10. No Wormhole/LayerZero/CCTP → our own transport is required.
+- **USDG** (Paxos Global Dollar) is live on Robinhood Chain. USDG does not
+  exist on Sui — a future bridge integration must handle asset
   transformation.
-- Testnet USDG availability on Robinhood testnet is unconfirmed (open item
-  — may need a mock ERC-20 for staging).
+- A **Pyth USDG/USD feed is unconfirmed** in the public catalog — check at
+  phase-2 start. **Switchboard on-demand allows defining a USDG/USD feed
+  ourselves**, so the Switchboard adapter path is guaranteed; Pyth is added
+  the moment its catalog carries the pair (decision 6 is about the
+  abstraction supporting both, which the existing adapter/pin design
+  already does).
 
 ## 1. Roles and fund states
 
@@ -75,22 +86,24 @@ Spoke vault fund states (tracked per asset; MVP: USDG only):
 |------------|----------------------------------------------------|--------------------|
 | `pending`  | deposit escrowed, no hub ACK yet                   | NO                 |
 | `active`   | hub-ACK'd; part of vault NAV                       | via integrations¹  |
-| `reserved` | owed to a hub-ACK'd withdrawal (payout, §5)        | NO                 |
+| `reserved` | owed to a hub-ACK'd withdrawal (payout queue, §5)  | NO                 |
 
-¹ MVP registers no integrations, so `active` funds sit in the vault and
-back withdrawals; the interface (§6) is how curator control materializes.
+¹ MVP registers no integrations; `active` funds sit in the vault and back
+withdrawals until the rebalance integration ships.
 
 The pending→active transition happens ONLY on a hub `DepositAck` — the
 "funds unusable until ACK" invariant, enforced on-chain on the spoke.
 
 **Spoke depositor whitelist**: each `SpokeVault` carries its own allowlist
-(admin-managed); `deposit` and `requestWithdraw` check it. Empty = open.
-The hub does not re-check identity for spoke ledger entries.
+(role-managed, §6.1); `deposit` and `requestWithdraw` check it. Empty =
+open. The hub does not re-check identity for spoke ledger entries.
 
 **Hub valuation of spoke assets**: the hub's accounting asset stays USDC.
 USDG is valued through the existing `PriceAttestation` machinery — a
-USDG/USD feed added to the oracle service and pinned in `OracleRegistry`,
-like any other non-accounting deposit asset. No 1:1 assumption.
+USDG/USD feed servable by BOTH `oracle-switchboard` and `oracle-pyth`
+adapters, with the active source chosen by the `OracleRegistry` pin
+(`pin_oracle`/`unpin_oracle` switch it at any time, no vault changes). No
+1:1 assumption.
 
 ## 2. Messaging layer
 
@@ -110,7 +123,7 @@ Spoke → Hub (facts):
   amount, tranche: u8 }` — asset is a spoke-local code bound in
   `SpokeConfig`; tranche is the user's choice relayed opaquely.
 - `WithdrawRequest { spoke_id, request_seq, user: bytes32, tranche: u8,
-  shares, all: bool }`
+  shares, all: bool }` — sent the moment the request lands on the spoke.
 - `PayoutReceipt { spoke_id, request_seq, amount }`
 - `StateSync { spoke_id, per-asset {free, reserved}, integration_raw, ts }`
   — `integration_raw` is raw venue data from any future integration (empty
@@ -122,31 +135,37 @@ Hub → Spoke (instructions):
 - `WithdrawAck { request_seq, user: bytes32, pay_amount }`
 - `ConfigSync { paused, risk_off, curator: address, integrations_root }`
 
-### 2.2 Why an attestor key (and hub-side transports)
+### 2.2 Trust model: the relayer-gated endpoint
 
-The hub cannot observe Robinhood Chain. When a message claims "user X
-deposited N", the hub needs on-chain-verifiable proof or anyone could mint
-shares by calling the handler. On lanes served by Wormhole/LayerZero that
-proof is the transport's validator signatures; no transport serves
-Robinhood, so the proof must be OUR signature: the attestor key. (Gating on
-the relayer's tx-sender address is the same trust with less flexibility — a
-signed-message design verifies identically on Sui and EVM, supports k-of-n,
-and rotates without changing gas payers. It matches the existing
-`registrar_pubkey` / hedge-signer patterns.)
+There is no way to make hub↔Robinhood messages trustless today: the hub
+contract on Sui cannot verify a Robinhood event by itself, and the tools
+that would let it (a light client, or third-party messaging like
+Wormhole/LayerZero validating on both chains) don't exist for this pair.
+So SOME account we control must be the one whose word the hub accepts —
+that trust is irreducible; the only question is how it's expressed.
 
-Each transport is a witness-typed Move module allow-listed in a new
-`EndpointRegistry` (mirroring the oracle/integration adapter pattern). A
-transport verifies its own proof and constructs a `VerifiedMessage` hot
-potato that only `vault_v2::multichain` can consume; `multichain` checks
-the spoke binding (`spoke_id → (chain_id, spoke_vault_address,
-endpoint_type)`) and `seq`, then applies the payload. Outbound:
-`multichain` emits a canonical `OutboundMessage` event; the attestor
-transport relays it. Third-party transports (Wormhole etc.) remain future
-endpoint modules for chains that have them — post-MVP.
+MVP expresses it with **no extra key material at all**: the relayer service
+already signs the transactions that deliver messages, so the endpoint
+simply requires the delivering account to be a registered relayer —
+`ctx.sender()` on Sui, `msg.sender` on EVM — checked against an
+admin-managed set (rotatable, multiple accounts for redundancy). A
+separate signature-verified attestor scheme adds nothing security-wise at
+this trust level and is dropped; a signature/k-of-n endpoint remains a
+possible future endpoint module if multi-party trust or third-party
+delivery is ever wanted, and real transports (Wormhole etc.) slot in for
+chains that have them.
 
-- `endpoint-attestor` (MVP): ed25519 signature(s) over
-  `domain_tag ‖ envelope ‖ payload`, pubkeys in `EndpointRegistry`. Start
-  with 1 key, structured for k-of-n. Key custody/rotation: ops item.
+Hub-side structure: each transport is a witness-typed Move module
+allow-listed in a new `EndpointRegistry` (mirroring the oracle/integration
+adapter pattern). A transport validates delivery (MVP: registered-sender
+check) and constructs a `VerifiedMessage` hot potato that only
+`vault_v2::multichain` can consume; `multichain` checks the spoke binding
+(`spoke_id → (chain_id, spoke_vault_address, endpoint_type)`) and `seq`,
+then applies the payload. Outbound: `multichain` emits a canonical
+`OutboundMessage` event; the relayer delivers it to the spoke.
+
+- `endpoint-relayer` (MVP): registered-sender gate, sender set managed via
+  `AdminCap` in `EndpointRegistry`.
 
 ### 2.3 Spoke side (EVM)
 
@@ -155,13 +174,13 @@ endpoint modules for chains that have them — post-MVP.
 ```solidity
 interface IMessageEndpoint {
     function send(bytes calldata envelopeAndPayload) external;   // outbound
-    // inbound: endpoint verifies transport proof, then calls
+    // inbound: endpoint validates delivery, then calls
     // spokeVault.handleMessage(envelope, payload); vault checks
     // msg.sender == registered endpoint + seq.
 }
 ```
 
-- `AttestorEndpoint` (MVP): ECDSA (k-of-n) verification, relayer-submitted.
+- `RelayerEndpoint` (MVP): `msg.sender` must hold `RELAYER_ROLE` (§6.1).
 
 Endpoint per spoke set at deploy, changeable only via hub `ConfigSync`.
 
@@ -170,7 +189,7 @@ Endpoint per spoke set at deploy, changeable only via hub `ConfigSync`.
 New module(s) in the `trading-vault-v2` package (upgrade), keeping
 `vault.move` changes minimal and behind `public(package)` helpers.
 
-- **Spoke registry**: shared `MultichainRegistry` (admin-gated):
+- **Spoke registry**: shared `MultichainRegistry` (AdminCap-gated):
   `spoke_id → SpokeConfig { chain_id, vault_address: bytes32, endpoint:
   TypeName, asset_codes: asset code → Sui-side TypeName for valuation,
   active }`; per-vault binding via `CuratorCap` + admin co-sign (matches
@@ -192,8 +211,8 @@ New module(s) in the `trading-vault-v2` package (upgrade), keeping
     the `Appraisal` hot potato (like `external_pending`); a
     `record_spoke_state` leg per spoke (bound endpoint only,
     freshness-checked) values per-asset balances at attested prices (USDG
-    via its feed) plus `integration_value`, minus `payables`. NAV cannot
-    complete with a stale spoke → the safe failure mode.
+    via its pinned feed) plus `integration_value`, minus `payables`. NAV
+    cannot complete with a stale spoke → the safe failure mode.
 - **Message handlers** (consume `VerifiedMessage`; valuation happens here,
   against a complete `Appraisal`):
   - `handle_deposit_notice`: vault open + not paused + tranche valid →
@@ -203,10 +222,9 @@ New module(s) in the `trading-vault-v2` package (upgrade), keeping
     `accepted: false` (spoke refunds).
   - `handle_withdraw_request`: validate holding + lockup + the same
     per-tranche gates hub withdrawals face (junior blocked in risk-off
-    states, generation wipe checks), value shares at current NAV with exit
-    haircut, **cap by spoke solvency (§5.1)**, crystallize perf fee vs
-    basis, burn the shares actually honored, `payables += pay_amount` →
-    `WithdrawAck`. Rejected → `pay_amount: 0`.
+    states, generation wipe checks), value shares **in full** at current
+    NAV with exit haircut, crystallize perf fee vs basis, burn the shares,
+    `payables += pay_amount` → `WithdrawAck`. Rejected → `pay_amount: 0`.
   - `handle_payout_receipt`: clear payable, deduct spoke balance.
 - **Gate propagation**: `ConfigSync` pushed on pause, risk-state flips from
   `sync_capital`, curator rotation, integration-set changes. Spokes treat a
@@ -216,9 +234,9 @@ New module(s) in the `trading-vault-v2` package (upgrade), keeping
 ## 4. Deposit flow (spoke)
 
 1. User (spoke-whitelisted): `SpokeVault.deposit(asset, amount, tranche)` →
-   escrowed `pending`, local `deposit_seq`, `DepositNotice` sent. The
-   spoke validates nothing about the tranche beyond range — the hub owns
-   policy.
+   escrowed `pending`, local `deposit_seq`, `DepositNotice` sent
+   immediately. The spoke validates nothing about the tranche beyond
+   range — the hub owns policy.
 2. Hub handler mints ledger shares (entry haircut, basis, hub-clock
    timestamp) → `DepositAck`.
 3. Spoke on ACK: `pending → active`; records the hub-stated share count in
@@ -231,61 +249,48 @@ New module(s) in the `trading-vault-v2` package (upgrade), keeping
 
 Spoke shares are non-transferable claims in MVP (no ERC-20).
 
-## 5. Withdrawal flow (spoke) — hub-directed
+## 5. Withdrawal flow (spoke) — hub-directed, spoke-queued
 
-The hub is master; the spoke asks and waits. Requests are
-**share-denominated** (`shares` or `all`, per tranche); dollar estimates
-are a UI concern served from hub NAV via the API — the spoke computes
-nothing.
+The hub is master; the spoke asks the moment a request lands and waits for
+the answer. Requests are **share-denominated** (`shares` or `all`, per
+tranche); dollar estimates are a UI concern served from hub NAV via the
+API — the spoke computes nothing.
 
 1. User: `requestWithdraw(tranche, shares | all)` → spoke records the
-   request (one in-flight per (user, tranche)), sends `WithdrawRequest`.
+   request (one in-flight per (user, tranche)) and sends `WithdrawRequest`
+   in the same transaction.
 2. Hub: validates against the ledger, enforces lockup + tranche gates,
-   prices at current NAV with exit haircut, applies the solvency cap
-   (§5.1), crystallizes fees, burns the honored shares, books `payables` →
+   prices the full request at current NAV with exit haircut, crystallizes
+   fees, **burns the shares in full**, books `payables` →
    `WithdrawAck{user, pay_amount}` denominated in the spoke's deposit
    asset at attested prices.
-3. Spoke on ACK: move `pay_amount` to `reserved` and pay the user. Under
-   §5.1 the ACK never exceeds what the spoke holds, so payment is
-   immediate; `reserved` exists for the gap between ACK arrival and the
-   payout tx, and integration calls (once any exist) revert while any ACK
-   is unpaid.
+3. Spoke on ACK: pay immediately from `free` if it can; otherwise move
+   what exists to `reserved` and **queue the remainder FIFO**. While any
+   payout is queued, integration calls that move funds out revert, and all
+   funds arriving service the queue before becoming `active` — so once the
+   rebalance integration exists, refilling the queue is a curator
+   obligation enforced by the trading freeze.
 4. On each payment: `PayoutReceipt` → hub clears the payable.
 
-### 5.1 Spoke solvency cap (consequence of "no bridging")
+Since shares burn at ACK, `payables` is a NAV liability until paid (§3),
+so remaining holders are unaffected by queue duration. Queue depth and age
+are surfaced via `StateSync`/indexer for the curator dashboard, and a
+queue older than a threshold raises an ops alert.
 
-With no hub↔spoke transfer path, a spoke can only ever pay out what it
-locally holds — but spoke shares are claims on GLOBAL NAV. If the vault
-appreciates from hub-side trading, spoke claims can exceed the spoke's
-local USDG. Burning shares the spoke cannot pay would strand users behind
-an unfundable queue.
-
-Rule: when handling a `WithdrawRequest`, the hub honors
-`min(requested value, spoke free − outstanding payables)` and burns only
-the shares corresponding to the honored amount; **unhonored shares stay
-outstanding** (still earning/losing with the vault, hurdle still accruing
-for senior) and the remainder of the request is queued hub-side, retried at
-each subsequent crank as spoke liquidity appears (new deposits, or a future
-bridge/integration returning funds). The spoke never receives an ACK it
-cannot pay. Partial honoring is FIFO per spoke, and the same tranche gates
-apply on every retry.
-
-Consequences to be aware of (accepted 2026-08-29 unless revisited):
-- If withdrawal demand exceeds cumulative spoke inflows, the tail waits
-  indefinitely until a bridge integration exists. Deposits keep working.
-- Terminal close (`initiate_close`) with a spoke whose claims exceed local
-  funds cannot fully drain that spoke without a bridge; MVP forbids close
-  while a spoke has non-zero assets or payables.
+Accepted consequence (2026-08-29): in MVP-on-testnet the queue can only be
+filled by new deposits; on mainnet the rebalance integration (launch gate)
+gives the curator the means — and the freeze the obligation — to fill it.
 
 ## 6. Curator integration interface (spoke)
 
 The only path for funds to leave a `SpokeVault` other than user payouts.
-Ships in MVP as an interface with **zero registered integrations**.
+Ships in MVP as an interface with **zero registered integrations**; the
+first real one (curator rebalance) is the mainnet launch gate.
 
 ```solidity
 interface ISpokeIntegration {
     // funds flow vault -> integration only via SpokeVault.extendTo:
-    // curator-only, active-funds-only, blocked while any ACK is unpaid
+    // curator-only, active-funds-only, blocked while any payout is queued
     // and while risk_off/stale-heartbeat; integration must be registered.
     function onFundsReceived(address asset, uint256 amount) external;
     // raw state for StateSync.integration_raw (never a valuation)
@@ -295,43 +300,74 @@ interface ISpokeIntegration {
 ```
 
 - **Registration is hub-governed**: the integration set for a spoke is
-  committed on the hub (admin + curator co-signed, like adapter
+  committed on the hub (AdminCap + CuratorCap co-signed, like adapter
   allow-listing) and propagated via `ConfigSync.integrations_root`; the
-  spoke accepts only registered integrations. Removal is an instant kill
-  switch for new `extendTo` calls, mirroring `IntegrationRegistry`
-  semantics on the hub.
-- Every integration must expose `rawState()` so the hub can value deployed
-  funds; a hub-side valuation adapter (oracle-registry slot) is part of
-  registering any integration.
-- A future bridge (CCTP, Across, …) is just an integration under this
-  interface with destination restricted to registered vault addresses,
-  plus in-flight accounting on the hub — designed then, not now.
+  spoke accepts only registered integrations, and no spoke-local role can
+  add one. Removal is an instant kill switch for new `extendTo` calls,
+  mirroring `IntegrationRegistry` semantics on the hub.
+- Every integration must expose `rawState()`; a hub-side valuation adapter
+  (oracle-registry slot) is part of registering any integration.
 - Curator identity on the spoke comes from `ConfigSync` (rotation
-  propagates from the hub).
+  propagates from the hub; the curator is NOT a spoke-local role).
+
+### 6.1 Governance and admin ownership
+
+Composable roles with transferable ownership on both sides; policy-bearing
+decisions live on the hub, operational knobs live where they act.
+
+Hub (Sui): capability objects, already the repo's pattern and transferable
+by construction — `AdminCap` (protocol admin: `MultichainRegistry`,
+`EndpointRegistry` relayer set, integration registration co-sign) and
+`CuratorCap` (per-vault binding + integration co-sign, rotatable via the
+existing `rotate_curator_by_curator` machinery). Transferring hub admin =
+transferring the `AdminCap` object; nothing else to migrate.
+
+EVM (`SpokeVault` + `RelayerEndpoint`): OpenZeppelin
+`AccessControlDefaultAdminRules` — one `DEFAULT_ADMIN_ROLE` root with
+built-in **two-step, time-delayed transfer** (deployer EOA at first, handed
+to a multisig later with no code change), administering three operational
+roles:
+- `WHITELIST_ROLE` — manage the spoke depositor allowlist.
+- `RELAYER_ROLE` — accounts allowed to deliver messages (on the endpoint);
+  multiple accounts for redundancy, rotated without redeploys.
+- `PAUSER_ROLE` — local emergency pause (deposits/payouts halt; hub
+  `ConfigSync` pause remains the governed path — this is the break-glass).
+
+Explicitly NOT spoke-local roles: curator identity and the integration set
+(both hub-propagated via `ConfigSync`), so spoke admin compromise cannot
+redirect funds — worst case it can pause, censor the whitelist, or stall
+relaying, all liveness not custody.
 
 ## 7. Spoke contracts (new `evm-contracts/` Foundry workspace)
 
 - `SpokeVault.sol` — per-asset fund states + depositor whitelist +
-  deposit/reclaim + per-tranche withdraw + `handleMessage` dispatch +
-  endpoint binding + curator address + integration registry (§6) +
+  deposit/reclaim + per-tranche withdraw + payout queue + `handleMessage`
+  dispatch + endpoint binding + integration registry (§6) + roles (§6.1) +
   pause/stale-heartbeat freeze.
-- `AttestorEndpoint.sol`.
+- `RelayerEndpoint.sol`.
+- `TUSDG.sol` — faucet-mintable mock USDG for testnet (open `mint`, 6
+  decimals), mirroring the `test-tokens` Sui pattern (TUSDC et al.);
+  deployed only in the testnet config set.
 - Shared message codec library mirroring the Move schema; golden byte
   fixtures keep Move/Solidity/Rust codecs in lockstep.
 
 ## 8. Off-chain
 
 - **New `rust-backend/services/vault-messenger`** (patterns: `cctp-relay`
-  watcher + `hedge-signer` key handling): watches hub events and spoke
-  logs, persists ordered per-lane message queues in Postgres,
-  attestor-signs, submits with per-chain relayer keys (AWS Secrets),
-  retries with backoff; `error!(alert_id = "tx-failed-vault-messenger")`
-  per the tx-alerting convention; produces periodic `StateSync`
-  attestations (raw RPC reads only) consumed by the appraisal crank.
+  watcher + existing service key handling): watches hub events and spoke
+  logs, persists ordered per-lane message queues in Postgres, submits with
+  per-chain relayer accounts (AWS Secrets; these accounts ARE the trust
+  gate, §2.2), retries with backoff;
+  `error!(alert_id = "tx-failed-vault-messenger")` per the tx-alerting
+  convention; produces periodic `StateSync` submissions (raw RPC reads
+  only) consumed by the appraisal crank; alerts on payout-queue age.
   Full 9-spot deployment registration per repo convention.
 - Appraisal/crank flow gains the spoke legs: price attestations (incl.
   USDG/USD) + `record_spoke_state` per spoke + existing legs.
-- Oracle service: add a USDG/USD feed (source TBD — open item).
+- Oracle service: USDG/USD feed served through the **Switchboard** adapter
+  (on-demand feed we define — guaranteed available) and through the
+  **Pyth** adapter as soon as its catalog carries USDG/USD; the
+  `OracleRegistry` pin selects the active one.
 
 ## 9. Config: testnet → mainnet is a flip
 
@@ -340,7 +376,7 @@ code — the repo's existing pattern (`config.staging.toml`/`config.prod.toml`
 with a `network` profile, as cctp-relay does; `rust-backend/deployments.json`
 for published IDs; frontend per-network maps in `config.ts`):
 - Per-chain: RPC URLs, chain IDs, spoke vault + endpoint addresses, asset
-  addresses (USDG or its testnet mock).
+  addresses (USDG mainnet / TUSDG testnet), relayer accounts.
 - Hub: package/registry object IDs per Sui network.
 - One `network_set` selector (testnet-set vs mainnet-set) chooses the whole
   coherent bundle; promotion is a config/deploy change with zero code
@@ -350,42 +386,43 @@ for published IDs; frontend per-network maps in `config.ts`):
 
 1. **Message schema + golden fixtures** (Rust crate + Move + Solidity
    codecs). Verify: cross-codec fixture tests.
-2. **Hub Move** — `multichain` module, `EndpointRegistry`,
-   `endpoint-attestor`, tranche-aware ledger, appraisal spoke legs,
-   payables + solvency cap, handlers, ConfigSync events, USDG oracle pin.
-   Verify: `sui move test` incl. replay/staleness/refund-deadline/tranche
-   gate/solvency-cap cases.
-3. **`SpokeVault` + `AttestorEndpoint`** in `evm-contracts/`; whitelist,
-   deposits, reclaim, per-tranche withdraw, integration registry (empty),
-   gates. Verify: Foundry tests. Deploy Robinhood testnet.
+2. **Hub Move** — `multichain` module, `EndpointRegistry` +
+   `endpoint-relayer`, tranche-aware ledger, appraisal spoke legs,
+   payables, handlers, ConfigSync events, USDG oracle pin (Switchboard
+   feed; Pyth catalog check happens here). Verify: `sui move test` incl.
+   replay/staleness/refund-deadline/tranche-gate cases.
+3. **`SpokeVault` + `RelayerEndpoint` + `TUSDG`** in `evm-contracts/`;
+   roles, whitelist, deposits, reclaim, per-tranche withdraw + payout
+   queue, integration registry (empty), gates. Verify: Foundry tests.
+   Deploy Robinhood testnet.
 4. **`vault-messenger`** + StateSync + crank integration. Verify: e2e on
-   Robinhood testnet — USDG deposit → ACK → active; withdraw → ACK → paid →
-   receipt clears payable; partial honoring when spoke free < claim value;
-   kill-relayer chaos (reclaim after timeout; freeze on stale heartbeat).
+   Robinhood testnet — TUSDG deposit → ACK → active; withdraw → ACK → paid
+   → receipt clears payable; underfunded withdraw queues FIFO and drains
+   from a fresh deposit; kill-relayer chaos (reclaim after timeout; freeze
+   on stale heartbeat); relayer-account rotation.
 5. **Frontend + deployment registration + staging rollout**; runbook
-   (attestor key rotation, spoke freeze/unfreeze, stuck-message recovery).
+   (relayer account rotation, spoke freeze/unfreeze, stuck-message
+   recovery, payout-queue-age alert response).
 
-Cut from MVP (return as future phases when wanted): Hyperliquid spoke +
-HyperCore/CoreWriter integration; bridge integrations (CCTP/Across) with
-in-flight accounting; Wormhole/LayerZero endpoint modules; ERC-20 spoke
-shares.
+Post-MVP, pre-mainnet (launch gate): the curator rebalance integration
+(§6) with its hub-side valuation adapter and in-flight accounting.
+Later: Hyperliquid spoke + HyperCore/CoreWriter; bridge integrations;
+third-party endpoint modules (Wormhole/LayerZero); ERC-20 spoke shares.
 
 ## 11. Open items
 
-- **USDG/USD feed source** for hub valuation (Pyth? our oracle-service
-  attesting from market data?) — needed by phase 2.
-- **Robinhood testnet USDG** — exists, or deploy a mock ERC-20 for staging?
-  Needed by phase 3.
-- **Attestor key ops** — 1 key vs k-of-n at launch; custody/rotation.
-- **Spoke whitelist + integration-set governance ownership** — which
-  key(s) administer the spoke whitelist, and confirm the hub-governed
-  integration registration mechanism (§6) before any integration is added.
-- **Solvency-cap semantics (§5.1)** — confirm partial honoring + shares
-  staying outstanding is the desired behavior (vs. burning in full and
-  letting an unfundable queue accrue).
-- Accepted MVP limitations (signed off 2026-08-29 unless revisited):
-  spoke funds are inert (no integrations registered) and cannot reach the
-  hub; withdrawal tails can wait indefinitely if demand exceeds spoke
-  inflows; terminal close blocked while a spoke holds assets/payables;
-  dark spoke blocks vault-wide NAV (safe direction); trusted attestor is
-  the messaging trust root.
+- **Pyth USDG/USD catalog check** (phase 2) — Switchboard path is
+  guaranteed either way; this only decides when the second oracle lights
+  up.
+- **Relayer account ops** — how many redundant relayer accounts, gas
+  funding, custody/rotation runbook (lighter than the old attestor-key
+  item: these are ordinary service accounts like cctp-relay's).
+- **Rebalance-integration design** (the launch gate) — deliberately not
+  designed here; it will need destination restrictions to registered vault
+  addresses, in-flight accounting, and a hub-side valuation adapter.
+- Accepted MVP limitations (signed off 2026-08-29): spoke funds are inert
+  until the rebalance integration ships; on testnet, payout queues can
+  only drain from new deposits; terminal close blocked while a spoke holds
+  assets/payables; dark spoke blocks vault-wide NAV (safe direction); the
+  relayer accounts are the messaging trust root (irreducible for
+  Robinhood, §2.2).
