@@ -252,6 +252,87 @@ export function findToken(symbol: string | null | undefined): SupportedToken | n
   );
 }
 
+// --- multichain spoke vault (docs/multichain-vault-plan.md §9) ---------------
+//
+// Per-network EVM spoke bundle, selected by the same `VITE_ENVIRONMENT`
+// switch as everything else: the testnet-set pairs the SpokeVault with the
+// faucet-mintable TUSDG; the mainnet-set uses real USDG. Promotion is a
+// config flip, never a code edit.
+
+export type SpokeConfig = {
+  /** EVM chain id of the spoke chain. */
+  chainId: number;
+  chainName: string;
+  rpcUrl: string;
+  explorerUrl: string;
+  /** `SpokeVault` contract address. */
+  spokeVaultAddress: `0x${string}`;
+  /** Deposit-asset ERC-20: TUSDG on the testnet-set, real USDG on mainnet. */
+  usdgAddress: `0x${string}`;
+  usdgDecimals: number;
+  /** Spoke-local asset code the vault registers USDG under. */
+  assetCode: number;
+};
+
+/** Placeholder until the spoke deploy publishes real addresses. */
+export const SPOKE_ZERO_ADDRESS =
+  "0x0000000000000000000000000000000000000000" as const;
+
+const SPOKE_CONFIGS: Partial<Record<SuiEnvironment, SpokeConfig>> = {
+  // testnet-set. Chain values are the working assumption for the first spoke
+  // (an Arbitrum-stack testnet); the deploy config owns the final choice.
+  testnet: {
+    chainId: 421614,
+    chainName: "Arbitrum Sepolia",
+    rpcUrl: "https://sepolia-rollup.arbitrum.io/rpc",
+    explorerUrl: "https://sepolia.arbiscan.io",
+    // 0x0 placeholders: filled by the spoke deployment (SpokeVault + TUSDG).
+    spokeVaultAddress: SPOKE_ZERO_ADDRESS,
+    usdgAddress: SPOKE_ZERO_ADDRESS,
+    usdgDecimals: 6,
+    assetCode: 1,
+  },
+  // mainnet-set (real USDG; no TUSDG faucet).
+  mainnet: {
+    chainId: 42161,
+    chainName: "Arbitrum One",
+    rpcUrl: "https://arb1.arbitrum.io/rpc",
+    explorerUrl: "https://arbiscan.io",
+    // 0x0 placeholders: filled by the mainnet spoke deployment.
+    spokeVaultAddress: SPOKE_ZERO_ADDRESS,
+    usdgAddress: SPOKE_ZERO_ADDRESS,
+    usdgDecimals: 6,
+    assetCode: 1,
+  },
+  // devnet: no spoke deployment — /spoke renders its unavailable state.
+};
+
+const spokeBase = SPOKE_CONFIGS[ENV];
+
+/** The active spoke bundle, or `undefined` when this network has none.
+ * `VITE_SPOKE_VAULT_ADDRESS` / `VITE_SPOKE_USDG_ADDRESS` let a build point at
+ * a deploy before the config map above is updated. */
+export const SPOKE_CONFIG: SpokeConfig | undefined = spokeBase
+  ? {
+      ...spokeBase,
+      spokeVaultAddress:
+        (import.meta.env.VITE_SPOKE_VAULT_ADDRESS as `0x${string}` | undefined) ??
+        spokeBase.spokeVaultAddress,
+      usdgAddress:
+        (import.meta.env.VITE_SPOKE_USDG_ADDRESS as `0x${string}` | undefined) ??
+        spokeBase.usdgAddress,
+    }
+  : undefined;
+
+/** False while the config still carries 0x0 placeholders — the screen then
+ * shows an "awaiting deployment" state instead of firing doomed reads. */
+export function spokeDeployed(cfg: SpokeConfig): boolean {
+  return (
+    cfg.spokeVaultAddress !== SPOKE_ZERO_ADDRESS &&
+    cfg.usdgAddress !== SPOKE_ZERO_ADDRESS
+  );
+}
+
 // --- wire shapes returned by token-info -------------------------------------
 
 type PackageInfoDto = {

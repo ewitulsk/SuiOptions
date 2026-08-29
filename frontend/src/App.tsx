@@ -12,6 +12,7 @@ import { Bridge } from "./screens/Bridge";
 import { Admin } from "./screens/Admin";
 import { Debug } from "./screens/Debug";
 import { Faucet } from "./screens/Faucet";
+import { SpokeVault } from "./screens/SpokeVault";
 
 export function App() {
   return (
@@ -44,6 +45,8 @@ export function App() {
         {/* Points leaderboard fed by the go-backend leaderboard service. */}
         <Route path="/leaderboard" element={<Leaderboard />} />
         <Route path="/bridge" element={<Bridge />} />
+        {/* Multichain spoke vault deposits/withdrawals (multichain-vault-plan). */}
+        <Route path="/spoke" element={<SpokeVault />} />
         {/* Admin self-gates on AdminCap and redirects non-admins to /earn. */}
         <Route path="/admin" element={<Admin />} />
         {/* Faucet is testnet-only; on other envs it renders a "testnet only" notice. */}

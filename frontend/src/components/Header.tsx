@@ -329,6 +329,13 @@ export function Header() {
         >
           Leaderboard
         </button>
+        {/* EVM spoke vault deposits/withdrawals (multichain-vault-plan). */}
+        <button
+          className={pathname === "/spoke" ? "is-active" : ""}
+          onClick={() => navigate("/spoke")}
+        >
+          Spoke
+        </button>
         {ENV === "testnet" && (
           <button
             className={pathname === "/faucet" ? "is-active" : ""}

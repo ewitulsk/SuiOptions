@@ -1,0 +1,13 @@
+[package]
+name = "endpoint_ccip"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies]
+# Chainlink CCIP Sui packages (ccip core + onramp for sends). Pinned to
+# a reviewed commit; bumping the pin is a republish, exactly like the
+# oracle adapters.
+ccip = { git = "https://github.com/smartcontractkit/chainlink-sui.git", subdir = "contracts/ccip/ccip", rev = "362c4a40869592dfed9c8039f9e688cf867d9e4b" }
+ccip_onramp = { git = "https://github.com/smartcontractkit/chainlink-sui.git", subdir = "contracts/ccip/ccip_onramp", rev = "362c4a40869592dfed9c8039f9e688cf867d9e4b" }
+vault_v2 = { local = "../trading-vault-v2" }
+options_core = { local = "../core" }

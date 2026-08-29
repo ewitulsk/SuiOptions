@@ -1,7 +1,17 @@
 # Multichain Trading Vault: Sui Hub / Robinhood Spoke
 
 Status: FINAL DESIGN — all decisions locked with Evan, 2026-08-28/29.
-Implementation not yet started; build order in §10.
+IMPLEMENTED 2026-08-29 (single PR into staging): schema crate
+(`rust-backend/crates/vault-messages`), hub Move modules
+(`trading-vault-v2`: wire/spoke/endpoint/endpoint_relayer/multichain),
+EVM workspace (`evm-contracts/`), transport packages
+(`contracts/endpoint-layerzero`, `contracts/endpoint-ccip`, built
+against the real LayerZero-v2 / chainlink-sui packages),
+`rust-backend/services/vault-messenger`, and the `/spoke` frontend
+screen. Testnet items still open at merge: deployed addresses in the
+config sets, live-lane verification of the LayerZero/CCIP transports
+(their receive/send paths compile against pinned upstream but need a
+real endpoint to exercise), and the phase-4/5 e2e runbook.
 
 ## Summary
 
