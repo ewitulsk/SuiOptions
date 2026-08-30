@@ -152,10 +152,10 @@ jobs:
       # rebuild-all.
       latest_tag: ${{ steps.latest.outputs.tag }}
     steps:
-      # ── 0. Checkout ────────────────────────────────────
+      # ── 0. Checkout ──────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── 1. Derive network from environment ───────────────────
+      # ── 1. Derive network from environment ───────────────────────
       # Derived from the service configs, NOT hardcoded. The previous version
       # mapped both envs to "testnet" with a `case`, which meant the MAINNET
       # GUARD below tested a value it was structurally incapable of producing:
@@ -197,7 +197,7 @@ jobs:
             echo "no ${marker} marker yet — fine for rebuild-all"
           fi
 
-      # ── 2. AWS credentials (OIDC) ───────────────────────
+      # ── 2. AWS credentials (OIDC) ───────────────────────────────
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
@@ -323,7 +323,7 @@ jobs:
               echo "Pruned $stale."
             done
 
-      # ── 6. Fetch deployer key from Secrets Manager ─────────────
+      # ── 6. Fetch deployer key from Secrets Manager ───────────────
       - name: Write secrets file
         env:
           ENV: ${{ inputs.environment }}
@@ -366,7 +366,7 @@ jobs:
             fi
           } > /tmp/deploy-secrets/secrets.toml
 
-      # ── 7. Run deployment manager ────────────────────────────
+      # ── 7. Run deployment manager ────────────────────────────────
       - name: Deploy contract on-chain
         working-directory: rust-backend
         env:
@@ -616,7 +616,7 @@ jobs:
           printf '\n# Auto-set by redeploy-contract workflow.\nstart_checkpoint = %s\n' \
             "$START" >> "$CONFIG"
 
-      # ── 10. Upload the DB-wipe script to S3 for EC2 ───────────
+      # ── 10. Upload the DB-wipe script to S3 for EC2 ─────────────
       # Only the provisioning script needs to reach the box here. The new
       # deployments.json rides along in the deploy job's bundle (which checks
       # out this commit via `ref`) and lands on the host bind-mount; the indexer
@@ -645,7 +645,7 @@ jobs:
 
           echo "key=$BUNDLE_KEY" >> "$GITHUB_OUTPUT"
 
-      # ── 11. SSM: stop indexer/orderbook, wipe DBs ──────────────
+      # ── 11. SSM: stop indexer/orderbook, wipe DBs ──────────────────
       # Does NOT restart anything — the deploy job rebuilds + rolls out the
       # whole stack afterward.
       - name: Reset databases on EC2
@@ -783,7 +783,7 @@ jobs:
             exit 1
           fi
 
-      # ── 12. Commit and push changes to git ────────────────────
+      # ── 12. Commit and push changes to git ──────────────────────
       # Must push BEFORE the deploy job runs: that job checks out this exact
       # commit (via the `ref` it receives) so its bundle ships this
       # deployments.json + the rebuilt images carry the indexer config.
@@ -830,7 +830,7 @@ jobs:
           git push
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  # ── Roll out the stack on the new deployment ─────────────────
+  # ── Roll out the stack on the new deployment ───────────────────
   # Three mutually exclusive strategies, selected by build_strategy. All check
   # out the commit `publish` just pushed (ref) so the deploy bundle ships the
   # new deployments.json onto the host bind-mount, and all are gated on
