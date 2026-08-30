@@ -447,15 +447,18 @@ the whitelist, or drain nothing but the fee pot: liveness, not custody.
 
 ## 9. Config: testnet → mainnet is a flip
 
-All network-dependent values live in per-network config profiles, never in
-code — the repo's existing pattern (`config.staging.toml`/`config.prod.toml`
-with a `network` profile, as cctp-relay does; `rust-backend/deployments.json`
-for published IDs; frontend per-network maps in `config.ts`):
-- Per-chain: RPC URLs, chain IDs, spoke vault + endpoint addresses,
-  LayerZero endpoint/EID + CCIP router/chain-selector values, asset
-  addresses (USDG mainnet / TUSDG testnet), service accounts.
-- Hub: package/registry object IDs per Sui network, LayerZero OApp / CCIP
-  client object IDs.
+ADDRESSES have exactly one write point: `rust-backend/deployments.json`,
+written by the redeploy pipeline (`redeploy-contract.yml` →
+`deployment-manager`, including `--deploy-endpoints` for the transport
+packages and `--record-evm-spoke` for the forge-deployed EVM spoke),
+served verbatim by token-info `/package-info` (`multichain` +
+`endpointLayerzero`/`endpointCcip` blocks), and resolved by every
+consumer from there — vault-messenger at boot, the frontend in
+`initConfig()`. Config files carry only RUNTIME choices:
+- Per-chain: RPC/explorer URLs, intervals, thresholds, service accounts;
+  break-glass id overrides (win when explicitly set).
+- Hub: the `TradingVault` object id (runtime state, not a deployment
+  artifact) and the oracle/token-info service URLs.
 - One `network_set` selector (testnet-set vs mainnet-set) chooses the
   whole coherent bundle; promotion is a config/deploy change with zero
   code edits.

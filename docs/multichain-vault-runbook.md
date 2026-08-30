@@ -8,22 +8,32 @@ spoke-side roles per plan §6.1.
 ## Deploy order (testnet set first; mainnet is the same with the prod
 ## config set — plan §9)
 
-1. **Hub packages** — fresh publish of `trading-vault-v2` (LAYOUT
-   INCOMPATIBLE with prior deployments — this is a redeploy, not an
-   upgrade; see API_DELTA.md), then `endpoint-layerzero` and
-   `endpoint-ccip` (their pinned LayerZero/CCIP deps must match the
-   on-chain packages for the target network — verify the pins against
-   the live package ids before publishing). Record ids in
-   `rust-backend/deployments.json`.
-2. **Endpoint registry seeding** (hub, AdminCap):
+1. **Hub packages** — PIPELINE: dispatch the `Redeploy Contract`
+   workflow with `deploy_endpoints=true`. It publishes
+   `trading-vault-v2` fresh (LAYOUT INCOMPATIBLE with prior
+   deployments — this is a redeploy, not an upgrade; see API_DELTA.md),
+   then `endpoint-layerzero` and `endpoint-ccip`, and records
+   everything in `rust-backend/deployments.json` (`endpointLayerzero`,
+   `endpointCcip`, `multichain.endpointRegistryId` + `hubChainId`).
+   STILL MANUAL, before dispatching: verify the transports' pinned
+   LayerZero/CCIP deps against the live package ids for the target
+   network (Move.toml git revs).
+2. **Endpoint registry seeding** (STILL MANUAL — hub, AdminCap):
    `endpoint::set_hub_chain_id`, `allow_endpoint<RelayerEndpoint>` (dev
    only — NEVER on mainnet), `allow_endpoint<LzEndpoint>`,
    `allow_endpoint<CcipEndpoint>`; `add_relayer` for the messenger's
    Sui address (dev endpoint only).
-3. **EVM spoke** — deploy `TUSDG` (testnet only), `SpokeVault` (+
-   endpoints: `RelayerEndpoint` dev / `LayerZeroEndpoint` /
-   `CCIPEndpoint`), grant roles, fund the fee pot. Fill addresses into
-   the frontend spoke config and vault-messenger config.
+3. **EVM spoke** — PIPELINE: same workflow with `deploy_evm_spoke=true`
+   (repo secrets `SPOKE_RPC_URL` + `EVM_DEPLOYER_KEY`, spoke config in
+   the `EVM_SPOKE_PARAMS` repo variable — parameter list in
+   `evm-contracts/script/DeploySpoke.s.sol`). It deploys `TUSDG` (when
+   `DEPLOY_TUSDG=true`, testnet only), the requested endpoints
+   (`RelayerEndpoint` dev / `LayerZeroEndpoint` / `CCIPEndpoint`) and
+   `SpokeVault`, grants the §6.1 roles, and folds the addresses into
+   `deployments.json` (`multichain.spokes.<name>`) via
+   `--record-evm-spoke` — the frontend spoke config and vault-messenger
+   read them from there (token-info). STILL MANUAL: fund the fee pot
+   (`SpokeVault.fundFees()`).
 4. **Transport wiring** — LayerZero: `endpoint_lz::map_chain` (protocol
    chain id ↔ eid) + `set_peer` (spoke `LayerZeroEndpoint` address,
    left-padded), and the mirror peer/eid config on the spoke contract.
