@@ -263,6 +263,115 @@ pub struct PackageInfo {
     /// UIDs, SO-393). Absent on records predating the any-strike overhaul.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket_registry_id: Option<String>,
+    /// LayerZero transport package for the multichain vault
+    /// (contracts/endpoint-layerzero, multichain-vault-plan §2.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_layerzero: Option<EndpointLzInfo>,
+    /// CCIP transport package (contracts/endpoint-ccip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_ccip: Option<EndpointCcipInfo>,
+    /// Multichain hub wiring + EVM spoke deployments. token-info serves
+    /// this verbatim, so the frontend spoke config and vault-messenger
+    /// read the SAME record the redeploy pipeline writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multichain: Option<MultichainInfo>,
+}
+
+/// `endpoint_lz` package plus the shared objects its `init` creates: the
+/// `LzTransport` (chain↔eid mapping + OApp caps) and the LayerZero OApp
+/// object registered for this deployment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointLzInfo {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    /// Shared `endpoint_lz::LzTransport` object id.
+    pub transport_id: String,
+    /// The OApp object address (`LzTransport.oapp_address`).
+    pub oapp_id: String,
+}
+
+/// `endpoint_ccip` package plus its shared `CcipTransport` object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointCcipInfo {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    /// Shared `endpoint_ccip::CcipTransport` object id.
+    pub transport_id: String,
+}
+
+/// Multichain vault wiring: the hub-side shared `EndpointRegistry`, this
+/// deployment's protocol hub chain id, and every deployed EVM spoke keyed
+/// by spoke name (e.g. "robinhood"). Deployment ARTIFACTS only — RPC and
+/// explorer URLs are runtime config, not deployment facts, and stay in
+/// each consumer's config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultichainInfo {
+    /// Shared `vault_v2::endpoint::EndpointRegistry` object id.
+    pub endpoint_registry_id: String,
+    /// Protocol chain id of the hub (envelope namespace, plan §2.1).
+    pub hub_chain_id: u64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub spokes: BTreeMap<String, EvmSpokeInfo>,
+}
+
+impl MultichainInfo {
+    pub fn endpoint_registry(&self) -> Result<ObjectID> {
+        ObjectID::from_str(&self.endpoint_registry_id).context("parsing endpointRegistryId")
+    }
+
+    pub fn spoke(&self, name: &str) -> Result<&EvmSpokeInfo> {
+        self.spokes
+            .get(name)
+            .ok_or_else(|| anyhow!("spoke '{name}' missing from multichain.spokes"))
+    }
+}
+
+/// One deployed EVM spoke (multichain-vault-plan §7), recorded by the
+/// redeploy pipeline's `--record-evm-spoke` pass from the forge deploy
+/// artifact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmSpokeInfo {
+    /// Hub-side spoke id (`bind_spoke` key).
+    pub spoke_id: u64,
+    /// Protocol chain id (envelope namespace).
+    pub protocol_chain_id: u64,
+    /// The EVM network's chain id (eth_chainId).
+    pub evm_chain_id: u64,
+    /// `SpokeVault` contract address (0x…, 20 bytes).
+    pub spoke_vault: String,
+    /// Endpoint contracts actually deployed on this spoke; absent ones
+    /// were not deployed for this network set (e.g. no dev relayer
+    /// endpoint on mainnet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relayer_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layerzero_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccip_endpoint: Option<String>,
+    /// The spoke deposit asset (USDG mainnet / TUSDG testnet).
+    pub usdg: EvmTokenInfo,
+    /// Block the deployment landed in (log-scan lower bound).
+    pub deploy_block: u64,
+    pub deployer: String,
+    pub deployed_at: String,
+}
+
+/// One EVM token as the spoke vault knows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmTokenInfo {
+    pub address: String,
+    pub decimals: u8,
+    /// Spoke-local asset code carried on the wire (plan §2.1).
+    pub asset_code: u8,
 }
 
 /// The standalone whitelist package and the two objects its `init`
@@ -683,7 +792,10 @@ mod tests {
                 exchange: None,
                 exchange_listing: None,
                 whitelist: None,
-            bucket_registry_id: None,
+                bucket_registry_id: None,
+                endpoint_layerzero: None,
+                endpoint_ccip: None,
+                multichain: None,
             },
             token_info: BTreeMap::new(),
         };
@@ -836,5 +948,66 @@ mod tests {
         assert!(d.for_env("STAGING").is_ok());
         assert!(d.for_env("prod").is_ok()); // populated since 2026-06-08
         assert!(d.for_env("garbage").is_err());
+    }
+}
+
+#[cfg(test)]
+mod multichain_tests {
+    use super::*;
+
+    /// The multichain block round-trips through the exact camelCase JSON
+    /// token-info will serve, and records written before the block
+    /// existed still parse.
+    #[test]
+    fn multichain_block_round_trips() {
+        let json = r#"{
+            "endpointRegistryId": "0xe1",
+            "hubChainId": 1,
+            "spokes": {
+                "robinhood": {
+                    "spokeId": 3,
+                    "protocolChainId": 257,
+                    "evmChainId": 46898,
+                    "spokeVault": "0x00000000000000000000000000000000000000aa",
+                    "relayerEndpoint": "0x00000000000000000000000000000000000000bb",
+                    "usdg": { "address": "0x00000000000000000000000000000000000000cc", "decimals": 6, "assetCode": 1 },
+                    "deployBlock": 123456,
+                    "deployer": "0x00000000000000000000000000000000000000dd",
+                    "deployedAt": "2026-08-30T00:00:00Z"
+                }
+            }
+        }"#;
+        let mc: MultichainInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(mc.hub_chain_id, 1);
+        let spoke = mc.spoke("robinhood").unwrap();
+        assert_eq!(spoke.spoke_id, 3);
+        assert_eq!(spoke.evm_chain_id, 46898);
+        assert_eq!(spoke.usdg.asset_code, 1);
+        assert!(spoke.layerzero_endpoint.is_none());
+        assert!(mc.spoke("hyperliquid").is_err());
+
+        let back = serde_json::to_value(&mc).unwrap();
+        assert_eq!(back["spokes"]["robinhood"]["spokeVault"],
+            "0x00000000000000000000000000000000000000aa");
+        assert_eq!(back["spokes"]["robinhood"]["usdg"]["assetCode"], 1);
+        // Absent optional endpoints stay absent, not null.
+        assert!(back["spokes"]["robinhood"].get("layerzeroEndpoint").is_none());
+    }
+
+    #[test]
+    fn package_info_without_multichain_still_parses() {
+        // A minimal pre-multichain record.
+        let json = r#"{
+            "packageId": "0x1", "adminCapId": "0x2", "protocolConfigId": "0x3",
+            "upgradeCapId": "0x4", "treasuryId": null, "publishDigest": "x",
+            "initDigest": null, "deployer": "0x5", "deployedAt": "", "network": "testnet"
+        }"#;
+        let pi: PackageInfo = serde_json::from_str(json).unwrap();
+        assert!(pi.multichain.is_none());
+        assert!(pi.endpoint_layerzero.is_none());
+        assert!(pi.endpoint_ccip.is_none());
+        // And absent blocks are not serialized as nulls.
+        let back = serde_json::to_value(&pi).unwrap();
+        assert!(back.get("multichain").is_none());
     }
 }
