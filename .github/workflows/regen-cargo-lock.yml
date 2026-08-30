@@ -2,10 +2,17 @@
 # it back. Exists only because the branch's lock is missing the
 # token-info-client entry for vault-messenger and it could not be pushed
 # directly. Delete this file once the lock commit lands.
+#
+# Triggered by pushes touching this file itself (the commit adding this
+# trigger starts the run); the lockfile commit it pushes does not
+# re-trigger it.
 
 name: Regen Cargo.lock
 
 on:
+  push:
+    branches: [claude/multichain-trading-vault-wer9q0]
+    paths: ['.github/workflows/regen-cargo-lock.yml']
   workflow_dispatch:
 
 permissions:
@@ -35,4 +42,5 @@ jobs:
           fi
           git add rust-backend/Cargo.lock
           git commit -m "Cargo.lock: sync vault-messenger dependencies"
+          git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)"
           git push
