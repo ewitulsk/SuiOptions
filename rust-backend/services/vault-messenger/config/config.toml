@@ -6,6 +6,11 @@ environment = "dev"
 network_set = "testnet-set"
 bind_addr   = "0.0.0.0:9021"
 
+# The address source (multichain plan §9): every package/object id and
+# spoke contract address below resolves from token-info /package-info at
+# boot. Uncommented id fields act as break-glass overrides and win.
+token_info_url = "http://127.0.0.1:9005"
+
 database_url = "postgresql://postgres:postgres@127.0.0.1:5432/vault_messenger_dev"
 db_pool_size = 4
 
@@ -30,11 +35,11 @@ fee_pot_low_wei          = "100000000000000000"
 [hub]
 network              = "testnet"
 oracle_url           = "http://127.0.0.1:9012"
-trading_vault_pkg    = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# trading_vault_pkg resolves from token-info; set only as break-glass.
 vault_id             = "0x0000000000000000000000000000000000000000000000000000000000000000"
-protocol_config_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
-endpoint_registry_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
-oracle_registry_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# protocol_config_id resolves from token-info; set only as break-glass.
+# endpoint_registry_id resolves from token-info; set only as break-glass.
+# oracle_registry_id resolves from token-info; set only as break-glass.
 gas_budget           = 500000000
 # Optional adapter packages for appraisal legs on non-cash hub vaults
 # (mirrors the keeper's AppraisalRefs); leave unset for a cash-only vault.
@@ -50,13 +55,12 @@ gas_budget           = 500000000
 # RPC endpoint + EVM chain id from docs.robinhood.com/chain at deploy time.
 rpc_url                  = "http://127.0.0.1:8545"
 chain_id                 = 31337
-spoke_id                 = 1
-spoke_vault_address      = "0x0000000000000000000000000000000000000000"
-relayer_endpoint_address = "0x0000000000000000000000000000000000000000"
+# spoke_vault_address resolves from token-info; set only as break-glass.
+# relayer_endpoint_address resolves from token-info; set only as break-glass.
 transport                = "dev-relayer"
 # Sui-side pricing marker bound for the spoke asset at bind_spoke (the
 # attestation the deposit/withdraw handlers consume).
-asset_marker_type        = "0x0000000000000000000000000000000000000000000000000000000000000000::asset_markers::USDG"
+# asset_marker_type resolves from token-info; set only as break-glass.
 gas_limit                = 1000000
 max_scan_blocks          = 5000
 # Spoke-local asset codes (display only; the hub binding owns meaning).

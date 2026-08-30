@@ -2,13 +2,19 @@
 # Robinhood testnet spoke, dev relayer transport) per the multichain plan:
 # testnet-first, mainnet is a config flip (plan §9).
 #
-# Object ids/addresses are placeholders until the phase-2 (hub Move) and
-# phase-3 (SpokeVault) deployments publish; deploy fills them like every
-# other id in this file's git history.
+# Ids/addresses are NOT written here: the redeploy pipeline writes
+# deployments.json, token-info serves it, and this service resolves every
+# id at boot (multichain plan §9 — one place to write). Only runtime
+# choices (RPCs, intervals, vault_id) live in this file.
 
 environment = "staging"
 network_set = "testnet-set"
 bind_addr   = "0.0.0.0:9021"
+
+# The address source (multichain plan §9): every package/object id and
+# spoke contract address below resolves from token-info /package-info at
+# boot. Uncommented id fields act as break-glass overrides and win.
+token_info_url = "http://token-info:9005"
 
 database_url = "postgresql://vault_messenger_staging:${DB_PASSWORD}@${DB_HOST}:5432/vault_messenger_staging"
 db_pool_size = 4
@@ -34,22 +40,21 @@ fee_pot_low_wei          = "100000000000000000"
 network              = "testnet"
 # In-cluster oracle-service (compose network name).
 oracle_url           = "http://oracle-service:9012"
-trading_vault_pkg    = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# trading_vault_pkg resolves from token-info; set only as break-glass.
 vault_id             = "0x0000000000000000000000000000000000000000000000000000000000000000"
-protocol_config_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
-endpoint_registry_id = "0x0000000000000000000000000000000000000000000000000000000000000000"
-oracle_registry_id   = "0x0000000000000000000000000000000000000000000000000000000000000000"
+# protocol_config_id resolves from token-info; set only as break-glass.
+# endpoint_registry_id resolves from token-info; set only as break-glass.
+# oracle_registry_id resolves from token-info; set only as break-glass.
 gas_budget           = 500000000
 
 [spoke]
 # Robinhood testnet — set the real RPC + EVM chain id at deploy time.
 rpc_url                  = "https://REPLACE_ME.robinhood-testnet"
-chain_id                 = 0
-spoke_id                 = 1
-spoke_vault_address      = "0x0000000000000000000000000000000000000000"
-relayer_endpoint_address = "0x0000000000000000000000000000000000000000"
+# chain_id / spoke_id resolve from token-info multichain.spokes.
+# spoke_vault_address resolves from token-info; set only as break-glass.
+# relayer_endpoint_address resolves from token-info; set only as break-glass.
 transport                = "dev-relayer"
-asset_marker_type        = "0x0000000000000000000000000000000000000000000000000000000000000000::asset_markers::USDG"
+# asset_marker_type resolves from token-info; set only as break-glass.
 gas_limit                = 1000000
 max_scan_blocks          = 5000
 

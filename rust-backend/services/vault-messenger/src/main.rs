@@ -27,7 +27,26 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cfg_path = cli.config.to_string_lossy().into_owned();
     info!(cfg_path, "loading config");
-    let cfg = Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?;
+    let mut cfg =
+        Config::load(&cfg_path).with_context(|| format!("loading config from {cfg_path}"))?;
+
+    // Addresses come from token-info (the served deployments.json record —
+    // multichain plan §9: one place to write). TOML values, when set, are
+    // break-glass overrides; everything else resolves here or we crash
+    // with the list of what's missing.
+    let snapshot = token_info_client::TokenInfoClient::new(&cfg.token_info_url)
+        .fetch_blocking_until_ready(30, Duration::from_secs(2))
+        .await
+        .with_context(|| format!("fetching snapshot from token-info at {}", cfg.token_info_url))?;
+    cfg.resolve_from_token_info(&snapshot)
+        .context("resolving config from token-info /package-info")?;
+    info!(
+        trading_vault_pkg = %cfg.hub.trading_vault_pkg,
+        spoke = %cfg.spoke.name,
+        spoke_vault = %cfg.spoke.spoke_vault_address,
+        spoke_chain_id = cfg.spoke.chain_id,
+        "config resolved from token-info"
+    );
 
     let pool = Arc::new(establish_pool(&cfg.database_url, cfg.db_pool_size)?);
     run_migrations(&pool).context("running vault-messenger DB migrations")?;

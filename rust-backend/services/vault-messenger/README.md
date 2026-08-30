@@ -60,8 +60,13 @@ every applied message.
 
 `config/config.toml` (dev), `config.staging.toml` (testnet-set),
 `config.prod.toml` (mainnet-set) — one `network_set` selector per profile
-(plan §9); promotion is a config/deploy flip. Hub package/object ids and
-spoke addresses are placeholders until the phase-2/3 deployments publish.
+(plan §9); promotion is a config/deploy flip. Package/object ids and spoke
+contract addresses are NOT in the TOMLs: they resolve at boot from
+token-info `/package-info` (`token_info_url`) — the served
+deployments.json record the redeploy pipeline writes (plan §9: one place
+to write). A TOML id field, when explicitly set, is a break-glass
+override and wins. Still config: `hub.vault_id` (a vault is runtime
+state, not a deployment artifact), RPC URLs, intervals, thresholds.
 
 Secrets (rendered to `/run/secrets/vault-messenger.toml` by
 `deployment/ec2/render-secrets.sh` from `options/<env>/vault-messenger` =
@@ -130,4 +135,4 @@ the e2e pass is plan §10 phase 4.
 - **hub→spoke lane on self-delivering transports** confirms via
   `lastInboundSeq()` polling only; per-message transport receipts
   (LayerZero executor status etc.) are phase-5 work.
-- The Robinhood RPC URL + EVM chain id in the configs are placeholders.
+- The Robinhood RPC URL in the configs is a placeholder (RPC endpoints are runtime config, not deployment facts; the EVM chain id resolves from token-info).
