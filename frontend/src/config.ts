@@ -309,19 +309,45 @@ const SPOKE_CONFIGS: Partial<Record<SuiEnvironment, SpokeConfig>> = {
 
 const spokeBase = SPOKE_CONFIGS[ENV];
 
+/** Chain METADATA (rpc/explorer) by EVM chain id — the only spoke values
+ * that are runtime config rather than deployment facts. Addresses come
+ * from token-info's `multichain` block (one place to write:
+ * deployments.json); this map only says how to reach a chain the record
+ * names. Unknown chain ids fall back to the env's `SPOKE_CONFIGS` entry. */
+const SPOKE_CHAIN_METADATA: Record<
+  number,
+  { chainName: string; rpcUrl: string; explorerUrl: string }
+> = {
+  421614: {
+    chainName: "Arbitrum Sepolia",
+    rpcUrl: "https://sepolia-rollup.arbitrum.io/rpc",
+    explorerUrl: "https://sepolia.arbiscan.io",
+  },
+  42161: {
+    chainName: "Arbitrum One",
+    rpcUrl: "https://arb1.arbitrum.io/rpc",
+    explorerUrl: "https://arbiscan.io",
+  },
+};
+
+function applySpokeOverrides(base: SpokeConfig): SpokeConfig {
+  return {
+    ...base,
+    spokeVaultAddress:
+      (import.meta.env.VITE_SPOKE_VAULT_ADDRESS as `0x${string}` | undefined) ??
+      base.spokeVaultAddress,
+    usdgAddress:
+      (import.meta.env.VITE_SPOKE_USDG_ADDRESS as `0x${string}` | undefined) ??
+      base.usdgAddress,
+  };
+}
+
 /** The active spoke bundle, or `undefined` when this network has none.
- * `VITE_SPOKE_VAULT_ADDRESS` / `VITE_SPOKE_USDG_ADDRESS` let a build point at
- * a deploy before the config map above is updated. */
-export const SPOKE_CONFIG: SpokeConfig | undefined = spokeBase
-  ? {
-      ...spokeBase,
-      spokeVaultAddress:
-        (import.meta.env.VITE_SPOKE_VAULT_ADDRESS as `0x${string}` | undefined) ??
-        spokeBase.spokeVaultAddress,
-      usdgAddress:
-        (import.meta.env.VITE_SPOKE_USDG_ADDRESS as `0x${string}` | undefined) ??
-        spokeBase.usdgAddress,
-    }
+ * Boot value carries the static map's placeholders; `initConfig()`
+ * replaces it with the deployment record token-info serves. The
+ * `VITE_SPOKE_*` overrides stay break-glass and win over both. */
+export let SPOKE_CONFIG: SpokeConfig | undefined = spokeBase
+  ? applySpokeOverrides(spokeBase)
   : undefined;
 
 /** False while the config still carries 0x0 placeholders — the screen then
@@ -376,6 +402,26 @@ type PackageInfoDto = {
    * UIDs, SO-393). Absent on records predating the overhaul. */
   bucketRegistryId?: string | null;
   equityOracle?: { packageId: string; publishDigest: string } | null;
+  /** Multichain hub wiring + EVM spoke deployments (multichain-vault-plan
+   * §9). Absent until the multichain deploy pass has run for this env. */
+  multichain?: {
+    endpointRegistryId: string;
+    hubChainId: number;
+    spokes?: Record<
+      string,
+      {
+        spokeId: number;
+        protocolChainId: number;
+        evmChainId: number;
+        spokeVault: string;
+        relayerEndpoint?: string | null;
+        layerzeroEndpoint?: string | null;
+        ccipEndpoint?: string | null;
+        usdg: { address: string; decimals: number; assetCode: number };
+        deployBlock: number;
+      }
+    > | null;
+  } | null;
   tradingVaultObjects?: {
     vaultProtocolConfigId: string;
     integrationRegistryId: string;
@@ -442,6 +488,38 @@ export async function initConfig(): Promise<void> {
   EQUITY_ORACLE_PACKAGE_ID = info.equityOracle?.packageId;
   EQUITY_ORACLE_PUBLISH_DIGEST = info.equityOracle?.publishDigest;
   TRADING_VAULT_OBJECTS = info.tradingVaultObjects ?? undefined;
+
+  // Spoke addresses come from the SAME deployment record as everything
+  // else (multichain-vault-plan §9: one place to write). The first spoke
+  // in the record is the active one (MVP: exactly one); chain metadata
+  // (rpc/explorer) resolves via SPOKE_CHAIN_METADATA with the static
+  // env entry as fallback for unknown chain ids.
+  const spokeEntry = Object.values(info.multichain?.spokes ?? {})[0];
+  if (spokeEntry) {
+    const meta =
+      SPOKE_CHAIN_METADATA[spokeEntry.evmChainId] ??
+      (spokeBase
+        ? {
+            chainName: spokeBase.chainName,
+            rpcUrl: spokeBase.rpcUrl,
+            explorerUrl: spokeBase.explorerUrl,
+          }
+        : undefined);
+    if (meta) {
+      SPOKE_CONFIG = applySpokeOverrides({
+        chainId: spokeEntry.evmChainId,
+        ...meta,
+        spokeVaultAddress: spokeEntry.spokeVault as `0x${string}`,
+        usdgAddress: spokeEntry.usdg.address as `0x${string}`,
+        usdgDecimals: spokeEntry.usdg.decimals,
+        assetCode: spokeEntry.usdg.assetCode,
+      });
+    } else {
+      console.warn(
+        `token-info names spoke chain ${spokeEntry.evmChainId} but no rpc metadata is configured — keeping static spoke config`,
+      );
+    }
+  }
 
   DEEP_COIN_TYPE = info.deepbook?.deepCoinType;
 
