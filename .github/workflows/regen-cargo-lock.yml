@@ -1,0 +1,38 @@
+# TEMPORARY — regenerates rust-backend/Cargo.lock on the branch and commits
+# it back. Exists only because the branch's lock is missing the
+# token-info-client entry for vault-messenger and it could not be pushed
+# directly. Delete this file once the lock commit lands.
+
+name: Regen Cargo.lock
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `cargo metadata` syncs Cargo.lock with the manifests without
+      # building anything.
+      - name: Sync lockfile
+        working-directory: rust-backend
+        run: cargo metadata --format-version 1 > /dev/null
+
+      - name: Commit lockfile if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- rust-backend/Cargo.lock; then
+            echo "lockfile already in sync — nothing to commit"
+            exit 0
+          fi
+          git add rust-backend/Cargo.lock
+          git commit -m "Cargo.lock: sync vault-messenger dependencies"
+          git push
