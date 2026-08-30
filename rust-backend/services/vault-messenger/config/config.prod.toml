@@ -1,15 +1,23 @@
-# vault-messenger — prod. The MAINNET set (Sui Mainnet hub <-> Robinhood
-# mainnet spoke). NOT deployable until:
-#   - the mainnet hub/spoke contracts are published (ids below),
-#   - a production transport is bound (LayerZero/CCIP — `transport` below
-#     must NOT be dev-relayer on mainnet; the hub refuses the dev endpoint
-#     on production spokes by policy),
-#   - the curator rebalance integration ships (mainnet launch gate).
-# Like cctp-relay, prod also needs the AWS secret + compose/nginx blocks
-# uncommented — see rust-backend/deployment/compose/docker-compose.prod.yml.
+# vault-messenger — prod. Today prod rides the SAME testnet set as staging
+# (like cctp-relay: the prod env's Sui network is testnet until the mainnet
+# migration, and deployment/resolve_network.py requires every service's
+# top-level `network` to agree). NOT deployable until the vault-messenger
+# compose/nginx/AWS-secret blocks are uncommented — see
+# rust-backend/deployment/compose/docker-compose.prod.yml.
+#
+# The MAINNET flip (plan §9) edits this file:
+#   network_set = "mainnet-set", network = "mainnet",
+#   [spoke] rpc_url -> the Robinhood mainnet RPC,
+#   [spoke] transport = "layerzero" (the hub refuses the dev endpoint on
+#   production spokes by policy), [spoke.asset_codes] 1 = "USDG".
+# Gates before that flip: mainnet hub/spoke contracts published, a
+# production transport bound, and the curator rebalance integration
+# (mainnet launch gate).
 
 environment = "prod"
-network_set = "mainnet-set"
+network_set = "testnet-set"
+# Hub Sui network. Top-level so deployment/resolve_network.py reads it.
+network     = "testnet"
 bind_addr   = "0.0.0.0:9021"
 
 # The address source (multichain plan §9): every package/object id and
@@ -38,7 +46,6 @@ payout_aged_after_secs   = 3600
 fee_pot_low_wei          = "100000000000000000"
 
 [hub]
-network              = "mainnet"
 oracle_url           = "http://oracle-service:9012"
 # trading_vault_pkg resolves from token-info; set only as break-glass.
 vault_id             = "0x0000000000000000000000000000000000000000000000000000000000000000"
@@ -48,16 +55,15 @@ vault_id             = "0x000000000000000000000000000000000000000000000000000000
 gas_budget           = 500000000
 
 [spoke]
-# Robinhood mainnet — set the real RPC + EVM chain id at deploy time.
-rpc_url                  = "https://REPLACE_ME.robinhood-mainnet"
+# Robinhood testnet — set the real RPC + EVM chain id at deploy time.
+rpc_url                  = "https://REPLACE_ME.robinhood-testnet"
 # chain_id / spoke_id resolve from token-info multichain.spokes.
 # spoke_vault_address resolves from token-info; set only as break-glass.
 # relayer_endpoint_address resolves from token-info; set only as break-glass.
-# Mainnet rides a verification network; this service only watches/confirms.
-transport                = "layerzero"
+transport                = "dev-relayer"
 # asset_marker_type resolves from token-info; set only as break-glass.
 gas_limit                = 1000000
 max_scan_blocks          = 5000
 
 [spoke.asset_codes]
-1 = "USDG"
+1 = "TUSDG"

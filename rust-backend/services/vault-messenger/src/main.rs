@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     // Sui side: client + relayer signer (the address must hold a hub
     // relayer registration — endpoint::add_relayer — and gas).
     let secrets = runtime_config::Secrets::load(&cli.secrets).context("loading secrets")?;
-    let sui = SuiClientWrapper::connect(&secrets, cfg.hub.network)
+    let sui = SuiClientWrapper::connect(&secrets, cfg.network)
         .await
         .context("connecting sui client")?;
 
@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
     info!(
         environment = %cfg.environment,
         network_set = %cfg.network_set,
-        hub_network = %cfg.hub.network,
+        hub_network = %cfg.network,
         spoke_id = cfg.spoke.spoke_id,
         transport = %cfg.spoke.transport,
         "watchers + deliverer + cranks running"

@@ -83,6 +83,18 @@ jobs:
           # Hybrid exchange settlement package — standalone audit scope
           # (framework-only deps), published via --deploy-exchange.
           - exchange
+        include:
+          # The transport packages' pinned upstream deps (LayerZero-v2 /
+          # chainlink-sui) need a newer VM at TEST runtime than the default
+          # CLI: under 1.75.2 their unit tests die with
+          # UNEXPECTED_VERIFIER_ERROR (2017) / MISSING_DEPENDENCY in
+          # sui::object — the same class of false positive documented above
+          # for SO-335. Per-package bump (no deploy meaning); verified
+          # green on testnet-1.78.1.
+          - package: endpoint-layerzero
+            sui_version: testnet-1.78.1
+          - package: endpoint-ccip
+            sui_version: testnet-1.78.1
     steps:
       - uses: actions/checkout@v4
 
@@ -91,8 +103,10 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/MystenLabs/suiup/main/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Install sui ${{ env.SUI_VERSION }}
-        run: suiup install "sui@${SUI_VERSION}" -y
+      - name: Install sui ${{ matrix.sui_version || env.SUI_VERSION }}
+        env:
+          PKG_SUI_VERSION: ${{ matrix.sui_version || env.SUI_VERSION }}
+        run: suiup install "sui@${PKG_SUI_VERSION}" -y
 
       - name: Version
         run: sui --version

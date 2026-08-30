@@ -4,6 +4,8 @@
 
 environment = "dev"
 network_set = "testnet-set"
+# Hub Sui network. Top-level so deployment/resolve_network.py reads it.
+network     = "testnet"
 bind_addr   = "0.0.0.0:9021"
 
 # The address source (multichain plan §9): every package/object id and
@@ -33,7 +35,6 @@ payout_aged_after_secs   = 3600
 fee_pot_low_wei          = "100000000000000000"
 
 [hub]
-network              = "testnet"
 oracle_url           = "http://127.0.0.1:9012"
 # trading_vault_pkg resolves from token-info; set only as break-glass.
 vault_id             = "0x0000000000000000000000000000000000000000000000000000000000000000"

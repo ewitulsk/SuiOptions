@@ -86,6 +86,10 @@ pub struct Config {
     /// Which coherent network bundle this profile carries: `testnet-set`
     /// or `mainnet-set` (plan §9). Informational + sanity-checked.
     pub network_set: String,
+    /// `testnet` | `mainnet` — the hub Sui network; selects the relayer
+    /// key slot and public RPC. Top-level (not under `[hub]`) so
+    /// rust-backend/deployment/resolve_network.py can read it.
+    pub network: sui_tx::sui_client::Network,
     pub bind_addr: SocketAddr,
 
     /// token-info base URL — the sole address source (multichain plan §9:
@@ -144,8 +148,6 @@ pub struct Config {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HubConfig {
-    /// `testnet` | `mainnet` — selects the relayer key slot and public RPC.
-    pub network: sui_tx::sui_client::Network,
     /// oracle-service base URL — price legs for the appraisal-bearing
     /// handlers come from `/oracle/descriptor` + `/oracle/legs`, so the
     /// adapter package/entry names follow the live oracle pin.
@@ -416,13 +418,13 @@ mod resolve_tests {
         let toml = r#"
             environment = "test"
             network_set = "testnet-set"
+            network = "testnet"
             bind_addr = "127.0.0.1:9021"
             token_info_url = "http://token-info:9005"
             database_url = "postgres://x"
             fee_pot_low_wei = "5000000000000000"
 
             [hub]
-            network = "testnet"
             oracle_url = "http://oracle:9010"
             vault_id = "0xv"
 
