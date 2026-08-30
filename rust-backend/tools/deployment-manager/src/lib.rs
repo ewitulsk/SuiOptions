@@ -5,6 +5,7 @@
 //! `main.rs`.
 
 pub mod deploy;
+pub mod evm_spoke;
 pub mod exchange_markets;
 pub mod json_store;
 pub mod network;
@@ -120,6 +121,33 @@ pub struct Cli {
     /// Path to the test-tokens Move package.
     #[arg(long, default_value = "../test-tokens")]
     pub test_tokens: PathBuf,
+
+    /// Also publish the two Sui transport packages
+    /// (contracts/endpoint-layerzero + contracts/endpoint-ccip) after the
+    /// protocol tree and record them under `endpointLayerzero` /
+    /// `endpointCcip`. They link against the fresh core + vault_v2 by
+    /// local path, so — like the protocol packages — a core republish
+    /// orphans the previous transports; redeploy them together. Without
+    /// this flag the previous blocks are carried forward untouched
+    /// (exactly like cctpBridge).
+    #[arg(long)]
+    pub deploy_endpoints: bool,
+
+    /// Protocol chain id of the hub (envelope namespace,
+    /// multichain-vault-plan §2.1), recorded as `multichain.hubChainId`
+    /// alongside the EndpointRegistry the trading-vault-v2 publish
+    /// creates.
+    #[arg(long, default_value_t = 1)]
+    pub hub_chain_id: u64,
+
+    /// Merge a forge deploy artifact (written by
+    /// evm-contracts/script/DeploySpoke.s.sol) into the env's
+    /// `multichain.spokes.<name>` block. Standalone pass: no publish, no
+    /// chain access — read-merge-write on deployments.json only. The env
+    /// must already exist with a `multichain` block (deploy the protocol
+    /// first).
+    #[arg(long, value_name = "ARTIFACT_JSON")]
+    pub record_evm_spoke: Option<PathBuf>,
 
     /// Extra address to seed into the shared ingress Whitelist during the
     /// ceremony. `addr` seeds ALL four domains; `addr=options,vault-lp`
