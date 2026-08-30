@@ -14262,6 +14262,7 @@ dependencies = [
  "serde_json",
  "sui-tx",
  "sui-types",
+ "token-info-client",
  "tokio",
  "toml 0.8.23",
  "tower-http 0.6.10",
