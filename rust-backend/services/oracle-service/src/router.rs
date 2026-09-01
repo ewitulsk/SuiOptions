@@ -354,10 +354,33 @@ async fn get_realized_vol(
 
     let stable_feeds: Vec<PriceFeedId> = pairs.iter().map(|(_, s)| *s).collect();
     let now_secs = now_ms() / 1000;
-    let bulk = state
-        .benchmark_vol
-        .realized_sigma_bulk(&stable_feeds, q.window_days, now_secs)
-        .await;
+    // Hard time budget on the cache walk. A cold cache fills one paced
+    // Benchmarks request per missing day, and since Pyth started 401-ing
+    // anonymous + 429-ing keyed requests (observed 2026-09-01), that walk
+    // can run for minutes — long enough that every caller upstack (api's
+    // /buckets, mm-bot vol pulls) rode it into a gateway timeout. Cutting
+    // it off returns per-feed "no result" errors, which every consumer
+    // already maps to its fallback sigma; the closes fetched before the
+    // deadline stay cached, so successive calls warm the cache
+    // progressively instead of never answering.
+    let bulk = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state
+            .benchmark_vol
+            .realized_sigma_bulk(&stable_feeds, q.window_days, now_secs),
+    )
+    .await
+    {
+        Ok(bulk) => bulk,
+        Err(_elapsed) => {
+            tracing::warn!(
+                feeds = stable_feeds.len(),
+                window_days = q.window_days,
+                "benchmark vol walk exceeded its time budget; serving fallback errors"
+            );
+            Default::default()
+        }
+    };
 
     let results = pairs
         .into_iter()
