@@ -131,9 +131,13 @@ jobs:
         run: |
           SSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 root@$HOST_ADDR"
 
+          # NOTE: the registry prefix travels as ECR_BASE, not ECR — docker
+          # compose lets the process environment override .env, so an
+          # exported ECR here would clobber the /options-suffixed value the
+          # compose file needs (bit us on the first DO deploy).
           $SSH env \
             "TAG=$TAG" \
-            "ECR=$ECR_REGISTRY" \
+            "ECR_BASE=$ECR_REGISTRY" \
             bash -s <<'REMOTE'
           set -euo pipefail
           mkdir -p /opt/data-room
@@ -141,7 +145,7 @@ jobs:
           # Rewrite only TAG + ECR; operator-set lines survive.
           sed -i "/^TAG=/d;/^ECR=/d" /opt/data-room/.env
           echo "TAG=$TAG" >> /opt/data-room/.env
-          echo "ECR=$ECR/options" >> /opt/data-room/.env
+          echo "ECR=$ECR_BASE/options" >> /opt/data-room/.env
           docker login registry.digitalocean.com --username "$(cat /opt/options/docr-token)" --password-stdin < /opt/options/docr-token
           cd /opt/data-room
           # Pull both images (batch rides the same TAG for the next
