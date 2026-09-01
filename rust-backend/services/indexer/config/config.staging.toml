@@ -15,7 +15,7 @@ allowed_origins         = ["*"]
 expose_playground       = true
 
 database_url            = "postgresql://indexer_staging:${DB_PASSWORD}@${DB_HOST}:25060/indexer_staging?sslmode=require"
-db_pool_size            = 8
+db_pool_size            = 6
 
 # Auto-set by redeploy-contract workflow.
 start_checkpoint = 378618116

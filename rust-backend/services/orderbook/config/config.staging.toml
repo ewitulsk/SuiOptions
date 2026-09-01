@@ -9,7 +9,7 @@ env          = "staging"
 deployments  = "/app/deployments.json"
 
 database_url = "postgresql://orderbook_staging:${DB_PASSWORD}@${DB_HOST}:25060/orderbook_staging?sslmode=require"
-db_pool_size = 16
+db_pool_size = 8
 
 bind         = "0.0.0.0:9014"
 
