@@ -5,9 +5,10 @@
 #
 # Flow:
 #   1. Resolve the compose service name from the chosen service.
-#   2. Fetch RDS master creds (the per-env role can't CREATE on the cluster).
-#   3. Upload deployment/ec2/wipe-provision-db.sh to S3 (deploy-bundles/).
-#   4. Over SSM on the EC2 host: stop the service → run the script → start it.
+#   2. Decrypt the master DB creds from the SOPS store (the per-env role
+#      can't CREATE on the cluster).
+#   3. scp deployment/ec2/wipe-provision-db.sh to the droplet.
+#   4. Over SSH on the host: stop the service → run the script → start it.
 #
 # prod is a selectable target but GATED twice. Typing the env name into
 # `confirm` catches an accidental dropdown pick; the environment must also be
@@ -53,13 +54,11 @@ on:
 
 permissions:
   contents: read
-  id-token: write    # OIDC → AWS
 
 env:
-  AWS_REGION:        ${{ vars.AWS_REGION }}
-  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
-  RDS_HOST:          ${{ vars.RDS_HOST }}
-  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+  DB_HOST:      ${{ vars.DB_HOST }}
+  STAGING_HOST: ${{ vars.STAGING_HOST }}
+  PROD_HOST:    ${{ vars.PROD_HOST }}
 
 jobs:
   wipe-provision:
@@ -105,124 +104,115 @@ jobs:
               ;;
           esac
 
-      # ── 2. AWS credentials (OIDC) ────────────────────────────────
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+      # ── 2. Resolve the target droplet + SSH key ──────────────────
+      - name: Resolve target host
+        id: host
+        env:
+          DEPLOY_ENV: ${{ inputs.environment }}
+        run: |
+          case "$DEPLOY_ENV" in
+            staging) addr="$STAGING_HOST" ;;
+            prod)    addr="$PROD_HOST" ;;
+            *) echo "::error::unknown env $DEPLOY_ENV"; exit 1 ;;
+          esac
+          if [ -z "$addr" ]; then
+            echo "::error::no host var set for $DEPLOY_ENV"; exit 1
+          fi
+          echo "addr=$addr" >> "$GITHUB_OUTPUT"
 
-      - uses: ./.github/actions/resolve-ec2
-        with:
-          region: ${{ env.AWS_REGION }}
-          env: ${{ inputs.environment }}
+      - name: Set up deploy SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$HOST_ADDR" >> ~/.ssh/known_hosts 2>/dev/null
 
-      # ── 3. Fetch RDS master creds ────────────────────────────────
+      # ── 3. Fetch master DB creds (SOPS) ──────────────────────────
       # The per-env <service>_<env> role lacks CREATE on the cluster, so
       # role/database creation and the schema reset run as the master.
+      - name: Install sops
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/sops https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64
+          sudo chmod +x /usr/local/bin/sops
+
       - name: Fetch master DB creds
         id: master
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          ENV: ${{ inputs.environment }}
         run: |
-          MASTER_JSON=$(aws secretsmanager get-secret-value \
-            --secret-id "options/_master/db" \
-            --query SecretString --output text)
+          # The secrets store is per-env; only staging has been migrated to
+          # SOPS so far.
+          STORE="rust-backend/deployment/secrets/${ENV}.enc.yaml"
+          if [ ! -f "$STORE" ]; then
+            echo "::error::no SOPS store at $STORE — $ENV secrets are not yet migrated"
+            exit 1
+          fi
+          MASTER_JSON=$(sops decrypt --extract '["_master/db"]' "$STORE")
           echo "user=$(echo "$MASTER_JSON" | jq -r '.username')" >> "$GITHUB_OUTPUT"
           echo "::add-mask::$(echo "$MASTER_JSON" | jq -r '.password')"
           echo "pass=$(echo "$MASTER_JSON" | jq -r '.password')" >> "$GITHUB_OUTPUT"
 
-      # ── 4. Upload the provisioning script to S3 ──────────────────
+      # ── 4. Ship the provisioning script to the host ──────────────
       - name: Upload script
-        id: bundle
         env:
-          ENV: ${{ inputs.environment }}
-          SERVICE: ${{ inputs.service }}
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
         run: |
-          TS=$(date +%s)
-          # deploy-bundles/ is the only prefix the EC2 instance role may
-          # GetObject from on this bucket (see infra/iam.tf).
-          KEY="deploy-bundles/wipe-provision-db-${ENV}-${SERVICE}-${TS}.sh"
-          aws s3 cp rust-backend/deployment/ec2/wipe-provision-db.sh \
-            "s3://${SSM_OUTPUT_BUCKET}/${KEY}"
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          scp rust-backend/deployment/ec2/wipe-provision-db.sh \
+            "root@$HOST_ADDR:/tmp/wipe-provision-db.sh"
 
-      # ── 5. SSM: stop → wipe+provision → start ────────────────────
-      - name: Run on EC2
+      # ── 5. SSH: stop → wipe+provision → start ────────────────────
+      - name: Run on host
         env:
-          ENV: ${{ inputs.environment }}
+          DEPLOY_ENV: ${{ inputs.environment }}
           COMPOSE_SVC: ${{ steps.target.outputs.compose_svc }}
           NETWORK: ${{ steps.target.outputs.network }}
           SERVICE: ${{ inputs.service }}
-          SCRIPT_KEY: ${{ steps.bundle.outputs.key }}
           MASTER_USER: ${{ steps.master.outputs.user }}
           MASTER_PASS: ${{ steps.master.outputs.pass }}
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
         run: |
-          jq -nc \
-            --arg env "$ENV" \
-            --arg network "$NETWORK" \
-            --arg svc "$COMPOSE_SVC" \
-            --arg service "$SERVICE" \
-            --arg script_key "$SCRIPT_KEY" \
-            --arg db_host "$RDS_HOST" \
-            --arg master_user "$MASTER_USER" \
-            --arg master_pass "$MASTER_PASS" \
-            --arg bucket "$SSM_OUTPUT_BUCKET" \
-            --arg region "$AWS_REGION" '
-            {
-              commands: [
-                "set -eu",
-                "# Bracketed, not apostrophised: an apostrophe here closes the",
-                "# shell single quote that wraps this whole jq program (SO-342).",
-                "if [ \"\($network)\" != \"testnet\" ]; then echo \"FATAL: refusing network [\($network)] — testnet only\"; exit 1; fi",
-                "cd /opt/options/\($env)",
-                "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
+          SSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 root@$HOST_ADDR"
 
-                "# ── Download the provisioning script ──",
-                "aws s3 cp \"s3://\($bucket)/\($script_key)\" /tmp/wipe-provision-db.sh --region \($region)",
-                "chmod +x /tmp/wipe-provision-db.sh",
+          # The script defaults DB_PORT=25060 / MASTER_DB=defaultdb itself.
+          $SSH env \
+            "DEPLOY_ENV=$DEPLOY_ENV" \
+            "NETWORK=$NETWORK" \
+            "COMPOSE_SVC=$COMPOSE_SVC" \
+            "SERVICE=$SERVICE" \
+            "DB_HOST=$DB_HOST" \
+            "MASTER_USER=$MASTER_USER" \
+            "MASTER_PASS=$MASTER_PASS" \
+            bash -s <<'REMOTE'
+          set -euo pipefail
+          # Bracketed, not apostrophised — see SO-342.
+          if [ "$NETWORK" != "testnet" ]; then echo "FATAL: refusing network [$NETWORK] — testnet only"; exit 1; fi
+          cd "/opt/options/$DEPLOY_ENV"
+          COMPOSE_FILE="docker-compose.$DEPLOY_ENV.yml"
 
-                "# ── Stop the service (if present in this env) ──",
-                "if docker compose -f \"$COMPOSE_FILE\" config --services | grep -qx \($svc | @sh); then docker compose -f \"$COMPOSE_FILE\" stop \($svc | @sh) || true; echo \"stopped \($svc)\"; else echo \"\($svc) not in compose; skipping stop\"; fi",
+          chmod +x /tmp/wipe-provision-db.sh
 
-                "# ── Wipe + provision the DB ──",
-                "DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/wipe-provision-db.sh \($env | @sh) \($service | @sh)",
-
-                "# ── Start the service again (migrations run on connect) ──",
-                "if docker compose -f \"$COMPOSE_FILE\" config --services | grep -qx \($svc | @sh); then docker compose -f \"$COMPOSE_FILE\" start \($svc | @sh) || true; echo \"started \($svc)\"; fi",
-
-                "rm -f /tmp/wipe-provision-db.sh",
-                "echo \"wipe+provision complete (\($service) / \($env))\""
-              ]
-            }' > /tmp/ssm-params.json
-
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$EC2_INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
-            --comment "wipe-provision-db $SERVICE $ENV" \
-            --parameters file:///tmp/ssm-params.json \
-            --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
-            --timeout-seconds 300 \
-            --query Command.CommandId --output text)
-          echo "SSM command: $CMD_ID"
-
-          aws ssm wait command-executed \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" || true
-
-          STATUS=$(aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query Status --output text)
-          echo "SSM status: $STATUS"
-
-          aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query StandardOutputContent --output text
-
-          if [ "$STATUS" != "Success" ]; then
-            echo "::error::SSM command failed with status $STATUS"
-            aws ssm get-command-invocation \
-              --command-id "$CMD_ID" \
-              --instance-id "$EC2_INSTANCE_ID" \
-              --query StandardErrorContent --output text
-            exit 1
+          # ── Stop the service (if present in this env) ──
+          if docker compose -f "$COMPOSE_FILE" config --services | grep -qx "$COMPOSE_SVC"; then
+            docker compose -f "$COMPOSE_FILE" stop "$COMPOSE_SVC" || true
+            echo "stopped $COMPOSE_SVC"
+          else
+            echo "$COMPOSE_SVC not in compose; skipping stop"
           fi
+
+          # ── Wipe + provision the DB ──
+          DB_HOST="$DB_HOST" MASTER_USER="$MASTER_USER" MASTER_PASS="$MASTER_PASS" \
+            sh /tmp/wipe-provision-db.sh "$DEPLOY_ENV" "$SERVICE"
+
+          # ── Start the service again (migrations run on connect) ──
+          if docker compose -f "$COMPOSE_FILE" config --services | grep -qx "$COMPOSE_SVC"; then
+            docker compose -f "$COMPOSE_FILE" start "$COMPOSE_SVC" || true
+            echo "started $COMPOSE_SVC"
+          fi
+
+          rm -f /tmp/wipe-provision-db.sh
+          echo "wipe+provision complete ($SERVICE / $DEPLOY_ENV)"
+          REMOTE

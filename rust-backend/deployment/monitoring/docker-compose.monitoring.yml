@@ -24,7 +24,10 @@ services:
     environment:
       GOMEMLIMIT: "448MiB"
       LOKI_S3_BUCKET: ${LOKI_S3_BUCKET}
-      AWS_REGION: ${AWS_REGION}
+      LOKI_S3_ENDPOINT: ${LOKI_S3_ENDPOINT}
+      LOKI_S3_REGION: ${LOKI_S3_REGION:-nyc3}
+      AWS_ACCESS_KEY_ID: ${SPACES_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${SPACES_SECRET_KEY}
     volumes:
       - ${DATA_DIR}/loki/config:/etc/loki:ro
       - ${DATA_DIR}/loki/data:/loki

@@ -164,6 +164,13 @@ services:
       APP_ENV: staging
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       RUST_LOG: info,api_service=debug
+      # Spaces (S3-compatible) credentials for the /analytics lake reads —
+      # object_store's AmazonS3Builder::from_env() reads these. On EC2 this
+      # came from IMDS instance-profile creds; DO has no IMDS equivalent.
+      AWS_ACCESS_KEY_ID: ${SPACES_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${SPACES_SECRET_KEY:-}
+      AWS_ENDPOINT: ${SPACES_ENDPOINT:-}
+      AWS_DEFAULT_REGION: ${SPACES_REGION:-nyc3}
     depends_on: [indexer, token-info, oracle-service]
     restart: unless-stopped
     networks: [net]

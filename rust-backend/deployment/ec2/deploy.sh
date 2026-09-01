@@ -40,10 +40,12 @@ cd "/opt/options/$ENV"
 # future deploys.
 rm -f "./nginx.conf"
 
+# ECR keeps its historical name — it is the registry prefix compose
+# interpolates into every image ref; since the DO migration its value is
+# the DOCR registry (registry.digitalocean.com/<team>).
 : "${IMAGE_TAG:?IMAGE_TAG must be set}"
 : "${ECR:?ECR must be set}"
 : "${DB_HOST:?DB_HOST must be set}"
-: "${AWS_REGION:?AWS_REGION must be set}"
 
 COMPOSE_FILE="docker-compose.${ENV}.yml"
 
@@ -168,6 +170,12 @@ SUI_MAINNET_RPC=""
 if [ -f "secrets/.sui_mainnet_rpc" ]; then
   SUI_MAINNET_RPC=$(cat "secrets/.sui_mainnet_rpc")
 fi
+# Spaces (S3-compatible) credentials for api-service's lake reads.
+SPACES_ACCESS_KEY=""; SPACES_SECRET_KEY=""; SPACES_ENDPOINT=""; SPACES_REGION=""
+[ -f "secrets/.spaces_access_key" ] && SPACES_ACCESS_KEY=$(cat "secrets/.spaces_access_key")
+[ -f "secrets/.spaces_secret_key" ] && SPACES_SECRET_KEY=$(cat "secrets/.spaces_secret_key")
+[ -f "secrets/.spaces_endpoint" ]   && SPACES_ENDPOINT=$(cat "secrets/.spaces_endpoint")
+[ -f "secrets/.spaces_region" ]     && SPACES_REGION=$(cat "secrets/.spaces_region")
 
 # OTLP trace endpoint (SO-180). On the shared host the services reach the
 # co-located Tempo by docker DNS; the dedicated prod host gets the central
@@ -215,6 +223,12 @@ trap 'rm -f "$NEW_ENV"' EXIT
   if [ -n "$SUI_MAINNET_RPC" ]; then
     echo "SUI_MAINNET_RPC=$SUI_MAINNET_RPC"
   fi
+  if [ -n "$SPACES_ACCESS_KEY" ]; then
+    echo "SPACES_ACCESS_KEY=$SPACES_ACCESS_KEY"
+    echo "SPACES_SECRET_KEY=$SPACES_SECRET_KEY"
+    echo "SPACES_ENDPOINT=$SPACES_ENDPOINT"
+    echo "SPACES_REGION=$SPACES_REGION"
+  fi
   echo "OTEL_ENDPOINT=$OTEL_ENDPOINT"
   for svc in "${ALL_SERVICES[@]}"; do
     v=$(tag_var_for "$svc")
@@ -242,9 +256,17 @@ for svc in "${ALL_SERVICES[@]}"; do
   fi
 done
 
-# ECR auth + pull + up only the planned services.
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin "$ECR"
+# Registry auth + pull + up only the planned services. The DOCR API token
+# (username == password for DOCR) is installed once per host at
+# /opt/options/docr-token, mode 600.
+DOCR_TOKEN_FILE=/opt/options/docr-token
+if [ -f "$DOCR_TOKEN_FILE" ]; then
+  docker login registry.digitalocean.com \
+    --username "$(cat "$DOCR_TOKEN_FILE")" --password-stdin \
+    < "$DOCR_TOKEN_FILE"
+else
+  echo "WARNING: $DOCR_TOKEN_FILE missing — relying on an existing docker login" >&2
+fi
 
 PLANNED_CNAMES=()
 for svc in "${PLANNED[@]}"; do

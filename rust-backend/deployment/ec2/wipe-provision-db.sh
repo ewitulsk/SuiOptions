@@ -70,6 +70,9 @@ DB_NAME="${DB_PREFIX}_${ENV}"
 DB_ROLE="${DB_PREFIX}_${ENV}"
 
 : "${DB_HOST:?DB_HOST must be set}"
+# DO managed PG: port 25060, TLS required, admin db is `defaultdb`.
+DB_PORT="${DB_PORT:-25060}"
+MASTER_DB="${MASTER_DB:-defaultdb}"
 : "${MASTER_USER:?MASTER_USER must be set}"
 : "${MASTER_PASS:?MASTER_PASS must be set}"
 
@@ -87,21 +90,29 @@ ROLE_PASS=$(cat "$ROLE_PASS_FILE")
 psql_master() {
   _db="$1"
   shift
-  docker run --rm -i --network host -e PGPASSWORD="$MASTER_PASS" postgres:16 \
-    psql -v ON_ERROR_STOP=1 -h "$DB_HOST" -U "$MASTER_USER" -d "$_db" "$@"
+  docker run --rm -i --network host -e PGPASSWORD="$MASTER_PASS" \
+    -e PGSSLMODE=require postgres:16 \
+    psql -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" -U "$MASTER_USER" -d "$_db" "$@"
 }
 
 echo "── ensuring role $DB_ROLE ──"
 # format()+\gexec so the CREATE only runs when absent; %I/%L quote the
 # identifier and the password literal safely.
-psql_master postgres -v role="$DB_ROLE" -v rolepass="$ROLE_PASS" <<'SQL'
+psql_master "$MASTER_DB" -v role="$DB_ROLE" -v rolepass="$ROLE_PASS" <<'SQL'
 SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'role', :'rolepass')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'role')\gexec
 SQL
 
+# CREATE DATABASE ... OWNER <role> requires the admin user to be a member
+# of <role> (true on both RDS and DO managed PG — neither admin is a real
+# superuser). Idempotent: GRANT of an already-granted role is a no-op.
+psql_master "$MASTER_DB" -v role="$DB_ROLE" -v admin="$MASTER_USER" <<'SQL'
+SELECT format('GRANT %I TO %I', :'role', :'admin')\gexec
+SQL
+
 echo "── ensuring database $DB_NAME (owner $DB_ROLE) ──"
 # CREATE DATABASE can't run inside a txn block; \gexec runs it standalone.
-psql_master postgres -v db="$DB_NAME" -v role="$DB_ROLE" <<'SQL'
+psql_master "$MASTER_DB" -v db="$DB_NAME" -v role="$DB_ROLE" <<'SQL'
 SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'role')
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'db')\gexec
 SQL

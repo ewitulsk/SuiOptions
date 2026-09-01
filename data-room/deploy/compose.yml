@@ -7,13 +7,14 @@
 # and .env (see .env.example). TAG is advanced by deploy-data-room.yml;
 # batch jobs pick up a new tag on their next timer firing.
 #
-# S3 access rides the host's instance profile — no static keys, nothing
-# rendered into secrets.
+# Object-store access uses a DO Spaces key from .env (AWS_* vars read by
+# object_store's AmazonS3Builder) — DO droplets have no IMDS-style
+# instance credentials, unlike the old EC2 host.
 
 name: data-room
 
 services:
-  # Long-lived capture daemon: exchange websockets → bronze spool → S3.
+  # Long-lived capture daemon: exchange websockets → bronze spool → Spaces.
   # The spool is the only host state worth keeping; losing it loses at
   # most the unuploaded window (spec §6.4).
   collector:
@@ -22,6 +23,10 @@ services:
     environment:
       COLLECTOR_CONFIG: /app/collector.toml
       RUST_LOG: ${RUST_LOG:-info}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-nyc3}
     ports:
       - "9100:9100"   # /metrics — scraped by the monitoring host's Prometheus
     volumes:
@@ -39,3 +44,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       STORE_URL: ${STORE_URL}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-nyc3}

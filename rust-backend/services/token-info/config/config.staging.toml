@@ -4,8 +4,8 @@ environment        = "staging"
 network            = "testnet"
 deployments_path   = "/app/deployments/deployments.json"
 
-database_url       = "postgresql://token_info_staging:${DB_PASSWORD}@${DB_HOST}:5432/token_info_staging"
-db_pool_size       = 8
+database_url       = "postgresql://token_info_staging:${DB_PASSWORD}@${DB_HOST}:25060/token_info_staging?sslmode=require"
+db_pool_size       = 6
 
 public_bind_addr   = "0.0.0.0:9005"
 internal_bind_addr = "0.0.0.0:9006"

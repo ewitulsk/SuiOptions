@@ -77,41 +77,41 @@
   },
   "staging": {
     "package_info": {
-      "packageId": "0xfc9aa920574cdbd6feb4da87b3ede62438f7db2b5b10145f817c7f055c63b354",
-      "adminCapId": "0xedc3176cdf4f4a076bb59601cc57a432932589aba788e153c4fb5ad1d77a48e2",
-      "protocolConfigId": "0x9f507f391d6519d523faf89a58afc7cc2a482fc96278618453313d3711d18d55",
-      "bucketRegistryId": "0xb6cf6fea507f29e2867e0647cc94d53e9f700bb27abb0461c795b0de8c88b2dc",
-      "upgradeCapId": "0xd52a1ef4a8276ebfd390023286c9559033c8296e961c85c664306f4c07547c5f",
-      "treasuryId": "0x83d2c4d28545a529ab6a0494f358949d355a6e0e24949d9ce6828a02770f7b4f",
-      "publishDigest": "H335z3TWe9MyYzxMKkAPDngKmpNWNiynLUByRiFmMN5U",
-      "initDigest": "6nrLcvkm4psGB41T583LfodXpBBtEhfNv9G7cwpffWeb",
+      "packageId": "0xc3ff509e7f111b53c4826f7fd1a12e299b02fcc0c94a784c6471512bca1dba45",
+      "adminCapId": "0xca209650b3643545cf426705671046979eb1ab888f4c8258d478be4851fcff89",
+      "protocolConfigId": "0x751c372f7456a314aba3081afcc57feb3ea1d652e2e1d33ea2e1532f61b5cd37",
+      "bucketRegistryId": "0x271e4e579805224af15440719c5b07d7640287536e1d5aafc66d0a2c9ee308d4",
+      "upgradeCapId": "0x0076f23e344983c500bfee8689d7e1f5ea51b5550daf1423128d16e4f07f6a70",
+      "treasuryId": "0x211c9c6b2c39dc140ea356f4fd4005ba61d59a8e1b535ced7f7613e40970c692",
+      "publishDigest": "BqssALGUEPZExhBqPtCDxDBgTKscs7XGZi5aX4YNJCaJ",
+      "initDigest": "3j38r9bihD6USpCyUHHFUF58rN9qNY9f6EbjU7DKqRwx",
       "deployer": "0xab8d1b5a5311c9400e3eaf5c3b641f10fb48b43cc30d365fa8a98a6ca6bd4865",
-      "deployedAt": "2026-08-22T23:25:16.267498112+00:00",
+      "deployedAt": "2026-09-01T16:20:28.867948553+00:00",
       "network": "testnet",
       "testTokens": {
-        "packageId": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728",
-        "upgradeCapId": "0x0c75a9719dc5f70873c29725b354a5cd49a4dfef5221b977033b59d16bfa365d",
-        "publishDigest": "VysP75vjigMsfPMcMKJazyBA29AG9DJU1KPRKy5NyZd",
-        "deployedAt": "2026-08-22T23:24:55.225922678+00:00",
+        "packageId": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b",
+        "upgradeCapId": "0x73daccba56b7b68563043150392fa03a9af6f576e47c62cc3ce486856efdc6e7",
+        "publishDigest": "F7aQnfghPFZAnPGyaJ9K1NDG8U3f99UKDvfoeGzjEu6Y",
+        "deployedAt": "2026-09-01T16:20:06.308426643+00:00",
         "tokens": {
           "TBTC": {
-            "coinType": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tbtc::TBTC",
-            "faucetId": "0xae6c0aa8e794a582a33d7ca54d19fc5bb080de668bce4115571855763c63980d",
+            "coinType": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tbtc::TBTC",
+            "faucetId": "0x6a6fa301de0e5b020647ae90b466c1ac2a64b1163edf7cd289f3fe8b69889d17",
             "decimals": 8
           },
           "TSUI": {
-            "coinType": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tsui::TSUI",
-            "faucetId": "0xa600b2db4761dc455ee732fbba712d8bd80cc25c1e6908372037a574d66bcef0",
+            "coinType": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tsui::TSUI",
+            "faucetId": "0xd649db6310698f29f8f5872291596c44710bebc6227446f79dd9fca546fed153",
             "decimals": 9
           },
           "TUSDC": {
-            "coinType": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tusdc::TUSDC",
-            "faucetId": "0xf5f5c185039ca159657c2569555bb8d98da64801cb6eb841d227791a62ab3cd2",
+            "coinType": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tusdc::TUSDC",
+            "faucetId": "0x104642440229aa419be591f4cd104a0198479c1ea94c4443a03e9eab10a32ec2",
             "decimals": 6
           },
           "TWAL": {
-            "coinType": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::twal::TWAL",
-            "faucetId": "0xd7d59bdd26dba20ae571fbbfd2ed43d190f243f86c7ed3fe9aa12c26d17d83d7",
+            "coinType": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::twal::TWAL",
+            "faucetId": "0xdd3629b1b88c762d44abb0016fd544ecc2929d553e01319972f56c7a9f2749f7",
             "decimals": 9
           }
         }
@@ -124,99 +124,99 @@
         "poolCreationFee": "500000000"
       },
       "tradingVault": {
-        "packageId": "0xb3e738fe329813ee32bd9297581291551df75967309831668d18c5c93f99baf9",
-        "upgradeCapId": "0xa9234fec389fe699fa2bacfb1258d34d279b97e9bc0126c66826266e353e613b",
-        "publishDigest": "8b49aJ2V2qW1WD3HW6vwVRUQVapiUGjGiiQUXZBkL9MA",
-        "deployedAt": "2026-08-22T23:24:39.830330795+00:00"
+        "packageId": "0xbaf27df3f871daf09634ab6d5d97a830a0dbc5a1398b887d09f05e1b320296d2",
+        "upgradeCapId": "0x687d62b98869ed44fb7c3c67d2d3d796812fdaa9e4f5f28ff191afa791cb73b7",
+        "publishDigest": "A2ny1ratS9ftpr6kyHC2BgdA2yjfYNijS1k4JddQXKs2",
+        "deployedAt": "2026-09-01T16:19:53.852698999+00:00"
       },
       "oraclePyth": {
-        "packageId": "0x3e5c2d565b952e73fd1ef49683adfa047e907e9f18cab6ba88145b1d6ec00a1a",
-        "upgradeCapId": "0x289735217020e9f54d1d3f0942ca69dd4a4f9bad838cdfe35ea5d1a92be5dca8",
-        "publishDigest": "DCpj8jTPweLTU5mMP67MsWw3BvVZNx582bZGZLyWzdsi",
-        "deployedAt": "2026-08-22T23:24:39.830354285+00:00"
+        "packageId": "0xca9bcc9386f88536630f3f88a8b9a47579ca2080c2ddb032e227b89989cb65e7",
+        "upgradeCapId": "0x518f8f1d08dea5856fafc9f87957eeab6f25fbc6e49de20bd577f04fed42bf42",
+        "publishDigest": "9oPMVtANA6D15EuKWd8Y8Cc4AkDUddYZPNK9q9DAyubh",
+        "deployedAt": "2026-09-01T16:19:53.852701053+00:00"
       },
       "oracleSwitchboard": {
-        "packageId": "0x03f3d23eb1e524faffd80ab8e77a9b3c2b58a50ec57969e8116c5d1f37a1282e",
-        "upgradeCapId": "0xf721dcc3c9b49921673494c5644d611f842a71d7d857b5edaf8bd92279248285",
-        "publishDigest": "DQCjb1qFadK6UZ8qvvjZzcDyHWzw1K4bh9SUS8k2VxoA",
-        "deployedAt": "2026-08-22T23:24:39.830357502+00:00"
+        "packageId": "0xf8e4722e67cd1b4f0f6e284b0f3f9e64030864014dbd19672e1c98e464986068",
+        "upgradeCapId": "0x0cef4890f6f752b63672cb0eeb0b7a0e0090a720d4db46573f28d27fac7a1cbc",
+        "publishDigest": "4R636pQDfxboXRfFn3DxJsqGb2SsE5BrtKBguVU3i3N7",
+        "deployedAt": "2026-09-01T16:19:53.852702576+00:00"
       },
       "deepbookAdapter": {
-        "packageId": "0x411da6b51f9085c8fb92f61439b8c6500beef72cbb43c9b2b7adeff55263fd5a",
-        "upgradeCapId": "0x031eb70cdbf7158cd8d11cde8b04d2f22d57358fc96c2ac5093d8efdea79ddbd",
-        "publishDigest": "AjuAYWNgmm1RPKhEVYHARcG6tDDxAfucsS8xEnJWZAL6",
-        "deployedAt": "2026-08-22T23:24:39.830360021+00:00"
+        "packageId": "0x525a1dd8dc4e486dec6e98973cd3e8aba9b7f78f5b52c637a611c1e2a46dd922",
+        "upgradeCapId": "0x9e267b0148c2f27cf361bbfb65092d8cfd5339330604dca2f6821e5f50f80861",
+        "publishDigest": "4QUED9M9onWeyr9jHGiWhZTX1Mda4RsUhA7pJSwZngmj",
+        "deployedAt": "2026-09-01T16:19:53.852704089+00:00"
       },
       "optionsAdapter": {
-        "packageId": "0x2887b74fbe47b0f4ffc3dd27f1ced3b9731a474146cf704e8327e639427691e0",
-        "upgradeCapId": "0xd84f834f5322c69222d14aa322b2727a11f6150d306ad2b7b684cea8b3a68c7d",
-        "publishDigest": "7QMgGkMb92jAMJ6BCimhqYkEb3ZjXyJHNzrCo9yXpKGB",
-        "deployedAt": "2026-08-22T23:24:39.830362802+00:00"
+        "packageId": "0x962c6e2a12c71fd908b98cd3bcbf9c437d64c1dfbfb4ae6613606b8f170dbd85",
+        "upgradeCapId": "0x88193173010d482c9b28f3eb71580380a69aeb393dfe22670364c23993c7d728",
+        "publishDigest": "98FtScZKYU2Vfhzf31sGAF4J9TEh6rHwdU8PYaHrj59d",
+        "deployedAt": "2026-09-01T16:19:53.852705331+00:00"
       },
       "exchangeAdapter": {
-        "packageId": "0xe705f0e3d98b039aeb24c7f6646c11445fa99ebaff6e2000ef2453027b61cf80",
-        "upgradeCapId": "0x888a1ca09f2afa4f8e9a0dc79ac04482aab0375c2c30443f7aeba9bd6558c68e",
-        "publishDigest": "Cae81gUsGVwQQQPvU8mTJBASy7N4wpw8MhEjw6tX9qy4",
-        "deployedAt": "2026-08-22T23:25:16.267500314+00:00"
+        "packageId": "0x23b24d55ba35daab84e5332d62875a4b94a85bffa9dfaee07417d45b11dd2696",
+        "upgradeCapId": "0x71db6f1d9c17c41bde0a6a889206775a0a42df89d5e064ae3b415a0f123f9410",
+        "publishDigest": "3o627rHfabzgXHuDmKvAeEN8TfrBujVnLcopVxDUxQGn",
+        "deployedAt": "2026-09-01T16:20:28.867950547+00:00"
       },
       "equityOracle": {
-        "packageId": "0x0b9244f734503a5337ac0075d4bef8925bf91fd8391454ca0c569dc5171cb48a",
-        "upgradeCapId": "0xc8c80fabca4173d6b277efc1cc09bffdf08cb89cc4f7635d448fac41c3476c54",
-        "publishDigest": "H3zQ6iL5WoQo4Pxe63eb6m6S7y1qZvqVQQkCMx7krY1Y",
-        "deployedAt": "2026-08-22T23:25:16.267501669+00:00"
+        "packageId": "0x1d1610d67ec2ce86ae6acb614a0f17074fbdbaffd819a95b3073e1f255203bb3",
+        "upgradeCapId": "0x73f32d13d1e67a74ead14d3da7d95c6d45b8e1730c09ac60528e19a9183b14fb",
+        "publishDigest": "5tbi5Eo6yrqD16E7GkfWzi4UWD6mcSw3meKDn2ti8bDr",
+        "deployedAt": "2026-09-01T16:20:28.867951669+00:00"
       },
       "tradingVaultObjects": {
-        "vaultProtocolConfigId": "0xeef2eda7330d832aa74565eb3832fa796ef551049968420fed75a3ff214a9d76",
-        "integrationRegistryId": "0x41fe73c0523ab5e78b3cc9a25814b1daaacf74062021848bccfe2f140f922309",
-        "oracleRegistryId": "0xd627f59913a0a579057b1a8b1f965fe4ca66e119679d79520a1afa0248497bb6",
-        "pythFeedRegistryId": "0x13a33682c4b437727c4c161f0a820332a88842a520aeec8aca2844283544ac0d",
-        "switchboardFeedRegistryId": "0xd44df305cad3d7de6be4c7ec134d0b8097acc9883c0d1fe19c2e45d9ad747a9e",
-        "poolAllowlistId": "0xc175ade577d8235e6965f649c1565b274f246a90f3d0909d6b729881b86be7f2",
-        "equityBookId": "0x71b5d46db83a2a29f9dfa104fa624e82bd91b6def890f4ea5f8929c06c709b35",
-        "volBookId": "0x66bfe989d99b709b98cd513ab9d2b6232769611ac1b9dbfc0044411d6e7c54a8",
+        "vaultProtocolConfigId": "0x3583428bf13b5f484d79b66d375344909b1cd027deff1470c293c7cde9bd15c4",
+        "integrationRegistryId": "0x39d0371e18455cebd5d1d5a28e6fb6d8b2a43611dac04eb22c0e692baffc3e41",
+        "oracleRegistryId": "0x0c69b2f955f17d87fde388d93a7d887c83deb154c80a6e9864a1132ebd6d5f6e",
+        "pythFeedRegistryId": "0x759cd1ba5a6e1a40a911a4fae603293bbb3e9c1fb326c992ab1393d9dc033a9c",
+        "switchboardFeedRegistryId": "0xe7ad489edc98d33c3c3c88f3a7b4327b4a594594922d49ee66681057a5aa87b0",
+        "poolAllowlistId": "0x3a463da45013d8d9989db316ef8960ce663acdcd2639eb25801b212d6f06d149",
+        "equityBookId": "0xd32355a04f8036152db5f3781298e48fbb1af74543c2dc574d206ea20d170347",
+        "volBookId": "0x7b163ce9c0933d6fe994891b383261c174f0f8f0eacc3fed0305047345fa8142",
         "registrarPubkey": "5c6c64713225f1379004908bbd4372124fd39c71a02d61cd62e614767e497c44",
         "termsVersion": 1,
         "specHash": "50fcc36f0c66e9c5a360cea309e6753d65106ee6d36a7a0cdb9ce8f2324ad673",
-        "activationDigest": "HFJWPECv1onoL21h9cT5oKZ6QbejoYssWDwcozAP5ctL"
+        "activationDigest": "BvtkkqyfzJw3B7Co6DtVmN3ppd3A8PY1o83PV9aEnNPQ"
       },
       "whitelist": {
-        "packageId": "0x162694425d597298e3d24b084470742c4ae91897b264716fd51a1729372c9ff1",
-        "upgradeCapId": "0xfe6a7769c3e594d7dd8c17d00b032ed98d632c99d9d05262a1b6434730b7d15c",
-        "whitelistId": "0xec8bdc9ba9028430ee68f984fbb800ebf21bb48b40cde9448e250e0e9add1e0a",
-        "adminCapId": "0xb30ec9611d74546898611dfef78915063f0f8b8c4e06b21ddb323e8073d7496b",
-        "publishDigest": "G1Uky1jeqCpYN7eRdjpjW5eSyc6ijyKLZED52Sokx7vr",
-        "deployedAt": "2026-08-22T23:23:58.991620555+00:00"
+        "packageId": "0xac53a825b91540ce0b923a93825de9b22600c525569b82fe7fcc8f1b9959a9d5",
+        "upgradeCapId": "0x54dc8b71594e40f711a0752ebebfdd78f4dd21e1ed367f73b9e82707af57da0d",
+        "whitelistId": "0xc744a91c16f8ddf3591da4f89cfe1bb7d0cf452c6a7a5794f0137f2b47b8c5b1",
+        "adminCapId": "0x7a59d2366c3e8e042f220899c4819fee5e01a33d153e5367af51492777e9c357",
+        "publishDigest": "4rvqDwHRUyuWbaK17FA4mh4RncYdtTVxV41jg5FGpp6H",
+        "deployedAt": "2026-09-01T16:19:20.389492921+00:00"
       },
       "exchange": {
-        "packageId": "0xb04f3716ff9ace1b4031ce68a23b5aa5036d62f8dfa42ee680418d043b498c11",
-        "upgradeCapId": "0xa63bd75221f93004f1e5843f825b10ceb07916e5ec302477785305a4a584e6e1",
-        "adminCapId": "0x98c7c926b00c65eb9958c2c913d1ce2668a08139d17be4207a64237174b8a042",
-        "publishDigest": "Aph42ynpac8p6QW2Xb19x5a7eKqLnLbbQaptzNaTxSEk",
-        "deployedAt": "2026-08-22T23:24:58.085775754+00:00",
+        "packageId": "0xbd750a9946e259ab3c6217bc346d141273da2b3a28653375f687819f13d310df",
+        "upgradeCapId": "0x2cd72b48cbd0476efc4294d77219ccfdcd7fd17d3b0fcf8e5f4fcb9c036374e9",
+        "adminCapId": "0xe729a7d085ef5cb6b861918c9cf694bd38c6feb830598ad6dd8307a499acaa28",
+        "publishDigest": "FabymgpFodBrhxwBTMtXP7Qnb8ZzwNwgf9DUVRXrmKAk",
+        "deployedAt": "2026-09-01T16:20:09.504129766+00:00",
         "network": "testnet",
         "markets": {
           "TBTC/TUSDC": {
-            "registryId": "0x0a13f9f5c14331df0a04fb237ada006ee3d1252d2f076e8f46f8df806ef090da",
-            "base": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tbtc::TBTC",
-            "quote": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tusdc::TUSDC",
+            "registryId": "0xa0ae1799240e1cfc128da3965b627987978ebf0135d06571f1a7ff1f21d2b1e5",
+            "base": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tbtc::TBTC",
+            "quote": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tusdc::TUSDC",
             "tickSize": 1000,
             "minSize": 100000,
             "lotSize": 100000000,
             "feeBps": 10
           },
           "TSUI/TUSDC": {
-            "registryId": "0xd593d4736a726aaa161c6f80a3fc318a61dac38120e214f05a0c6f791662b5df",
-            "base": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tsui::TSUI",
-            "quote": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tusdc::TUSDC",
+            "registryId": "0x7c71b4fba62d30f9b11e993701c3ef3ad8f8007863a6a3086b1d943c6d3eab31",
+            "base": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tsui::TSUI",
+            "quote": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tusdc::TUSDC",
             "tickSize": 1000,
             "minSize": 1000000,
             "lotSize": 1000000000,
             "feeBps": 10
           },
           "TWAL/TUSDC": {
-            "registryId": "0x116a6b06f493f1b299c0686ee86246f7bf51eb766932d775ad113e4929e2c101",
-            "base": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::twal::TWAL",
-            "quote": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tusdc::TUSDC",
+            "registryId": "0xb00c633a13d812da7c8e5a08752ee554a04a4440c7b04131975b53ba92a4e3a7",
+            "base": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::twal::TWAL",
+            "quote": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tusdc::TUSDC",
             "tickSize": 1000,
             "minSize": 1000000,
             "lotSize": 1000000000,
@@ -225,36 +225,35 @@
         }
       },
       "exchangeListing": {
-        "packageId": "0xe86e54c9affc79bfef6a8a99206fa853725a228fc39a34b79bd3c0c6872b30cb",
-        "upgradeCapId": "0x20f73c506c980d48fc8df628e8dfe0a00c149eabfb72c720bcb72b963f8dfdd8",
-        "listingAuthorityId": "0xf511b832d2a95875c1c76baf02979d9a7e01788b5cf6e4e8f65d43d89efe0f9e",
-        "adminCapId": "0x71110b87a5b36a74688031babd7220d985c96ef99b770e42af36f0c684df2f71",
-        "publishDigest": "2925U3RZWKQ8yfwkeFZMvSuaPNcatpaux2zrPL5TYW4L",
-        "deployedAt": "2026-08-22T23:25:05.726594511+00:00"
-      },
-      "quoteSignerId": "0x839b46f50d6aee7762e1c72d65101160bb1d4e4450b79712c30c54e090dd4afd"
+        "packageId": "0x95c1076f0916b2c7dd04b548e6341ef998768167a8773d1d33d49fad81763282",
+        "upgradeCapId": "0x0a834c06968cff0fe1743783ac79f2ceddc50b26a7561fc268f793bcd3642ecb",
+        "listingAuthorityId": "0xc2d20a39854888c1ed4561fb14a714c9c273c5dd56e8c7ef90da0e8311e4465f",
+        "adminCapId": "0x19a0206cebc65544f4f165db91783de85c546485d3fb16a043daa990d44533c1",
+        "publishDigest": "97MGPua4wAnbha56VJ944cEoer3foi4cVGbQSEQCDfts",
+        "deployedAt": "2026-09-01T16:20:20.286529371+00:00"
+      }
     },
     "token_info": {
       "TBTC": {
-        "coinType": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tbtc::TBTC",
+        "coinType": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tbtc::TBTC",
         "decimals": 8,
         "pythFeedId": "0xf9c0172ba10dfa4d19088d94f5bf61d3b54d5bd7483a322a982e1373ee8ea31b",
         "switchboardFeedId": "0x4cd1cad962425681af07b9254b7d804de3ca3446fbfd1371bb258d2c75059812"
       },
       "TSUI": {
-        "coinType": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tsui::TSUI",
+        "coinType": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tsui::TSUI",
         "decimals": 9,
         "pythFeedId": "0x50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266",
         "switchboardFeedId": "0x7ceef94f404e660925ea4b33353ff303effaf901f224bdee50df3a714c1299e9"
       },
       "TUSDC": {
-        "coinType": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::tusdc::TUSDC",
+        "coinType": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::tusdc::TUSDC",
         "decimals": 6,
         "pythFeedId": "0x41f3625971ca2ed2263e78573fe5ce23e13d2558ed3f2e47ab0f84fb9e7ae722",
         "switchboardFeedId": "0x883ea8295f70ae506e894679d124196bb07064ea530cefd835b58c33a5ab6549"
       },
       "TWAL": {
-        "coinType": "0xfa888b8c9dd72cf7361b328eb70d1a02e29bb016a46850d4f2e64d13f9c6a728::twal::TWAL",
+        "coinType": "0x83d0271e873120fb805d20a2d052aca54b3b2a973a965c808c56a5a105b3108b::twal::TWAL",
         "decimals": 9,
         "pythFeedId": "0xa6ba0195b5364be116059e401fb71484ed3400d4d9bfbdf46bd11eab4f9b7cea",
         "switchboardFeedId": "0x580de69fa5310460bead69dc3fd0c05988dea014d0e7c98aae22b67e7958fd9b"
