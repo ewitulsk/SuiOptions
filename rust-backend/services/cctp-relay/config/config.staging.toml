@@ -19,7 +19,7 @@
 environment = "staging"
 bind_addr   = "0.0.0.0:9015"
 
-database_url = "postgresql://cctp_relay_staging:${DB_PASSWORD}@${DB_HOST}:5432/cctp_relay_staging"
+database_url = "postgresql://cctp_relay_staging:${DB_PASSWORD}@${DB_HOST}:25060/cctp_relay_staging?sslmode=require"
 db_pool_size = 4
 
 iris_base_url = "https://iris-api.circle.com"

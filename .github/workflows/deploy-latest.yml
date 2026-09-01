@@ -1,8 +1,8 @@
 name: Deploy latest ECR build
 
-# Manual one-button redeploy of whatever's most recently in ECR — no
-# build phase, just pick up the latest tag and roll every service onto
-# it. Use when:
+# Manual one-button redeploy of whatever's most recently in the registry
+# (DOCR) — no build phase, just pick up the latest tag and roll every
+# service onto it. Use when:
 #   - A build succeeded but the deploy step crashed and you want to
 #     retry without rebuilding.
 #   - You need to bring a fresh env online from already-built images.
@@ -30,7 +30,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   discover:
@@ -38,28 +37,20 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: digitalocean/action-doctl@v2
         with:
-          role-to-assume: ${{ vars.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
 
       - id: tag
         run: |
-          # SC2016: the backticked `null` below is a JMESPath literal and the
-          # jq program is a jq program — neither is meant to expand in shell.
-          # shellcheck disable=SC2016
-          # Newest tagged image in options/indexer, by push timestamp.
-          # Now that images carry env tags (staging, prod,
-          # staging_<sha>, …) alongside the bare SHA, we must filter for the
-          # 12-char hex SHA tag to avoid handing an env alias to the
-          # deploy matrix.
-          TAG=$(aws ecr describe-images \
-            --repository-name options/indexer \
-            --query 'sort_by(imageDetails[?imageTags != `null`],& imagePushedAt)[-1].imageTags' \
-            --output json \
-            | jq -r '[.[] | select(test("^[a-f0-9]{12}$"))][0] // empty')
+          # Newest tag in options/indexer, by updated_at. Images carry env
+          # tags (staging, prod, staging_<sha>, …) alongside the bare SHA,
+          # so filter for the 12-char hex SHA tag to avoid handing an env
+          # alias to the deploy matrix.
+          TAG=$(doctl registry repository list-tags options/indexer -o json \
+            | jq -r '[.[]? | select(.tag | test("^[a-f0-9]{12}$"))] | sort_by(.updated_at) | last | .tag // empty')
           if [ -z "$TAG" ]; then
-            echo "no SHA-tagged images in ECR options/indexer" >&2
+            echo "no SHA-tagged images in DOCR options/indexer" >&2
             exit 1
           fi
           echo "latest tag: $TAG"

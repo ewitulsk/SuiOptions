@@ -4,7 +4,7 @@ name: Sync monitoring stack
 # host (options-host) and roll the monitoring stack — WITHOUT rebuilding or
 # rolling any app service. This is the lightweight rollout path for changes to
 # the Grafana/Prometheus/Tempo/Gatus config that normally only land via a full
-# cloud-init re-provision (host bounce).
+# host re-provision (host bounce).
 #
 # What it does on the host (/opt/options/monitoring):
 #   - Drops the updated config files in place (datasources, alerting,
@@ -29,35 +29,42 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # OIDC to AWS
 
 env:
-  AWS_REGION:        ${{ vars.AWS_REGION }}
-  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
-  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+  STAGING_HOST: ${{ vars.STAGING_HOST }}
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4   # for deployment/monitoring/** + resolve-ec2
+      - uses: actions/checkout@v4   # for deployment/monitoring/**
 
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+      # Monitoring runs on the shared host (the staging droplet).
+      - name: Resolve target host
+        id: host
+        run: |
+          if [ -z "$STAGING_HOST" ]; then
+            echo "::error::STAGING_HOST var not set"; exit 1
+          fi
+          echo "addr=$STAGING_HOST" >> "$GITHUB_OUTPUT"
 
-      # Monitoring runs on the shared host (options-host); leave env empty.
-      - uses: ./.github/actions/resolve-ec2
-        with:
-          region: ${{ env.AWS_REGION }}
+      - name: Set up deploy SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$HOST_ADDR" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Build + upload monitoring config bundle
+      - name: Build monitoring config bundle
         working-directory: rust-backend/deployment/monitoring
         run: |
           set -eu
-          # Stage files at the exact paths cloud-init writes them, rooted at
-          # `monitoring/` so `tar -C /opt/options` lands them in place.
+          # Stage files at the exact paths host provisioning writes them,
+          # rooted at `monitoring/` so `tar -C /opt/options` lands them in
+          # place.
           S=stage/monitoring
           mkdir -p \
             "$S/prometheus/config" \
@@ -76,88 +83,50 @@ jobs:
           cp -R dashboards                 "$S/dashboards"
           tar czf /tmp/mon-bundle.tgz -C stage monitoring
 
-          # Under deploy-bundles/ on purpose: the EC2 host role's s3:GetObject
-          # is scoped to that prefix (infra/iam.tf), and the bucket's 14-day
-          # lifecycle rule cleans the object up.
-          KEY="deploy-bundles/monitoring-sync-${{ github.run_id }}.tgz"
-          aws s3 cp /tmp/mon-bundle.tgz "s3://$SSM_OUTPUT_BUCKET/$KEY"
-          echo "S3_KEY=$KEY" >> "$GITHUB_ENV"
-
-      - name: SSM ship config + roll monitoring stack
+      - name: Ship config + roll monitoring stack
+        env:
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
         run: |
-          # AWS-RunShellScript joins `commands` into one /bin/sh (dash) script;
-          # vars persist line-to-line but there's no pipefail, so keep `set -eu`.
-          jq -nc \
-            --arg bucket "$SSM_OUTPUT_BUCKET" \
-            --arg key "$S3_KEY" '
-            {
-              commands: [
-                "set -eu",
-                "cd /opt/options/monitoring",
-                "echo Fetching monitoring config bundle...",
-                "aws s3 cp s3://\($bucket)/\($key) /tmp/mon-bundle.tgz",
-                "echo Extracting config into /opt/options/monitoring ...",
-                "tar xzf /tmp/mon-bundle.tgz -C /opt/options",
-                "rm -f /tmp/mon-bundle.tgz",
-                "# Ensure the metrics/trace data dirs exist and are owned by the",
-                "# uids the containers run as. Cloud-init does this on a fresh box,",
-                "# but a host provisioned before these services existed has no such",
-                "# dirs — Docker would auto-create them as root and the containers",
-                "# (prometheus uid 65534, tempo uid 10001) could not write. Idempotent.",
-                "mkdir -p prometheus/data tempo/data",
-                "chown -R 65534:65534 prometheus/data",
-                "chown -R 10001:10001 tempo/data",
-                "echo Pulling prometheus/tempo/gatus images...",
-                "docker compose -f docker-compose.monitoring.yml pull prometheus tempo gatus",
-                "echo Bringing up prometheus + tempo + gatus...",
-                "docker compose -f docker-compose.monitoring.yml up -d prometheus tempo gatus",
-                "echo Restarting prometheus + grafana to re-read bind-mounted config...",
-                # `up -d` above no-ops when the compose spec is unchanged, so a
-                # prometheus.yml edit alone never reaches the running process —
-                # the scrape config silently stays stale (SO-407). Same reason
-                # grafana is restarted for its provisioning files.
-                "docker compose -f docker-compose.monitoring.yml restart prometheus grafana",
-                "echo Waiting for grafana /api/health ...",
-                "ok=0; for i in $(seq 1 20); do if curl -fsS http://localhost:3000/api/health >/dev/null 2>&1; then ok=1; break; fi; sleep 2; done",
-                "if [ \"$ok\" -ne 1 ]; then echo \"grafana health probe failed\" >&2; exit 1; fi",
-                "echo Pushing dashboards...",
-                "GRAFANA_PASSWORD=$(grep ^GRAFANA_ADMIN_PASSWORD= .env | cut -d= -f2-)",
-                "GRAFANA_URL=http://localhost:3000 GRAFANA_PASSWORD=\"$GRAFANA_PASSWORD\" bash push-dashboards.sh",
-                "echo Monitoring containers:",
-                "docker compose -f docker-compose.monitoring.yml ps",
-                "echo \"sync ok\""
-              ]
-            }' > /tmp/ssm-params.json
+          SSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 root@$HOST_ADDR"
 
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$EC2_INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
-            --comment "sync monitoring stack" \
-            --parameters file:///tmp/ssm-params.json \
-            --query Command.CommandId --output text)
-          echo "ssm command: $CMD_ID"
+          scp /tmp/mon-bundle.tgz "root@$HOST_ADDR:/tmp/mon-bundle.tgz"
 
-          aws ssm wait command-executed \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" || true
-
-          STATUS=$(aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query Status --output text)
-          echo "ssm status: $STATUS"
-
-          echo "--- stdout ---"
-          aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query StandardOutputContent --output text
-
-          if [ "$STATUS" != "Success" ]; then
-            echo "--- stderr ---"
-            aws ssm get-command-invocation \
-              --command-id "$CMD_ID" \
-              --instance-id "$EC2_INSTANCE_ID" \
-              --query StandardErrorContent --output text
-            exit 1
-          fi
+          $SSH bash -s <<'REMOTE'
+          set -euo pipefail
+          cd /opt/options/monitoring
+          echo "Extracting config into /opt/options/monitoring ..."
+          tar xzf /tmp/mon-bundle.tgz -C /opt/options
+          rm -f /tmp/mon-bundle.tgz
+          # Ensure the metrics/trace data dirs exist and are owned by the
+          # uids the containers run as. Host provisioning does this on a
+          # fresh box, but a host provisioned before these services existed
+          # has no such dirs — Docker would auto-create them as root and the
+          # containers (prometheus uid 65534, tempo uid 10001) could not
+          # write. Idempotent.
+          mkdir -p prometheus/data tempo/data
+          chown -R 65534:65534 prometheus/data
+          chown -R 10001:10001 tempo/data
+          echo "Pulling prometheus/tempo/gatus images..."
+          docker compose -f docker-compose.monitoring.yml pull prometheus tempo gatus
+          echo "Bringing up prometheus + tempo + gatus..."
+          docker compose -f docker-compose.monitoring.yml up -d prometheus tempo gatus
+          echo "Restarting prometheus + grafana to re-read bind-mounted config..."
+          # `up -d` above no-ops when the compose spec is unchanged, so a
+          # prometheus.yml edit alone never reaches the running process —
+          # the scrape config silently stays stale (SO-407). Same reason
+          # grafana is restarted for its provisioning files.
+          docker compose -f docker-compose.monitoring.yml restart prometheus grafana
+          echo "Waiting for grafana /api/health ..."
+          ok=0
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:3000/api/health >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          if [ "$ok" -ne 1 ]; then echo "grafana health probe failed" >&2; exit 1; fi
+          echo "Pushing dashboards..."
+          GRAFANA_PASSWORD=$(grep ^GRAFANA_ADMIN_PASSWORD= .env | cut -d= -f2-)
+          GRAFANA_URL=http://localhost:3000 GRAFANA_PASSWORD="$GRAFANA_PASSWORD" bash push-dashboards.sh
+          echo "Monitoring containers:"
+          docker compose -f docker-compose.monitoring.yml ps
+          echo "sync ok"
+          REMOTE

@@ -3,7 +3,7 @@
 environment        = "staging"
 
 # DB_PASSWORD + DB_HOST are injected by compose from the deploy env.
-database_url       = "postgresql://event_ingestor_staging:${DB_PASSWORD}@${DB_HOST}:5432/event_ingestor_staging"
+database_url       = "postgresql://event_ingestor_staging:${DB_PASSWORD}@${DB_HOST}:25060/event_ingestor_staging?sslmode=require"
 
 admin_bind_addr    = "0.0.0.0:9023"
 internal_bind_addr = "0.0.0.0:9024"

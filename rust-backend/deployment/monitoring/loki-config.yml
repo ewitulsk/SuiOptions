@@ -1,6 +1,8 @@
-# Loki configuration — single-binary mode, S3-backed storage.
+# Loki configuration — single-binary mode, S3-compatible storage
+# (DigitalOcean Spaces since the DO migration).
 # Environment variables expanded at runtime by Loki's -config.expand-env flag:
-#   LOKI_S3_BUCKET, AWS_REGION
+#   LOKI_S3_BUCKET, LOKI_S3_ENDPOINT, LOKI_S3_REGION,
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (Spaces key)
 
 auth_enabled: false
 
@@ -35,7 +37,12 @@ storage_config:
     active_index_directory: /loki/index
     cache_location: /loki/cache
   aws:
-    s3: s3://${AWS_REGION}/${LOKI_S3_BUCKET}
+    # The old `s3://region/bucket` shorthand is AWS-only; Spaces needs an
+    # explicit endpoint. Credentials come from AWS_ACCESS_KEY_ID /
+    # AWS_SECRET_ACCESS_KEY in the container env (the Spaces key).
+    bucketnames: ${LOKI_S3_BUCKET}
+    endpoint: ${LOKI_S3_ENDPOINT}
+    region: ${LOKI_S3_REGION}
     s3forcepathstyle: true
 
 limits_config:

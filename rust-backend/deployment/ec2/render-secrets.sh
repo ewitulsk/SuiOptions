@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 #
-# Fetch per-service JSON secrets from AWS Secrets Manager and render them
-# into the file shapes the binaries expect under
-# /opt/options/<env>/secrets/.
+# Fetch per-service JSON secrets from the SOPS/age-encrypted store shipped
+# in the deploy bundle (secrets.enc.yaml) and render them into the file
+# shapes the binaries expect under /opt/options/<env>/secrets/.
 #
-# Secrets Manager layout (one JSON entry per service per env):
+# The encrypted store lives in-repo at
+# rust-backend/deployment/secrets/<env>.enc.yaml; the deploy bundle drops
+# it here as ./secrets.enc.yaml. Decryption needs the age private key at
+# /opt/options/age.key (installed once per host, mode 600).
+#
+# Store layout (one JSON-string value per service per env, keys mirror the
+# old AWS Secrets Manager names minus the options/ prefix):
 #   options/<env>/indexer    -> {"db_password": "..."}
 #   options/<env>/mm-bot     -> {"sui_key": "suiprivkey1...", "quote_key": "..."}
 #   options/<env>/scheduler  -> {"sui_key": "suiprivkey1..."}  (deployer key,
@@ -24,10 +30,10 @@
 #   /opt/options/<env>/secrets/.db_password      (sourced into .env by deploy.sh)
 #
 # Idempotent: re-running overwrites the rendered files. Services whose
-# AWS secret is absent are silently skipped — that's the supported way
+# secret is absent are silently skipped — that's the supported way
 # to opt-out of a service in a given env (e.g. mm-bot in prod).
 #
-# Requires `jq` and `aws` (installed by ec2-bootstrap.sh).
+# Requires `jq` and `sops` (installed by deployment/do/host-bootstrap.sh).
 
 set -euo pipefail
 
@@ -42,10 +48,26 @@ DIR="/opt/options/$ENV/secrets"
 mkdir -p "$DIR"
 chmod 700 "$DIR"
 
+SOPS_FILE="/opt/options/$ENV/secrets.enc.yaml"
+export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-/opt/options/age.key}"
+if [ ! -f "$SOPS_FILE" ]; then
+  echo "missing $SOPS_FILE (shipped by the deploy bundle)" >&2
+  exit 1
+fi
+if [ ! -f "$SOPS_AGE_KEY_FILE" ]; then
+  echo "missing age key at $SOPS_AGE_KEY_FILE" >&2
+  exit 1
+fi
+
 fetch() {
-  aws secretsmanager get-secret-value \
-    --secret-id "options/$ENV/$1" \
-    --query SecretString --output text
+  # Same contract as the old Secrets Manager fetch: prints the JSON string
+  # on stdout, non-zero exit when the key is absent.
+  sops decrypt --extract "[\"$ENV/$1\"]" "$SOPS_FILE" 2>/dev/null
+}
+
+fetch_global() {
+  # Env-independent keys (_master/*, monitoring/*).
+  sops decrypt --extract "[\"$1\"]" "$SOPS_FILE" 2>/dev/null
 }
 
 # Append a `[pyth]` section with the API key to a rendered secrets TOML, if
@@ -447,6 +469,21 @@ if BOT_JSON=$(fetch social-bot 2>/dev/null); then
 slack_signing_secret = "$SLACK_SECRET"
 discord_public_key   = "$DISCORD_KEY"
 EOF
+fi
+
+# ---- Spaces key -> sourced into .env by deploy.sh --------------------------
+# S3-compatible object-store credentials (DigitalOcean Spaces) for
+# api-service's /analytics lake reads. object_store's AmazonS3Builder
+# reads them from AWS_* env vars, which compose maps from SPACES_*.
+if SPACES_JSON=$(fetch_global "_master/spaces"); then
+  umask 077
+  for field in access_key secret_key endpoint region; do
+    val=$(echo "$SPACES_JSON" | jq -r --arg f "$field" '.[$f] // empty')
+    if [ -n "$val" ]; then
+      echo "$val" > "$DIR/.spaces_$field"
+      chmod 600 "$DIR/.spaces_$field"
+    fi
+  done
 fi
 
 # ---- keyless services -> standalone [sui] endpoint toml -------------------

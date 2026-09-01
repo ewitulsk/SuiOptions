@@ -3,7 +3,7 @@
 environment        = "staging"
 
 # DB_PASSWORD + DB_HOST are injected by compose from the deploy env.
-database_url       = "postgresql://leaderboard_staging:${DB_PASSWORD}@${DB_HOST}:5432/leaderboard_staging"
+database_url       = "postgresql://leaderboard_staging:${DB_PASSWORD}@${DB_HOST}:25060/leaderboard_staging?sslmode=require"
 
 public_bind_addr   = "0.0.0.0:9021"
 internal_bind_addr = "0.0.0.0:9022"

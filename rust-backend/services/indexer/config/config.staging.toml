@@ -14,7 +14,7 @@ graphql_addr            = "0.0.0.0:9002"
 allowed_origins         = ["*"]
 expose_playground       = true
 
-database_url            = "postgresql://indexer_staging:${DB_PASSWORD}@${DB_HOST}:5432/indexer_staging"
+database_url            = "postgresql://indexer_staging:${DB_PASSWORD}@${DB_HOST}:25060/indexer_staging?sslmode=require"
 db_pool_size            = 8
 
 # Auto-set by redeploy-contract workflow.

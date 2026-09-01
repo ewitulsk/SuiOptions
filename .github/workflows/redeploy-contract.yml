@@ -98,14 +98,13 @@ on:
 
 permissions:
   contents: write    # push updated deployments.json + config
-  id-token: write    # OIDC → AWS
 
 env:
-  AWS_REGION:        ${{ vars.AWS_REGION }}
-  ECR_REGISTRY:      ${{ vars.ECR_REGISTRY }}
-  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
-  RDS_HOST:          ${{ vars.RDS_HOST }}
-  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+  # ECR_REGISTRY keeps its historical name; value is the DOCR registry.
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  DB_HOST:      ${{ vars.DB_HOST }}
+  STAGING_HOST: ${{ vars.STAGING_HOST }}
+  PROD_HOST:    ${{ vars.PROD_HOST }}
 
 jobs:
   publish:
@@ -164,16 +163,41 @@ jobs:
             echo "no ${marker} marker yet — fine for rebuild-all"
           fi
 
-      # ── 2. AWS credentials (OIDC) ───────────────────────────────
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+      # ── 2. Secrets tooling + host access ────────────────────────
+      - name: Install sops
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/sops \
+            https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64
+          sudo chmod +x /usr/local/bin/sops
+          if [ ! -f "rust-backend/deployment/secrets/${{ inputs.environment }}.enc.yaml" ]; then
+            echo "::error::no secrets store for ${{ inputs.environment }} (rust-backend/deployment/secrets/${{ inputs.environment }}.enc.yaml missing — prod secrets are re-minted at mainnet build time)"
+            exit 1
+          fi
 
-      - uses: ./.github/actions/resolve-ec2
-        with:
-          region: ${{ env.AWS_REGION }}
-          env: ${{ inputs.environment }}
+      - name: Resolve target host
+        id: host
+        env:
+          ENV: ${{ inputs.environment }}
+        run: |
+          case "$ENV" in
+            staging) addr="$STAGING_HOST" ;;
+            prod)    addr="$PROD_HOST" ;;
+            *) echo "::error::unknown env $ENV"; exit 1 ;;
+          esac
+          if [ -z "$addr" ]; then
+            echo "::error::no host var set for $ENV"; exit 1
+          fi
+          echo "addr=$addr" >> "$GITHUB_OUTPUT"
+
+      - name: Set up deploy SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$HOST_ADDR" >> ~/.ssh/known_hosts 2>/dev/null
 
       # ── 3. Fetch the prebuilt deployment-manager binary ──────────
       # The binary lives as a GitHub prerelease asset (tag:
@@ -290,18 +314,18 @@ jobs:
               echo "Pruned $stale."
             done
 
-      # ── 6. Fetch deployer key from Secrets Manager ───────────────
+      # ── 6. Fetch deployer key from the SOPS store ────────────────
       - name: Write secrets file
         env:
           ENV: ${{ inputs.environment }}
           NETWORK: ${{ steps.net.outputs.network }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
+          STORE="rust-backend/deployment/secrets/$ENV.enc.yaml"
           # Holds the deployer key (AdminCap owner) — the canonical signing
           # key for publishes. The secret is still named `scheduler` for
           # historical reasons; the service of that name is gone.
-          SCHEDULER_JSON=$(aws secretsmanager get-secret-value \
-            --secret-id "options/$ENV/scheduler" \
-            --query SecretString --output text)
+          SCHEDULER_JSON=$(sops decrypt --extract "[\"$ENV/scheduler\"]" "$STORE")
           SUI_KEY=$(echo "$SCHEDULER_JSON" | jq -r '.sui_key')
 
           if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
@@ -314,9 +338,7 @@ jobs:
           # (render-secrets.sh convention). Absent secret → the binary falls
           # back to the public gRPC endpoint, which works.
           GRPC_FROM_SECRET=""
-          if RPC_JSON=$(aws secretsmanager get-secret-value \
-                --secret-id "options/$ENV/sui-rpc" \
-                --query SecretString --output text 2>/dev/null); then
+          if RPC_JSON=$(sops decrypt --extract "[\"$ENV/sui-rpc\"]" "$STORE" 2>/dev/null); then
             GRPC_FROM_SECRET=$(echo "$RPC_JSON" | jq -r '.grpc_url // empty')
             [ "$GRPC_FROM_SECRET" = "REPLACE_ME" ] && GRPC_FROM_SECRET=""
           fi
@@ -396,11 +418,11 @@ jobs:
           ENV: ${{ inputs.environment }}
           NETWORK: ${{ steps.net.outputs.network }}
           GRPC_URL: ${{ inputs.grpc_url }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
-          if ! MM_JSON=$(aws secretsmanager get-secret-value \
-                --secret-id "options/$ENV/mm-bot" \
-                --query SecretString --output text 2>/dev/null); then
-            echo "options/$ENV/mm-bot secret absent — mm-bot not deployed here; skipping"
+          STORE="rust-backend/deployment/secrets/$ENV.enc.yaml"
+          if ! MM_JSON=$(sops decrypt --extract "[\"$ENV/mm-bot\"]" "$STORE" 2>/dev/null); then
+            echo "$ENV/mm-bot secret absent — mm-bot not deployed here; skipping"
             exit 0
           fi
           MM_KEY=$(echo "$MM_JSON" | jq -r '.sui_key')
@@ -505,43 +527,37 @@ jobs:
           printf '\n# Auto-set by redeploy-contract workflow.\nstart_checkpoint = %s\n' \
             "$START" >> "$CONFIG"
 
-      # ── 10. Upload the DB-wipe script to S3 for EC2 ─────────────
+      # ── 10. Build the DB-wipe bundle ────────────────────────────
       # Only the provisioning script needs to reach the box here. The new
       # deployments.json rides along in the deploy job's bundle (which checks
       # out this commit via `ref`) and lands on the host bind-mount; the indexer
       # config is read from the image config dir as before.
-      - name: Upload redeploy bundle
+      - name: Build redeploy bundle
         id: bundle
         env:
           ENV: ${{ inputs.environment }}
         run: |
-          TS=$(date +%s)
-          # Park under deploy-bundles/ — the only prefix the EC2 instance
-          # role is allowed to GetObject from on this bucket (see iam.tf).
-          BUNDLE_KEY="deploy-bundles/redeploy-${ENV}-${TS}.tgz"
-
           mkdir -p /tmp/redeploy-bundle
           cp rust-backend/deployment/ec2/wipe-provision-db.sh /tmp/redeploy-bundle/
           # render-secrets.sh seeds /opt/options/<env>/secrets/.db_password,
-          # which wipe-provision-db.sh requires. On a fresh box (e.g. the new
-          # prod host's first bootstrap) that file doesn't exist yet — the
-          # deploy job that normally writes it runs AFTER this reset step.
+          # which wipe-provision-db.sh requires. On a fresh box that file
+          # doesn't exist yet — the deploy job that normally writes it runs
+          # AFTER this reset step. Ship the encrypted store too so
+          # render-secrets.sh can decrypt on a box the deploy job hasn't
+          # touched yet.
           cp rust-backend/deployment/ec2/render-secrets.sh /tmp/redeploy-bundle/
+          cp "rust-backend/deployment/secrets/$ENV.enc.yaml" /tmp/redeploy-bundle/secrets.enc.yaml
           tar czf /tmp/redeploy-bundle.tgz -C /tmp/redeploy-bundle .
 
-          aws s3 cp /tmp/redeploy-bundle.tgz \
-            "s3://${SSM_OUTPUT_BUCKET}/${BUNDLE_KEY}"
-
-          echo "key=$BUNDLE_KEY" >> "$GITHUB_OUTPUT"
-
-      # ── 11. SSM: stop indexer/orderbook, wipe DBs ──────────────────
+      # ── 11. SSH: stop indexer/orderbook, wipe DBs ──────────────────
       # Does NOT restart anything — the deploy job rebuilds + rolls out the
       # whole stack afterward.
-      - name: Reset databases on EC2
+      - name: Reset databases on host
         env:
           ENV: ${{ inputs.environment }}
           NETWORK: ${{ steps.net.outputs.network }}
-          BUNDLE_KEY: ${{ steps.bundle.outputs.key }}
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
           # ── MAINNET GUARD ──
           # Re-asserted here rather than trusted from step 1, because this is
@@ -553,124 +569,68 @@ jobs:
           # including "cannot tell".
           bash rust-backend/deployment/assert_testnet.sh "$ENV" >/dev/null
 
-          # The schema reset (DROP/CREATE SCHEMA) must run as the RDS
+          # The schema reset (DROP/CREATE SCHEMA) must run as the DB
           # master. The per-env indexer_<env> role owns its tables (so it
           # can DROP the schema) but lacks CREATE on the database, so it
           # cannot recreate the public schema. The master owns every db.
-          MASTER_JSON=$(aws secretsmanager get-secret-value \
-            --secret-id "options/_master/db" \
-            --query SecretString --output text)
+          STORE="rust-backend/deployment/secrets/$ENV.enc.yaml"
+          MASTER_JSON=$(sops decrypt --extract '["_master/db"]' "$STORE")
           MASTER_USER=$(echo "$MASTER_JSON" | jq -r '.username')
           MASTER_PASS=$(echo "$MASTER_JSON" | jq -r '.password')
+          echo "::add-mask::$MASTER_PASS"
 
-          # SSM commands run under /bin/sh (dash on Ubuntu); keep this
-          # set -eu (no pipefail). deploy.sh itself is bash.
-          jq -nc \
-            --arg env "$ENV" \
-            --arg network "$NETWORK" \
-            --arg db_host "$RDS_HOST" \
-            --arg master_user "$MASTER_USER" \
-            --arg master_pass "$MASTER_PASS" \
-            --arg bucket "$SSM_OUTPUT_BUCKET" \
-            --arg bundle_key "$BUNDLE_KEY" \
-            --arg region "$AWS_REGION" '
-            {
-              commands: [
-                "set -eu",
+          scp /tmp/redeploy-bundle.tgz "root@$HOST_ADDR:/tmp/redeploy-bundle.tgz"
 
-                "# ── MAINNET GUARD (belt + suspenders) ──",
-                "# Inverted: proceed only on a proven testnet. The previous",
-                "# form refused mainnet and proceeded on anything else,",
-                "# including an empty or unset value.",
-                "# The network is bracketed, not apostrophised: an apostrophe",
-                "# here closes the shell single quote that wraps this whole jq",
-                "# program, and bash then dies on the now-bare paren before the",
-                "# step makes a single AWS call (SO-342).",
-                "if [ \"\($network)\" != \"testnet\" ]; then echo \"FATAL: refusing network [\($network)] — testnet only\"; exit 1; fi",
+          ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 "root@$HOST_ADDR" env \
+            "ENV=$ENV" \
+            "NETWORK=$NETWORK" \
+            "DB_HOST=$DB_HOST" \
+            "MASTER_USER=$MASTER_USER" \
+            "MASTER_PASS=$MASTER_PASS" \
+            bash -s <<'REMOTE'
+          set -euo pipefail
 
-                "cd /opt/options/\($env)",
-                "COMPOSE_FILE=\"docker-compose.\($env).yml\"",
-
-                "# ── 1. Stop the services whose DBs we wipe ──",
-                "docker compose -f \"$COMPOSE_FILE\" stop indexer orderbook || true",
-                "echo \"indexer + orderbook stopped\"",
-
-                "# ── 2. Download updated files + provisioning script from S3 ──",
-                "aws s3 cp \"s3://\($bucket)/\($bundle_key)\" /tmp/redeploy-bundle.tgz --region \($region)",
-                "mkdir -p /tmp/redeploy",
-                "tar xzf /tmp/redeploy-bundle.tgz -C /tmp/redeploy",
-                "chmod +x /tmp/redeploy/wipe-provision-db.sh /tmp/redeploy/render-secrets.sh",
-
-                "# ── 3. Seed .db_password (fresh box may not have it yet) ──",
-                "# render-secrets.sh writes /opt/options/<env>/secrets/.db_password,",
-                "# which wipe-provision-db.sh reads for the per-env role password.",
-                "/tmp/redeploy/render-secrets.sh \($env | @sh)",
-
-                "# ── 4. Wipe + provision the indexer and orderbook DBs ──",
-                "# Vault-APY rows now live in the price-charting Timescale DB keyed by the",
-                "# new vault ids; old-vault rows simply orphan (harmless), so there is no",
-                "# APY DB to wipe here anymore (folded out of derived-metric-worker).",
-                "# orderbook included: the exchange package republishes every",
-                "# redeploy, so resting orders/fills reference dead registries.",
-                "for svc in indexer orderbook; do DB_HOST=\($db_host | @sh) MASTER_USER=\($master_user | @sh) MASTER_PASS=\($master_pass | @sh) sh /tmp/redeploy/wipe-provision-db.sh \($env | @sh) \"$svc\"; done",
-
-                "# The mm-bot needs no reset — it resolves its Account from",
-                "# chain state for the current package on boot, bootstrapping a",
-                "# fresh one if none exists yet.",
-                "# indexer + orderbook are left STOPPED on purpose — the",
-                "# deploy job rolls the whole stack (rebuilding or pulling the",
-                "# latest images per build_strategy, and dropping the new",
-                "# deployments.json on the host) and `docker compose up -d`s it,",
-                "# starting them fresh on the wiped DBs (migrations run on connect).",
-                "# Cleanup",
-                "rm -rf /tmp/redeploy /tmp/redeploy-bundle.tgz",
-                "echo \"DB reset complete (\($env)) — handing off to rebuild/deploy\""
-              ]
-            }' > /tmp/ssm-params.json
-
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$EC2_INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
-            --comment "redeploy-contract $ENV" \
-            --parameters file:///tmp/ssm-params.json \
-            --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
-            --timeout-seconds 300 \
-            --query Command.CommandId --output text)
-          echo "SSM command: $CMD_ID"
-
-          # Wait for completion. `aws ssm wait` gives up after ~100s and
-          # the two-database wipe-provision can legitimately run longer
-          # (observed 2026-08-04: the waiter expired on InProgress and
-          # failed the run; the command reached Success seconds later).
-          # Poll to a real deadline instead — 10 min, comfortably above
-          # the command's own 300s execution timeout.
-          STATUS=InProgress
-          for _ in $(seq 1 120); do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "$CMD_ID" \
-              --instance-id "$EC2_INSTANCE_ID" \
-              --query Status --output text)
-            case "$STATUS" in
-              Pending|InProgress|Delayed) sleep 5 ;;
-              *) break ;;
-            esac
-          done
-          echo "SSM status: $STATUS"
-
-          # Print stdout.
-          aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query StandardOutputContent --output text
-
-          if [ "$STATUS" != "Success" ]; then
-            echo "::error::SSM command failed with status $STATUS"
-            aws ssm get-command-invocation \
-              --command-id "$CMD_ID" \
-              --instance-id "$EC2_INSTANCE_ID" \
-              --query StandardErrorContent --output text
-            exit 1
+          # ── MAINNET GUARD (belt + suspenders) ──
+          # Inverted: proceed only on a proven testnet.
+          if [ "$NETWORK" != "testnet" ]; then
+            echo "FATAL: refusing network [$NETWORK] — testnet only"; exit 1
           fi
+
+          cd "/opt/options/$ENV"
+          COMPOSE_FILE="docker-compose.$ENV.yml"
+
+          # ── 1. Stop the services whose DBs we wipe ──
+          docker compose -f "$COMPOSE_FILE" stop indexer orderbook || true
+          echo "indexer + orderbook stopped"
+
+          # ── 2. Unpack the provisioning bundle ──
+          mkdir -p /tmp/redeploy
+          tar xzf /tmp/redeploy-bundle.tgz -C /tmp/redeploy
+          chmod +x /tmp/redeploy/wipe-provision-db.sh /tmp/redeploy/render-secrets.sh
+
+          # ── 3. Seed .db_password (fresh box may not have it yet) ──
+          # render-secrets.sh writes /opt/options/<env>/secrets/.db_password,
+          # which wipe-provision-db.sh reads for the per-env role password.
+          # Drop the shipped encrypted store where render-secrets.sh expects
+          # it (a fresh box has no deploy bundle yet).
+          cp /tmp/redeploy/secrets.enc.yaml "/opt/options/$ENV/secrets.enc.yaml"
+          /tmp/redeploy/render-secrets.sh "$ENV"
+
+          # ── 4. Wipe + provision the indexer and orderbook DBs ──
+          # orderbook included: the exchange package republishes every
+          # redeploy, so resting orders/fills reference dead registries.
+          for svc in indexer orderbook; do
+            DB_HOST="$DB_HOST" MASTER_USER="$MASTER_USER" MASTER_PASS="$MASTER_PASS" \
+              sh /tmp/redeploy/wipe-provision-db.sh "$ENV" "$svc"
+          done
+
+          # The mm-bot needs no reset — it resolves its Account from chain
+          # state for the current package on boot. indexer + orderbook are
+          # left STOPPED on purpose — the deploy job rolls the whole stack
+          # and starts them fresh on the wiped DBs (migrations on connect).
+          rm -rf /tmp/redeploy /tmp/redeploy-bundle.tgz
+          echo "DB reset complete ($ENV) — handing off to rebuild/deploy"
+          REMOTE
 
       # ── 12. Commit and push changes to git ──────────────────────
       # Must push BEFORE the deploy job runs: that job checks out this exact

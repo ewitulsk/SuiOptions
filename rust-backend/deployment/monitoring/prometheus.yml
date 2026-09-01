@@ -55,7 +55,9 @@ scrape_configs:
   # no new rule.
   - job_name: services-data-room
     static_configs:
-      - targets: ["10.40.1.62:9100"]
+      # DO data-room droplet's VPC-private IP (infra-do output
+      # data_room_private_ip) — update if the droplet is ever replaced.
+      - targets: ["10.60.0.3:9100"]
         labels: { env: data-room, service: data-room-collector }
 
   # The monitoring stack watches itself.

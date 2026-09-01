@@ -8,11 +8,11 @@
 #      changed files (via deployment/affected.py). Determines the matrix
 #      for build + deploy.
 #   2. build — one parallel job per affected service, runs `docker buildx
-#      bake --push <service>` against deployment/bake.hcl.
+#      bake --push <service>` against deployment/bake.hcl (pushes to DOCR).
 #   3. deploy — one parallel job per env (per caller's `envs` input),
-#      uploads the deploy bundle (deploy.sh + render-secrets.sh +
-#      docker-compose.<env>.yml) to S3, then SSMs into the EC2 box to
-#      download the bundle and run deploy.sh with the affected-services
+#      ships the deploy bundle (deploy.sh + render-secrets.sh +
+#      docker-compose.<env>.yml + secrets.enc.yaml) to the droplet over
+#      scp, then runs deploy.sh there over SSH with the affected-services
 #      list.
 #
 # Concurrency is scoped per env so two near-simultaneous pushes serialize
@@ -55,14 +55,14 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # OIDC to AWS
 
 env:
-  AWS_REGION:        ${{ vars.AWS_REGION }}
-  ECR_REGISTRY:      ${{ vars.ECR_REGISTRY }}
-  DEPLOY_ROLE_ARN:   ${{ vars.DEPLOY_ROLE_ARN }}
-  RDS_HOST:          ${{ vars.RDS_HOST }}
-  SSM_OUTPUT_BUCKET: ${{ vars.SSM_OUTPUT_BUCKET }}
+  # ECR_REGISTRY keeps its historical name; since the DO migration its
+  # value is the DOCR registry (registry.digitalocean.com/<team>).
+  ECR_REGISTRY:  ${{ vars.ECR_REGISTRY }}
+  DB_HOST:       ${{ vars.DB_HOST }}
+  STAGING_HOST:  ${{ vars.STAGING_HOST }}
+  PROD_HOST:     ${{ vars.PROD_HOST }}
 
 jobs:
   affected:
@@ -192,12 +192,12 @@ jobs:
         with:
           ref: ${{ inputs.ref }}   # empty = triggering commit; redeploy passes its new commit
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: digitalocean/action-doctl@v2
         with:
-          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
 
-      - uses: aws-actions/amazon-ecr-login@v2
+      - name: DOCR login
+        run: doctl registry login --expiry-seconds 3600
 
       # No setup-qemu-action: bake.hcl targets linux/amd64 and the GH
       # runner is amd64, so the whole build runs native. Add back +
@@ -223,7 +223,6 @@ jobs:
     # workflow-default read.
     permissions:
       contents: write
-      id-token: write
     if: |
       always()
       && needs.affected.outputs.services != '[]'
@@ -241,17 +240,37 @@ jobs:
         with:
           ref: ${{ inputs.ref }}   # empty = triggering commit; redeploy passes its new commit
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: digitalocean/action-doctl@v2
         with:
-          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
 
-      - uses: ./.github/actions/resolve-ec2
-        with:
-          region: ${{ env.AWS_REGION }}
-          env: ${{ matrix.env }}
+      - name: DOCR login
+        run: doctl registry login --expiry-seconds 3600
 
-      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Resolve target host
+        id: host
+        env:
+          DEPLOY_ENV: ${{ matrix.env }}
+        run: |
+          case "$DEPLOY_ENV" in
+            staging) addr="$STAGING_HOST" ;;
+            prod)    addr="$PROD_HOST" ;;
+            *) echo "::error::unknown env $DEPLOY_ENV"; exit 1 ;;
+          esac
+          if [ -z "$addr" ]; then
+            echo "::error::no host var set for $DEPLOY_ENV"; exit 1
+          fi
+          echo "addr=$addr" >> "$GITHUB_OUTPUT"
+
+      - name: Set up deploy SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$HOST_ADDR" >> ~/.ssh/known_hosts 2>/dev/null
 
       - name: Tag images for environment
         env:
@@ -260,35 +279,20 @@ jobs:
           DEPLOY_ENV: ${{ matrix.env }}
         run: |
           for svc in $(echo "$SERVICES" | jq -r '.[]'); do
-            repo="options/${svc}"
-            echo "Fetching manifest for ${repo}:${TAG}…"
-            manifest=$(aws ecr batch-get-image \
-              --repository-name "$repo" \
-              --image-ids imageTag="$TAG" \
-              --query 'images[0].imageManifest' \
-              --output text)
-
-            if [ -z "$manifest" ] || [ "$manifest" = "None" ]; then
-              echo "::warning::No image found for ${repo}:${TAG} — skipping env tags"
+            ref="$ECR_REGISTRY/options/${svc}"
+            if ! docker buildx imagetools inspect "${ref}:${TAG}" >/dev/null 2>&1; then
+              echo "::warning::No image found for ${ref}:${TAG} — skipping env tags"
               continue
             fi
-
-            # Rolling "latest for this env" tag — moves on every deploy
-            aws ecr put-image \
-              --repository-name "$repo" \
-              --image-tag "$DEPLOY_ENV" \
-              --image-manifest "$manifest" 2>/dev/null || true
-
-            # Immutable env + build-id tag
-            aws ecr put-image \
-              --repository-name "$repo" \
-              --image-tag "${DEPLOY_ENV}_${TAG}" \
-              --image-manifest "$manifest" 2>/dev/null || true
-
-            echo "Tagged ${repo}: ${DEPLOY_ENV}, ${DEPLOY_ENV}_${TAG}"
+            # Rolling "latest for this env" tag + immutable env_build tag
+            docker buildx imagetools create \
+              -t "${ref}:${DEPLOY_ENV}" \
+              -t "${ref}:${DEPLOY_ENV}_${TAG}" \
+              "${ref}:${TAG}"
+            echo "Tagged ${ref}: ${DEPLOY_ENV}, ${DEPLOY_ENV}_${TAG}"
           done
 
-      - name: Upload deploy bundle to S3
+      - name: Build deploy bundle
         env:
           TAG: ${{ needs.affected.outputs.tag }}
         working-directory: rust-backend
@@ -319,9 +323,10 @@ jobs:
           # unlink+create extraction would otherwise orphan the
           # container's view of the file on every deploy.
           cp deployment/nginx/nginx.${{ matrix.env }}.conf /tmp/bundle/nginx/nginx.conf
+          # SOPS/age-encrypted secrets store — render-secrets.sh decrypts it
+          # on-host with /opt/options/age.key.
+          cp deployment/secrets/${{ matrix.env }}.enc.yaml /tmp/bundle/secrets.enc.yaml
           tar czf /tmp/bundle.tgz -C /tmp/bundle .
-          aws s3 cp /tmp/bundle.tgz \
-            "s3://$SSM_OUTPUT_BUCKET/deploy-bundles/$TAG-${{ matrix.env }}.tgz"
 
       # prod ships OTLP spans to the shared host's Tempo over the private VPC
       # IP. cloud-init seeds /opt/options/prod/otel-endpoint on first boot
@@ -333,104 +338,61 @@ jobs:
       - name: Resolve prod OTLP endpoint
         id: otel
         if: matrix.env == 'prod'
+        env:
+          STAGING_PRIVATE_IP: ${{ vars.STAGING_PRIVATE_IP }}
         run: |
-          ip=$(aws ec2 describe-instances \
-            --region "$AWS_REGION" \
-            --filters "Name=tag:Name,Values=options-host" \
-                      "Name=instance-state-name,Values=running" \
-            --query 'Reservations[].Instances[].PrivateIpAddress' --output text)
-          if [ -z "$ip" ] || [ "$ip" = "None" ] || [ "$(printf '%s' "$ip" | wc -w)" -ne 1 ]; then
-            echo "::error::Could not resolve a single options-host private IP (got: '$ip')"
-            exit 1
+          # prod ships spans to the shared host's Tempo over the DO VPC.
+          # The shared host's private IP is a repo var (stable for the
+          # droplet's lifetime; update the var if it is ever replaced).
+          if [ -z "$STAGING_PRIVATE_IP" ]; then
+            echo "::error::STAGING_PRIVATE_IP var not set"; exit 1
           fi
-          echo "endpoint=http://$ip:4318" >> "$GITHUB_OUTPUT"
-          echo "prod OTLP endpoint → http://$ip:4318"
+          echo "endpoint=http://$STAGING_PRIVATE_IP:4318" >> "$GITHUB_OUTPUT"
+          echo "prod OTLP endpoint → http://$STAGING_PRIVATE_IP:4318"
 
-      - name: SSM deploy
+      - name: SSH deploy
         env:
           TAG: ${{ needs.affected.outputs.tag }}
           SERVICES: ${{ needs.affected.outputs.services }}
           DEPLOY_ENV: ${{ matrix.env }}
           OTEL_ENDPOINT_FILE: ${{ steps.otel.outputs.endpoint }}
+          HOST_ADDR: ${{ steps.host.outputs.addr }}
         run: |
-          # Build the SSM parameter file with jq so JSON escaping is
-          # mechanical (the SERVICES variable contains double quotes).
-          # Note: AWS-RunShellScript runs under /bin/sh (dash on Ubuntu),
-          # which doesn't support `set -o pipefail` — keep this `set -eu`.
-          # deploy.sh itself runs under bash and uses pipefail there.
-          jq -nc \
-            --arg region "$AWS_REGION" \
-            --arg ecr "$ECR_REGISTRY" \
-            --arg tag "$TAG" \
-            --arg dbhost "$RDS_HOST" \
-            --arg bucket "$SSM_OUTPUT_BUCKET" \
-            --arg env "$DEPLOY_ENV" \
-            --arg otel "$OTEL_ENDPOINT_FILE" \
-            --arg services "$SERVICES" '
-            {
-              commands: [
-                "set -eu",
-                "export AWS_REGION=\($region)",
-                "export ECR=\($ecr)",
-                "export IMAGE_TAG=\($tag)",
-                "export DB_HOST=\($dbhost)",
-                "aws s3 cp s3://\($bucket)/deploy-bundles/\($tag)-\($env).tgz /tmp/bundle.tgz",
-                "mkdir -p /opt/options/\($env)",
-                "tar xzf /tmp/bundle.tgz -C /opt/options/\($env)",
-                "chmod +x /opt/options/\($env)/deploy.sh /opt/options/\($env)/render-secrets.sh",
-                "rm /tmp/bundle.tgz",
-                "cd /opt/options/\($env)",
-                # deploy.sh reads otel-endpoint into OTEL_ENDPOINT; written
-                # only when the resolve step set one (prod). Empty → dropped.
-                (if $otel != "" then "echo \($otel) > /opt/options/\($env)/otel-endpoint" else empty end),
-                "./deploy.sh \($env) " + ($services|@sh)
-              ]
-            }' > /tmp/ssm-params.json
+          # A full-fleet roll is the worst case: ~20 fresh-layer pulls plus
+          # SERIAL health checks (18×60s + the two bots at up to ~5 min
+          # each) legitimately runs past 10 minutes. ServerAliveInterval
+          # keeps the connection open through the quiet stretches; the job
+          # itself is the timeout ceiling.
+          SSH="ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=10 root@$HOST_ADDR"
 
-          CMD_ID=$(aws ssm send-command \
-            --instance-ids "$EC2_INSTANCE_ID" \
-            --document-name AWS-RunShellScript \
-            --comment "deploy $DEPLOY_ENV @ $TAG" \
-            --parameters file:///tmp/ssm-params.json \
-            --output-s3-bucket-name "$SSM_OUTPUT_BUCKET" \
-            --query Command.CommandId --output text)
-          echo "ssm command: $CMD_ID"
+          scp /tmp/bundle.tgz "root@$HOST_ADDR:/tmp/bundle.tgz"
 
-          # Poll for a terminal state. The built-in `aws ssm wait
-          # command-executed` caps at ~100s (20 attempts × 5s), which is
-          # shorter than image pulls + health checks — it would report a
-          # false failure while the command is still InProgress. A full-fleet
-          # roll is the worst case: ~20 fresh-layer pulls plus SERIAL health
-          # checks (18×60s + the two bots at up to ~5 min each) legitimately
-          # runs past 10 minutes — which failed the workflow while the host
-          # deploy went on to succeed (run 32579304981, 2026-08-22). Budget
-          # 35 minutes: above that worst case, below the SSM command's own
-          # ~1h execution ceiling so a genuine wedge still fails here first.
-          STATUS=Pending
-          for _ in $(seq 1 420); do
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "$CMD_ID" \
-              --instance-id "$EC2_INSTANCE_ID" \
-              --query Status --output text 2>/dev/null || echo Pending)
-            case "$STATUS" in
-              Success|Failed|Cancelled|TimedOut) break ;;
-            esac
-            sleep 5
-          done
-          echo "ssm status: $STATUS"
+          # SERVICES is JSON (quotes + brackets) — base64 it so it survives
+          # the local-shell → ssh → remote-shell quoting layers intact.
+          SERVICES_B64=$(printf '%s' "$SERVICES" | base64 -w0)
 
-          aws ssm get-command-invocation \
-            --command-id "$CMD_ID" \
-            --instance-id "$EC2_INSTANCE_ID" \
-            --query StandardOutputContent --output text
-
-          if [ "$STATUS" != "Success" ]; then
-            aws ssm get-command-invocation \
-              --command-id "$CMD_ID" \
-              --instance-id "$EC2_INSTANCE_ID" \
-              --query StandardErrorContent --output text
-            exit 1
+          $SSH env \
+            "ECR=$ECR_REGISTRY" \
+            "IMAGE_TAG=$TAG" \
+            "DB_HOST=$DB_HOST" \
+            "DEPLOY_ENV=$DEPLOY_ENV" \
+            "OTEL_ENDPOINT_FILE=$OTEL_ENDPOINT_FILE" \
+            "SERVICES_B64=$SERVICES_B64" \
+            bash -s <<'REMOTE'
+          set -euo pipefail
+          SERVICES=$(printf '%s' "$SERVICES_B64" | base64 -d)
+          mkdir -p "/opt/options/$DEPLOY_ENV"
+          tar xzf /tmp/bundle.tgz -C "/opt/options/$DEPLOY_ENV"
+          chmod +x "/opt/options/$DEPLOY_ENV/deploy.sh" "/opt/options/$DEPLOY_ENV/render-secrets.sh"
+          rm /tmp/bundle.tgz
+          cd "/opt/options/$DEPLOY_ENV"
+          # deploy.sh reads otel-endpoint into OTEL_ENDPOINT; written only
+          # when the resolve step set one (prod). Empty → not written.
+          if [ -n "$OTEL_ENDPOINT_FILE" ]; then
+            echo "$OTEL_ENDPOINT_FILE" > "/opt/options/$DEPLOY_ENV/otel-endpoint"
           fi
+          ./deploy.sh "$DEPLOY_ENV" "$SERVICES"
+          REMOTE
 
       - name: Advance deploy marker
         # Record the commit just deployed so the NEXT manual dispatch diffs
