@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::engine::RunOutput;
+use crate::engine::{RunOutput, VenueLabels};
 use crate::gaps::{GapSpan, InvalidatedSpan};
 use crate::latency::LatencyConfig;
 use crate::scenario::Scenario;
@@ -94,6 +94,23 @@ pub struct Summary {
     pub timer_counts: BTreeMap<String, u64>,
     pub hedge_rejects: u64,
     pub pending_outcomes: u64,
+    /// Doc 08 §7.2/§7.3 (PR L): venue lifecycle and margin lines.
+    pub venue_labels: VenueLabels,
+    pub maker_fees: f64,
+    pub taker_fills: u64,
+    pub passive_fills: u64,
+    pub partial_fills: u64,
+    pub cancels: u64,
+    pub liquidations: u64,
+    pub liquidation_loss: f64,
+    pub min_margin_ratio: Option<f64>,
+    pub closest_margin_headroom: Option<f64>,
+    pub margin_topups: u64,
+    pub topup_total: f64,
+    pub topup_rejects: u64,
+    pub topup_declines: u64,
+    pub hedge_declines_margin: u64,
+    pub first_liquidation_ms: Option<i64>,
     /// Event-ordering fingerprint (doc 08 §6.2).
     pub trace_hash: String,
     pub determinism_hash: String,
@@ -175,6 +192,22 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         timer_counts: out.timer_counts.clone(),
         hedge_rejects: l.hedge_rejects,
         pending_outcomes: out.pending_outcomes,
+        venue_labels: out.venue_labels.clone(),
+        maker_fees: l.maker_fees,
+        taker_fills: l.taker_fills,
+        passive_fills: l.passive_fills,
+        partial_fills: l.partial_fills,
+        cancels: l.cancels,
+        liquidations: l.liquidations,
+        liquidation_loss: l.liquidation_loss,
+        min_margin_ratio: out.min_margin_ratio,
+        closest_margin_headroom: out.closest_margin_headroom,
+        margin_topups: l.margin_topups,
+        topup_total: l.topup_total,
+        topup_rejects: l.topup_rejects,
+        topup_declines: l.topup_declines,
+        hedge_declines_margin: l.hedge_declines_margin,
+        first_liquidation_ms: out.first_liquidation_ms,
         trace_hash: out.trace_hash.clone(),
         determinism_hash: String::new(),
     };

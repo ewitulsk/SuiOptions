@@ -28,6 +28,7 @@ pub mod flow_gen;
 pub mod gaps;
 pub mod latency;
 pub mod ledger;
+pub mod margin;
 pub mod merge;
 pub mod model;
 pub mod oracle;

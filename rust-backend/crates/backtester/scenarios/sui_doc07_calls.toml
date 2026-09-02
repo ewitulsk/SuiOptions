@@ -51,3 +51,22 @@ seed = 1
 required_feeds = ["spot"]
 max_gap_ms = 300_000
 policy = "invalidate"
+
+# Doc 08 §7.2/§7.3 (PR L): execution assumption and Bluefin SUI-PERP
+# margin rules (contract specs verified 2026-09-02, see margin.rs).
+# `taker_only` is the calibrated-free default; passive assumptions are
+# sensitivity only in the proxy-BBO era.
+[venue]
+execution_assumption = "taker_only"
+maker_fee_bps = 1.0
+contract_size = 1.0
+min_order_units = 1.0
+order_timeout_secs = 60
+
+[margin]
+imr = 0.045
+mmr = 0.025
+leverage = 10.0
+topup_trigger_mr = 0.035
+topup_transfer_ms = 30_000
+max_topup_24h_pct_nav = 0.10
