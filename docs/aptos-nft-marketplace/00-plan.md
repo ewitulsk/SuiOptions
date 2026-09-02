@@ -42,8 +42,14 @@ indexer); anything not verified is marked **unverified**.
 7. **Repo layout.** `aptos/contracts` (Aptos Move, Aptos CLI toolchain, own
    CI) and `aptos/go-backend` (separate Go module; copies the four platform
    packages it needs from `go-backend/internal/platform`). New
-   `aptos-frontend/` Vite app. Registered in the three deploy lists like any
-   other service.
+   `aptos-frontend/` Vite app.
+8. **Own DigitalOcean droplet, mainnet from day one.** The marketplace runs
+   on a third droplet in `infra-do` (`s-2vcpu-4gb`, the same size as the two
+   existing hosts), with Postgres in the compose stack and images on DO
+   Spaces. There is no testnet or staging environment: contracts are
+   unit-tested and exercised on a local testnet, then deployed to mainnet,
+   and every gate below is a mainnet check. Marginal cost is about $29 a
+   month (§7.1).
 
 ## 1. What is on chain (condensed)
 
@@ -340,98 +346,170 @@ sweep with pre-flight breakdown, list / offer modals with quote-token
 picker, admin (behind JWT). WS-driven live updates on collection and item
 pages.
 
-## 7. Repo and deploy wiring
+## 7. Deployment: one droplet, mainnet only
 
-- `.github/workflows/aptos-move-ci.yml`: matrix over `aptos/contracts/*`,
-  install pinned Aptos CLI, `aptos move test --dev`; paths `aptos/contracts/**`.
+### 7.1 Cost
+
+DigitalOcean list prices (pricing page, 2026-09-02):
+
+| Item | Plan | Monthly |
+|---|---|---|
+| Droplet | Basic `s-2vcpu-4gb`: 2 vCPU, 4 GiB, 80 GiB SSD, 4 TiB transfer | $24.00 |
+| Spaces (images, metadata cache) | 250 GiB base subscription, $0.02/GiB beyond | $5.00 |
+| Droplet backups (optional) | weekly, 20% of droplet price | $4.80 |
+| **Marginal cost** | | **$29.00** (**$33.80** with backups) |
+
+Smaller plans considered and rejected: `s-1vcpu-2gb` at $12 cannot hold
+Postgres plus the gRPC stream decoder in RAM; `s-2vcpu-2gb` at $18 works
+for the indexer alone but not once the image pipeline and API share the
+host. Managed Postgres (from $15) is not needed at this volume; revisit if
+the database outgrows the 80 GiB disk. Note `variables.tf` records that
+nyc3 had no capacity above 4 GiB on 2026-09-01; the same constraint may
+apply, and the droplet resizes in place if it does.
+
+### 7.2 Host
+
+Add a third droplet to `rust-backend/infra-do/main.tf`, copying the
+`data_room` block: name `options-nft-host-do`, `var.nft_droplet_size`
+defaulting to `s-2vcpu-4gb`, `ubuntu-22-04-x64`, same VPC, same SSH keys,
+`user_data` from `deployment/do/host-bootstrap.sh` with `ROLE=nft`. Its
+firewall opens 22, 80 and 443 to the world and 9100 (node-exporter) and the
+service `/metrics` ports to the VPC range so the central Prometheus, Loki
+and Grafana on `options-host-do` scrape and alert on it; nothing else. Add
+`ROLE=nft` to the bootstrap script: nginx plus certbot for
+`nft.<domain>` (edge nginx as in `deployment/do/edge-nginx.conf`, routing
+`/api/*` and `/ws` to the API container and `/` to the static frontend
+build), and `/opt/nft/{secrets,data}`. DNS: an A record for the droplet's
+reserved IP. Add the droplet to `digitalocean_project_resources`.
+
+Frontend hosting: the Vite build is served by the host nginx from the
+droplet (one fewer moving part than a Vercel project; switch to Vercel later
+if CDN latency matters).
+
+### 7.3 Stack on the host
+
+`aptos/deployment/docker-compose.yml`, one environment:
+
+```
+postgres:16        volume /opt/nft/data/pg, only on the compose network
+nft-indexer        APTOS_STREAM_API_KEY, APTOS_INDEXER_API_KEY, DB_*; /metrics on 9041
+nft-api            SPACES_*, JWT secret, DB_*; public 9040, admin 9042 (compose-internal only)
+image-worker       part of nft-api at P0 (goroutine pool), own container later if needed
+```
+
+Secrets: `aptos/deployment/secrets.enc.yaml` (SOPS + age, decrypted on host
+like the existing stacks). Postgres backups: nightly `pg_dump` to Spaces
+from a cron container; the marketplace tables are rebuildable from the
+stream, so the dump exists to skip a multi-hour backfill, not for
+correctness.
+
+### 7.4 Build and deploy
+
 - `.github/workflows/aptos-go-ci.yml`: copy of `go-ci.yml` with
-  `working-directory: aptos/go-backend`, gofmt gate, vet, tests against the
-  `postgres:16` service; paths `aptos/go-backend/**`.
-- Dockerfiles `aptos/go-backend/Dockerfile.nft-indexer`, `Dockerfile.nft-api`
-  (multi-stage `golang:1.24-bookworm` to `debian:bookworm-slim`, `APP_ENV`
-  entrypoint) like `go-backend/Dockerfile.event-ingestor`.
-- Register `nft-indexer` and `nft-api` in the three lists a test keeps in
-  sync: `rust-backend/deployment/affected.py` (`ALL_SERVICES` and the Go
-  glob map, `"nft-indexer": ["aptos/go-backend/**"]`),
-  `rust-backend/deployment/ec2/deploy.sh` `ALL_SERVICES`, and
-  `rust-backend/deployment/bake.hcl` (targets with `context = "../aptos/go-backend"`
-  and the `--allow=fs.read` flag in `_deploy.yml`). Compose entries in
-  `docker-compose.{staging,prod}.yml`, nginx routes `/<env>/nft-api`,
-  Prometheus scrape targets, gatus `/health` checks, a Grafana alert row per
-  `alert_id`.
-- Secrets: `APTOS_STREAM_API_KEY`, `APTOS_INDEXER_API_KEY`, `NFT_DB_PASSWORD`,
-  S3/CloudFront credentials, in the SOPS file.
+  `working-directory: aptos/go-backend`; gofmt gate, vet, tests against the
+  `postgres:16` service. Paths `aptos/go-backend/**`.
+- `.github/workflows/aptos-move-ci.yml`: matrix over `aptos/contracts/*`,
+  pinned Aptos CLI, `aptos move test --dev`. Paths `aptos/contracts/**`.
+- `.github/workflows/deploy-nft.yml`: on push to `staging` touching
+  `aptos/**` (and on dispatch): build both images with `docker buildx bake -f
+  aptos/deployment/bake.hcl --push` to the same registry the other services
+  use, build the frontend, then SSH to `options-nft-host-do` with the
+  existing `DEPLOY_SSH_KEY`, sync compose file and secrets, `docker compose
+  pull && up -d`, copy the frontend build into the nginx root. The stack is
+  independent of `rust-backend/deployment/affected.py`, `ec2/deploy.sh` and
+  the Sui `bake.hcl`; nothing there changes.
+- Contracts: `.github/workflows/deploy-nft-contracts.yml` (dispatch only)
+  runs `aptos move deploy-object` / `upgrade-object` against **mainnet**
+  with a deployer key from secrets, writes the object addresses into
+  `aptos/deployments.json`, commits, and the API reads that file at boot.
+  Ownership moves to a `0x1::multisig_account` once the contract is stable
+  (§8, phase 3).
+- Monitoring: the central Prometheus on `options-host-do` gets scrape
+  targets for the new host over the VPC; gatus checks
+  `https://nft.<domain>/api/health` for the literal `ok`; Grafana alert
+  rows for `tx-failed-nft-canary` and for indexer lag above 120 s.
 - `.claude/CLAUDE.md` project rules: add `aptos-addresses.md` (canonical
   64-hex `0x` form at every boundary; `token_data_id` derivation per
-  standard) and extend `tx-alerting.md` with the two new ids.
-- Root `README.md` repository map gains an `aptos/` entry.
+  standard) and extend `tx-alerting.md` with `tx-failed-nft-api` and
+  `tx-failed-nft-canary`. Root `README.md` repository map gains an `aptos/`
+  entry.
 
-## 8. Phases and gates
+## 8. Phases and gates (mainnet throughout)
 
-Durations assume two engineers (one Move, one Go/frontend) and overlap where
-noted. Each gate is a check, not a feeling.
+Durations assume two engineers (one Move, one Go/frontend) and overlap
+where noted. Every gate is checked on mainnet against the production
+droplet; the only pre-mainnet testing is Move unit tests and a local testnet
+for the router adapters. Fees start at zero and are raised by a fee-schedule
+mutation once the shakeout is over, so early mistakes cost nothing but gas.
 
-**Phase 0: spikes (1 week).**
+**Phase 0: host and spikes (1 week).**
+- Terraform the droplet (§7.2), bootstrap, DNS, TLS, empty compose stack up
+  with Postgres, `deploy-nft.yml` green. Gate: `https://nft.<domain>/api/health`
+  returns `ok` from a deployed image.
 - Compile a one-function adapter against Wapal's downloaded bytecode
-  package. Gate: `aptos move compile` succeeds and a local-testnet call
-  through the adapter fills a listing on a locally published reference fork.
-  If it fails, switch tier 1 to per-transaction Move scripts and re-run the
-  same gate.
-- Stream hello-world: read 10k transactions from mainnet, print every Wapal
-  and Tradeport v2 marketplace event. Gate: the fixture versions from §4.2
-  decode to the expected event names.
-- Hosted indexer API key, measured rate limit, confirmation of the
-  aggregator endpoint's status. Gate: written down in this doc.
-- Confirm Rarible and Bluemove v2 live volume from the stream over 7 days.
-  Gate: adapter list for P0 fixed (drop venues with zero fills).
+  package and fill a listing through it on a local testnet running our
+  reference fork at Wapal's address. Gate: pass, or switch tier 1 to
+  per-transaction Move scripts and pass the same check.
+- Stream hello-world on the droplet: read 10k mainnet transactions, print
+  every Wapal and Tradeport v2 marketplace event. Gate: the fixture versions
+  in §4.2 decode to the expected event names.
+- Hosted indexer API key and measured rate limit; aggregator endpoint status
+  confirmed. Gate: written into this doc.
 
-**Phase 1: indexer (3 weeks, parallel with Phase 2).**
-- Stream client, cursor, batch loop, metrics, `slog`.
-- Mappers for Tradeport v1+v2, Wapal, Rarible, plus whichever Phase 0 kept;
-  fixture suite per venue.
-- Metadata cache, image pipeline, collection stats job, quote-token USD
-  prices.
-- Gate: backfill from the earliest Tradeport v2 transaction to tip;
-  `current_nft_marketplace_listings` for three verified collections matches
-  a hand-check on the explorer (listing count, floor, seller) within one
-  minute of tip; indexer lag under 30 s for 24 h on staging.
+**Phase 1: indexer on mainnet (3 weeks, parallel with phase 2).**
+- Stream client, cursor, batch loop, metrics, `slog`; mappers for Tradeport
+  v1+v2, Wapal, Rarible, Bluemove v2 and OKX (drop any venue the 7-day
+  stream shows has zero fills); fixture suite per venue.
+- Metadata cache, image pipeline to Spaces, collection stats job,
+  quote-token USD prices.
+- Gate: backfill from the earliest Tradeport v2 transaction to tip on the
+  droplet; `current_nft_marketplace_listings` for three verified collections
+  matches a hand-check on the explorer within one minute of tip; lag under
+  30 s for 24 h; disk growth measured and extrapolated to stay under 80 GiB
+  for a year.
 
-**Phase 2: marketplace contract (3 weeks, parallel with Phase 1).**
-- Fork, FA payment leg, quote allowlist, fee schedule extensions, events.
-- Unit tests for the invariants in §3.1; testnet object deployment;
-  `aptos/deployments.json`.
-- Gate: full list / offer / fill / cancel matrix passes on testnet in APT
-  and a testnet FA with dispatch hooks enabled; our-venue mapper indexes
-  those testnet fills correctly.
+**Phase 2: marketplace contract (3 weeks, parallel with phase 1).**
+- Fork, FA payment leg, quote allowlist, fee schedule extensions, events;
+  unit tests for the invariants in §3.1.
+- Deploy to mainnet as an object under the deployer key; fee schedule
+  initialised at 0 bps; allowlist seeded with APT, USDC, USDt.
+- Gate: from two ops wallets on mainnet, the full matrix runs against the
+  deployed contract with real but tiny amounts: list in APT and in USDC,
+  buy, cancel, token offer, collection offer with quantity 2, accept, expire;
+  royalties land on a creator address we control; our-venue mapper indexes
+  every one of those fills correctly on the droplet.
 
-**Phase 3: router (2 weeks, after Phase 0 and 2).**
+**Phase 3: router (2 weeks, after phases 0 and 2).**
 - Adapters for the kept venues, `buy_many`, fee, `RouterFill`; local-testnet
-  suite; mainnet deployment under multisig.
-- Gate: one canary buy per live venue on mainnet succeeds through the
-  router with the expected fee split, and the indexer attributes it
-  correctly without a duplicate sale row.
+  suite; mainnet deployment.
+- Gate: one canary buy per live venue on mainnet (cheapest listing on a
+  verified collection, ops wallet) succeeds through the router with the
+  expected fee split, and the indexer attributes it without a duplicate
+  sale row. Then transfer package ownership to the multisig.
 
-**Phase 4: API (2 weeks, overlaps Phase 3).**
-- Read endpoints, WS, payload builders (tier 0 first, then router), pre-flight
-  simulation and breakdown, escrowed-elsewhere endpoint, admin mux.
-- Gate: a scripted end-to-end run on staging (testnet chain, mainnet-read
-  indexer for foreign venues) lists, buys, offers and rescues; simulation
-  reports each stale-listing failure class by name.
+**Phase 4: API (2 weeks, overlaps phase 3).**
+- Read endpoints, WS, payload builders (tier 0 first, then router),
+  pre-flight simulation with named failure classes, escrowed-elsewhere
+  endpoint, admin mux.
+- Gate: a scripted end-to-end run against production lists, buys, offers
+  and rescues with the ops wallets; simulation reports sold, delisted,
+  repriced and insufficient-balance by name.
 
-**Phase 5: frontend (4 weeks, starts with Phase 4's read endpoints).**
-- Pages in §6, wallet adapter, cart, quote-token picker, rescue flow.
-- Gate: a new wallet can log in with Aptos Connect, buy a Wapal-listed and
-  a Tradeport-listed NFT in one sweep, list it in USDC on our venue, and a
-  second wallet buys it, all on staging; Lighthouse performance above 80
-  on collection pages with images served from the CDN.
+**Phase 5: frontend (4 weeks, starts with phase 4's read endpoints).**
+- Pages in §6, wallet adapter, cart, quote-token picker, rescue flow;
+  served from the droplet's nginx.
+- Gate: a fresh wallet logs in with Aptos Connect, buys a Wapal-listed and
+  a Tradeport-listed NFT in one sweep, lists one in USDC on our venue, and a
+  second wallet buys it, all on mainnet; Lighthouse performance above 80 on
+  collection pages with images from Spaces.
 
-**Phase 6: launch (2 weeks).**
-- Deploy wiring (§7), monitoring, alert rows, runbooks (indexer replay from
-  a version, fee schedule change via multisig, disable a quote token,
-  hide a collection), fee schedule initialised on mainnet, allowlist seeded.
-- Gate: 72 h on production with the indexer within 30 s of tip, zero
-  `tx-failed-*` alerts from the canary, and a successful Tradeport-escrow
-  rescue by an external user.
+**Phase 6: open the doors (1 week).**
+- Runbooks (indexer replay from a version, fee change via multisig, disable
+  a quote token, hide a collection, restore Postgres from the nightly dump),
+  daily canary buy scheduled, fee schedule raised to the launch rate,
+  announce.
+- Gate: 72 h with the indexer within 30 s of tip, zero `tx-failed-*`
+  alerts, and a Tradeport-escrow rescue completed by an external user.
 
 After launch, in order: instant-sell into foreign offers (router tier 2),
 best-effort sweeps, rarity, price charts, public API and points, own token
@@ -448,9 +526,12 @@ processor, auctions, launchpad.
 | Stale-listing failures on sweeps | Simulation immediately before signing; best-effort sweeps at P1 |
 | Spam collections and images | Admin hide/verify, heuristics, image proxy with size and type limits |
 | Tradeport's frontend or wallets keep listing on their contract | Fine: we index and route to it; the rescue flow moves listings to us over time |
+| No staging: a bad deploy hits production | Fees at zero during shakeout; every deploy is preceded by CI plus the fixture suite; compose rollback is `docker compose up` with the previous tag; the read side is rebuildable from the stream |
+| Single droplet fails or fills its disk | Nightly `pg_dump` to Spaces; Terraform recreates the host in minutes; disk growth is a phase 1 gate |
 
 ## Revision history
 
 - 2026-09-02: initial landscape, feature cut, and cross-venue design.
 - 2026-09-02: added quote-token allowlist decision and fee placement.
 - 2026-09-02: consolidated into a single implementation plan with phases and gates.
+- 2026-09-02: own DigitalOcean droplet, mainnet-only delivery, cost estimate.
