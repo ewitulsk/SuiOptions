@@ -57,6 +57,9 @@ pub struct Scenario {
     pub gaps: GapConfig,
     /// Bluefin isolated-margin rules (doc 08 §7.3).
     pub margin: MarginConfig,
+    /// Minutes between Greek-explanation steps (doc 08 §9.1); the
+    /// residual absorbs whatever the step misses.
+    pub attribution_interval_min: i64,
 }
 
 impl Default for Scenario {
@@ -92,6 +95,7 @@ impl Default for Scenario {
             latency: LatencyConfig::default(),
             gaps: GapConfig::default(),
             margin: MarginConfig::default(),
+            attribution_interval_min: 60,
         }
     }
 }
@@ -701,6 +705,27 @@ impl Default for VenueConfig {
 }
 
 impl Scenario {
+    /// Apply dotted-path overrides (`estimator.q_bid = 0.35`) through the
+    /// TOML form, so sweeps and walk-forward candidates address any
+    /// scenario field by the name the file uses.
+    pub fn with_overrides(&self, overrides: &[(String, toml::Value)]) -> anyhow::Result<Scenario> {
+        let mut v = toml::Value::try_from(self)?;
+        for (path, val) in overrides {
+            let parts: Vec<&str> = path.split('.').collect();
+            let (last, sections) = parts.split_last().ok_or_else(|| anyhow::anyhow!("empty override path"))?;
+            let mut table = v.as_table_mut().ok_or_else(|| anyhow::anyhow!("scenario is not a table"))?;
+            for (i, part) in sections.iter().enumerate() {
+                table = table
+                    .get_mut(*part)
+                    .and_then(|t| t.as_table_mut())
+                    .ok_or_else(|| anyhow::anyhow!("unknown scenario section {}", parts[..=i].join(".")))?;
+            }
+            anyhow::ensure!(table.contains_key(*last), "unknown scenario field {path}");
+            table.insert(last.to_string(), val.clone());
+        }
+        Ok(v.try_into()?)
+    }
+
     pub fn load(path: &std::path::Path) -> anyhow::Result<Scenario> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
@@ -730,5 +755,21 @@ mod tests {
             }
         }
         assert!(n >= 4, "{n} scenarios");
+    }
+
+    #[test]
+    fn overrides_address_nested_fields_and_reject_unknown_ones() {
+        let s = Scenario::default();
+        let o = s
+            .with_overrides(&[
+                ("estimator.q_bid".into(), toml::Value::Float(0.2)),
+                ("hedge.band_pct_nav".into(), toml::Value::Float(5.0)),
+                ("margin.enabled".into(), toml::Value::Boolean(false)),
+            ])
+            .unwrap();
+        assert_eq!(o.estimator.q_bid, 0.2);
+        assert_eq!(o.hedge.band_pct_nav, 5.0);
+        assert!(!o.margin.enabled);
+        assert!(s.with_overrides(&[("estimator.nope".into(), toml::Value::Float(1.0))]).is_err());
     }
 }

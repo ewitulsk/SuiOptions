@@ -1,20 +1,27 @@
-//! `desk-backtester run --scenario s.toml --store file:///lake --out dir`
-//! `desk-backtester sweep --scenario s.toml --store … --out dir --bands 1.5,5,20 --risk-premiums 0,0.05 --max-leans 0,0.8`
+//! `desk-backtester run --scenario s.toml --store file:///lake --out dir [--set k=v …]`
+//! `desk-backtester sweep --scenario s.toml --store … --out dir --bands 1.5,5,20 --risk-premiums 0,0.05 --max-leans 0,0.8 [--set k=v …]`
 //! `desk-backtester capacity --scenario s.toml --store … --out dir --volumes 10000,25000,… --mixes call_only,put_only,balanced,adversarial --seeds 8`
 //! `desk-backtester market --scenario s.toml --store … --out dir --spreads 0.03,0.05,0.08 --seeds 8`
+//! `desk-backtester stress --scenario s.toml --store … --out dir --at 2025-10-10`
+//! `desk-backtester walkforward --config wf.toml --store … --out dir [--open-holdout]`
+//! `desk-backtester grid --config grid.toml --store … --out dir`
+//! `desk-backtester report --dir study_root --out dir`   (results.json + report.md)
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use desk_backtester::{data, engine, report, scenario::Scenario, solver};
+use desk_backtester::{data, engine, grid, report, results, scenario::Scenario, solver, stress, study, walkforward, MS_PER_DAY};
 
 #[derive(Parser)]
 struct Cli {
     /// `s3://bucket` (env creds/endpoint) or `file:///path` lake root.
     #[arg(long, env = "STORE_URL", global = true, default_value = "")]
     store: String,
+    /// Parallel runs for the multi-run commands (default: all cores).
+    #[arg(long, global = true, default_value_t = 0)]
+    threads: usize,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -26,6 +33,9 @@ enum Cmd {
         scenario: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        /// Scenario overrides `section.field=value` (TOML value syntax).
+        #[arg(long = "set", value_name = "PATH=VALUE")]
+        set: Vec<String>,
     },
     Sweep {
         #[arg(long)]
@@ -40,6 +50,8 @@ enum Cmd {
         max_leans: Vec<f64>,
         #[arg(long, value_delimiter = ',')]
         sample_intervals: Vec<i64>,
+        #[arg(long = "set", value_name = "PATH=VALUE")]
+        set: Vec<String>,
     },
     /// Capacity mode (doc 08 §8.1/§8.6): minimum starting NAV per target
     /// accepted Earn notional per day and mix; writes `frontier.csv`.
@@ -60,6 +72,8 @@ enum Cmd {
         nav_lo: f64,
         #[arg(long, default_value_t = 1.0e9)]
         nav_hi: f64,
+        #[arg(long = "set", value_name = "PATH=VALUE")]
+        set: Vec<String>,
     },
     /// Market mode (doc 08 §8.1): offered flow and acceptance against the
     /// actual bid at the scenario NAV, over a sweep of base spreads.
@@ -74,32 +88,99 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         seeds: u64,
     },
+    /// Synthetic stress suite (doc 08 §9.5) around `--at`, judged against
+    /// the §0.4 limits; writes `stress.json` / `stress.csv`.
+    Stress {
+        #[arg(long)]
+        scenario: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Stress instant, UTC date inside the window.
+        #[arg(long)]
+        at: String,
+        #[arg(long = "set", value_name = "PATH=VALUE")]
+        set: Vec<String>,
+    },
+    /// Walk-forward protocol (doc 08 §9.2): select on training folds,
+    /// report validation, open the holdout only with the flag.
+    Walkforward {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = false)]
+        open_holdout: bool,
+    },
+    /// Declared-grid sweep (doc 08 §9.3/§9.4) with common random numbers;
+    /// writes the break-even surface.
+    Grid {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Assemble `results.json` and `report.md` from a study directory.
+    Report {
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+type Loaded = (Vec<data::Bar>, Vec<data::FundingRow>, Vec<(i64, f64)>);
+type SweepJob = (Scenario, engine::RunOutput, (f64, f64, f64, i64));
+
+fn parse_overrides(set: &[String]) -> Result<Vec<(String, toml::Value)>> {
+    set.iter()
+        .map(|kv| {
+            let (k, v) = kv.split_once('=').ok_or_else(|| anyhow::anyhow!("--set expects PATH=VALUE, got {kv}"))?;
+            let parsed: toml::Value = match toml::from_str::<toml::Table>(&format!("v = {v}")) {
+                Ok(t) => t["v"].clone(),
+                Err(_) => toml::Value::String(v.to_string()),
+            };
+            Ok((k.to_string(), parsed))
+        })
+        .collect()
+}
+
+fn load_scenario(path: &Path, set: &[String]) -> Result<Scenario> {
+    let s = Scenario::load(path)?;
+    let o = parse_overrides(set)?;
+    if o.is_empty() { Ok(s) } else { s.with_overrides(&o) }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    anyhow::ensure!(!cli.store.is_empty(), "--store or STORE_URL required");
-    let store = data::open_store(&cli.store)?;
+    let threads = if cli.threads == 0 { study::default_threads() } else { cli.threads };
+    if !matches!(cli.cmd, Cmd::Report { .. }) {
+        anyhow::ensure!(!cli.store.is_empty(), "--store or STORE_URL required");
+    }
     match cli.cmd {
-        Cmd::Run { scenario, out } => {
-            let s = Scenario::load(&scenario)?;
+        Cmd::Run { scenario, out, set } => {
+            let store = data::open_store(&cli.store)?;
+            let s = load_scenario(&scenario, &set)?;
             // Streamed: one parquet object and one Arrow batch per source
             // in memory (doc 08 §6.5); sweeps and the solver load once.
             let o = engine::run_sources(&s, lake_sources(&store, &s)?)?;
             let summary = report::summarize(&s, &o);
             report::write_all(&out, &s, &o, &summary)?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
+            if let Some(a) = desk_backtester::attribution::report(&s, &o) {
+                eprintln!("attribution: {}", serde_json::to_string_pretty(&a.cumulative)?);
+            }
         }
-        Cmd::Sweep { scenario, out, bands, risk_premiums, max_leans, sample_intervals } => {
-            let base = Scenario::load(&scenario)?;
+        Cmd::Sweep { scenario, out, bands, risk_premiums, max_leans, sample_intervals, set } => {
+            let store = data::open_store(&cli.store)?;
+            let base = load_scenario(&scenario, &set)?;
             let (bars, funding, index) = load(&store, &base).await?;
             let bands = if bands.is_empty() { vec![base.hedge.band_pct_nav] } else { bands };
             let rps = if risk_premiums.is_empty() { vec![base.estimator.risk_premium] } else { risk_premiums };
             let leans = if max_leans.is_empty() { vec![base.estimator.max_lean] } else { max_leans };
             let ivs = if sample_intervals.is_empty() { vec![base.estimator.sample_interval_s] } else { sample_intervals };
             std::fs::create_dir_all(&out)?;
-            let mut csv = String::from("band_pct_nav,risk_premium,max_lean,sample_interval_s,fills,turns,coverage,nav_end,desk_gross_return,depositor_net_return_annualized,max_drawdown,hedge_turnover_nav_per_30d,hedge_fees,hedge_slippage,funding_paid,premium_paid,option_payoff,hedge_realized,mean_sigma_paid,mean_sigma_realized,mean_vol_bias,vol_pnl_proxy_total,hash\n");
+            let mut jobs = Vec::new();
             for &b in &bands {
                 for &rp in &rps {
                     for &ml in &leans {
@@ -111,26 +192,42 @@ async fn main() -> Result<()> {
                             s.estimator.max_lean = ml;
                             s.estimator.sample_interval_s = iv;
                             s.name = format!("{}-b{b}-rp{rp}-ml{ml}-iv{iv}", base.name);
-                            let o = engine::run(&s, &bars, &funding, &index)?;
-                            let m = report::summarize(&s, &o);
-                            report::write_all(&out.join(&s.name), &s, &o, &m)?;
-                            csv.push_str(&format!(
-                                "{b},{rp},{ml},{iv},{},{},{:.4},{:.2},{:.5},{:.5},{:.4},{:.3},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{:.2},{}\n",
-                                m.fills, m.turns, m.coverage, m.nav_end, m.desk_gross_return, m.depositor_net_return_annualized,
-                                m.max_drawdown, m.hedge_turnover_nav_per_30d, m.hedge_fees, m.hedge_slippage, m.funding_paid,
-                                m.premium_paid, m.option_payoff, m.hedge_realized, m.mean_sigma_paid, m.mean_sigma_realized,
-                                m.mean_vol_bias, m.vol_pnl_proxy_total, m.determinism_hash
-                            ));
-                            eprintln!("{}: nav_end {:.0} turnover {:.2}×/30d bias {:+.4}", s.name, m.nav_end, m.hedge_turnover_nav_per_30d, m.mean_vol_bias);
+                            jobs.push((s, b, rp, ml, iv));
                         }
                     }
                 }
             }
+            let outs = study::par_map(jobs, threads, |(s, b, rp, ml, iv)| -> Result<SweepJob> {
+                let o = engine::run(&s, &bars, &funding, &index)?;
+                Ok((s, o, (b, rp, ml, iv)))
+            });
+            let mut csv = String::from("band_pct_nav,risk_premium,max_lean,sample_interval_s,fills,turns,coverage,nav_end,desk_gross_return,depositor_net_return_annualized,max_drawdown,hedge_turnover_nav_per_30d,hedge_fees,hedge_slippage,funding_paid,premium_paid,option_payoff,hedge_realized,mean_sigma_paid,mean_sigma_realized,mean_vol_bias,vol_pnl_proxy_total,liquidations,bankrupt,hash\n");
+            let mut metrics = Vec::new();
+            for r in outs {
+                let (s, o, (b, rp, ml, iv)) = r?;
+                let m = report::summarize(&s, &o);
+                report::write_all(&out.join(&s.name), &s, &o, &m)?;
+                let mut metric = study::Metric::from_run(&s, &o);
+                metric.labels.push(format!("band_pct_nav={b}"));
+                metric.labels.push(format!("risk_premium={rp}"));
+                metric.labels.push(format!("max_lean={ml}"));
+                metrics.push(metric);
+                csv.push_str(&format!(
+                    "{b},{rp},{ml},{iv},{},{},{:.4},{:.2},{:.5},{:.5},{:.4},{:.3},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.4},{:.4},{:.4},{:.2},{},{},{}\n",
+                    m.fills, m.turns, m.coverage, m.nav_end, m.desk_gross_return, m.depositor_net_return_annualized,
+                    m.max_drawdown, m.hedge_turnover_nav_per_30d, m.hedge_fees, m.hedge_slippage, m.funding_paid,
+                    m.premium_paid, m.option_payoff, m.hedge_realized, m.mean_sigma_paid, m.mean_sigma_realized,
+                    m.mean_vol_bias, m.vol_pnl_proxy_total, m.liquidations, m.bankrupt_ms.is_some(), m.determinism_hash
+                ));
+                eprintln!("{}: nav_end {:.0} turnover {:.2}×/30d bias {:+.4} liq {}", s.name, m.nav_end, m.hedge_turnover_nav_per_30d, m.mean_vol_bias, m.liquidations);
+            }
             std::fs::write(out.join("sweep.csv"), &csv)?;
+            std::fs::write(out.join("sweep.json"), serde_json::to_string_pretty(&metrics)?)?;
             print!("{csv}");
         }
-        Cmd::Capacity { scenario, out, volumes, mixes, seeds, nav_lo, nav_hi } => {
-            let base = Scenario::load(&scenario)?;
+        Cmd::Capacity { scenario, out, volumes, mixes, seeds, nav_lo, nav_hi, set } => {
+            let store = data::open_store(&cli.store)?;
+            let base = load_scenario(&scenario, &set)?;
             let (bars, funding, index) = load(&store, &base).await?;
             let data = solver::Data { bars: &bars, funding: &funding, vol_index: &index };
             let volumes = if volumes.is_empty() { solver::default_volumes() } else { volumes };
@@ -145,6 +242,7 @@ async fn main() -> Result<()> {
             print!("{}", solver::capacity_frontier_csv(&results));
         }
         Cmd::Market { scenario, out, spreads, seeds } => {
+            let store = data::open_store(&cli.store)?;
             let base = Scenario::load(&scenario)?;
             let (bars, funding, index) = load(&store, &base).await?;
             let data = solver::Data { bars: &bars, funding: &funding, vol_index: &index };
@@ -153,17 +251,73 @@ async fn main() -> Result<()> {
             let results = solver::market_sweep(&base, &data, &spreads, &seeds, Some(&out))?;
             print!("{}", solver::market_frontier_csv(&results));
         }
+        Cmd::Stress { scenario, out, at, set } => {
+            let store = data::open_store(&cli.store)?;
+            let base = load_scenario(&scenario, &set)?;
+            let (bars, funding, index) = load(&store, &base).await?;
+            let at_ms = data::date_start_ms(&at)?;
+            anyhow::ensure!(at >= base.from && at <= base.to, "--at {at} outside {}..{}", base.from, base.to);
+            // The outage case straddles the first expiry after `at`.
+            let probe = engine::run(&base, &bars, &funding, &index)?;
+            let expiry = probe.settled.iter().map(|o| o.expiry_ms).filter(|e| *e > at_ms).min();
+            eprintln!("stress instant {at} ({at_ms}); straddled expiry {expiry:?}");
+            let cases = stress::suite(&base, &bars, &funding, at_ms, expiry)?;
+            let rs = stress::run_suite(cases, &index, Some(&out), threads)?;
+            print!("{}", stress::csv(&rs));
+        }
+        Cmd::Walkforward { config, out, open_holdout } => {
+            let store = data::open_store(&cli.store)?;
+            let cfg = walkforward::WalkForwardConfig::load(&config)?;
+            let base = Scenario::load(&config.parent().unwrap_or(Path::new(".")).join(&cfg.scenario))?;
+            // Load the whole span once; each fold sees `[data_from, to]`.
+            let first = cfg.calibration_from.clone();
+            let last = cfg.holdout.as_ref().map(|h| h[1].clone()).or_else(|| cfg.validation.last().map(|v| v[1].clone())).expect("validated");
+            let mut span = base.clone();
+            span.from = first;
+            span.to = last;
+            let (bars, funding, index) = load_span(&store, &span).await?;
+            let slice = |from: &str, to: &str| -> Result<Loaded> {
+                let a = data::date_start_ms(from)?;
+                let b = data::date_start_ms(to)? + MS_PER_DAY;
+                Ok((
+                    bars.iter().filter(|x| x.ts_ms >= a && x.ts_ms < b).copied().collect(),
+                    funding.iter().filter(|x| x.ts_ms >= a && x.ts_ms < b).copied().collect(),
+                    index.iter().filter(|x| x.0 >= a && x.0 < b).copied().collect(),
+                ))
+            };
+            let run_fn = |s: &Scenario, f: &walkforward::Fold| -> Result<study::Metric> {
+                let (b, fu, ix) = slice(&f.data_from, &f.to)?;
+                let o = engine::run(s, &b, &fu, &ix)?;
+                let m = report::summarize(s, &o);
+                report::write_all(&out.join("runs").join(&s.name), s, &o, &m)?;
+                Ok(study::Metric::from_run(s, &o))
+            };
+            let manifest = walkforward::run(&cfg, &base, open_holdout, threads, &run_fn)?;
+            walkforward::write(&out, &manifest)?;
+            println!("{}", serde_json::to_string_pretty(&manifest.scores)?);
+            println!("selected: {} (ranked on {:?}); holdout opened: {}", manifest.selection.candidate, manifest.ranked_on, manifest.holdout_opened);
+        }
+        Cmd::Grid { config, out } => {
+            let store = data::open_store(&cli.store)?;
+            let cfg = grid::GridConfig::load(&config)?;
+            let base = Scenario::load(&config.parent().unwrap_or(Path::new(".")).join(&cfg.scenario))?;
+            let (bars, funding, index) = load(&store, &base).await?;
+            let r = grid::run(&cfg, &base, &bars, &funding, &index, threads, Some(&out))?;
+            print!("{}", grid::csv(&r));
+        }
+        Cmd::Report { dir, out } => {
+            let r = results::write(&dir, &out)?;
+            for v in &r.validated {
+                println!("{:>2}. {:<18} {}", v.item, v.status, v.text);
+            }
+        }
     }
     Ok(())
 }
 
 /// Warm the estimator: the long window (or HAR calibration) before `from`.
 fn warm_from(s: &Scenario) -> Result<String> {
-    let mut warm_days = (s.estimator.long_window_hours / 24.0).ceil() as i64 + 1;
-    if s.estimator.kind == "har" {
-        warm_days = warm_days.max(s.estimator.calibration_days as i64 + 2);
-    }
-    Ok((chrono::NaiveDate::parse_from_str(&s.from, "%Y-%m-%d")? - chrono::Duration::days(warm_days)).format("%Y-%m-%d").to_string())
+    Ok((chrono::NaiveDate::parse_from_str(&s.from, "%Y-%m-%d")? - chrono::Duration::days(walkforward::warm_days(s))).format("%Y-%m-%d").to_string())
 }
 
 fn lake_sources(store: &data::Store, s: &Scenario) -> Result<engine::Sources> {
@@ -175,15 +329,17 @@ fn lake_sources(store: &data::Store, s: &Scenario) -> Result<engine::Sources> {
     })
 }
 
-async fn load(store: &data::Store, s: &Scenario) -> Result<(Vec<data::Bar>, Vec<data::FundingRow>, Vec<(i64, f64)>)> {
-    let from = warm_from(s)?;
-    let bars = data::load_bars(store, &s.spot_exchange, &s.spot_symbol, &from, &s.to).await?;
+async fn load(store: &data::Store, s: &Scenario) -> Result<Loaded> {
+    let mut span = s.clone();
+    span.from = warm_from(s)?;
+    load_span(store, &span).await
+}
+
+/// Load exactly `[from, to]` (no warm-up shift).
+async fn load_span(store: &data::Store, s: &Scenario) -> Result<Loaded> {
+    let bars = data::load_bars(store, &s.spot_exchange, &s.spot_symbol, &s.from, &s.to).await?;
     let funding = data::load_funding(store, &s.funding_exchange, &s.funding_symbol, &s.from, &s.to).await?;
-    let index = if s.vol_index_symbol.is_empty() {
-        Vec::new()
-    } else {
-        data::load_vol_index(store, &s.vol_index_exchange, &s.vol_index_symbol, &from, &s.to).await?
-    };
-    eprintln!("loaded {} bars, {} funding rows, {} vol-index rows", bars.len(), funding.len(), index.len());
+    let index = if s.vol_index_symbol.is_empty() { Vec::new() } else { data::load_vol_index(store, &s.vol_index_exchange, &s.vol_index_symbol, &s.from, &s.to).await? };
+    eprintln!("loaded {} bars, {} funding rows, {} vol-index rows ({}..{})", bars.len(), funding.len(), index.len(), s.from, s.to);
     Ok((bars, funding, index))
 }

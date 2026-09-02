@@ -463,6 +463,9 @@ pub struct CapacityResult {
     /// `feasible` | `venue_limited` | `capital_beyond_range` |
     /// `uneconomic_at_min_nav`.
     pub feasibility: &'static str,
+    /// Doc 08 P5 gate: `capital_limited` | `venue_limited` | `uneconomic`
+    /// (capacity mode injects demand, so never `demand_limited`).
+    pub limit_label: &'static str,
     pub min_nav: Option<f64>,
     pub nav_ci_low: Option<f64>,
     pub nav_ci_high: Option<f64>,
@@ -513,6 +516,7 @@ pub fn capacity_point(base: &Scenario, data: &Data, volume_per_day: f64, mix: Mi
             seeds: cfg.seeds.len(),
             runs,
             feasibility: if venue { "venue_limited" } else { "capital_beyond_range" },
+            limit_label: if venue { "venue_limited" } else { "capital_limited" },
             min_nav: None,
             nav_ci_low: None,
             nav_ci_high: None,
@@ -589,6 +593,7 @@ pub fn capacity_point(base: &Scenario, data: &Data, volume_per_day: f64, mix: Mi
         mix: mix.name(),
         seeds: cfg.seeds.len(),
         runs,
+        limit_label: if feasibility == "feasible" { "capital_limited" } else { "uneconomic" },
         feasibility,
         min_nav: Some(required),
         nav_ci_low: Some(quantile(&solved, 0.025)),
@@ -636,7 +641,7 @@ pub fn capacity_sweep(base: &Scenario, data: &Data, volumes: &[f64], mixes: &[Mi
 
 pub fn capacity_frontier_csv(results: &[CapacityResult]) -> String {
     let mut csv = String::from(
-        "provenance,target_accepted_per_day,mix,feasibility,min_nav,nav_ci_low,nav_ci_high,simulated_binding,next1,next2,lower_bound_nav,lower_bound_binding,agrees,\
+        "provenance,target_accepted_per_day,mix,feasibility,limit_label,min_nav,nav_ci_low,nav_ci_high,simulated_binding,next1,next2,lower_bound_nav,lower_bound_binding,agrees,\
 offered_earn_notional,quoted_earn_notional,accepted_earn_notional,premium_turnover,hedge_turnover,exercise_spot_turnover,\
 premium_at_risk_total,premium_at_risk_call,premium_at_risk_put,peak_expiry_premium_at_risk,reserved_peak,reserved_avg,\
 net_return_annualized,hurdle_pass_fraction,max_drawdown,liquidations,accepted_rfqs,expiries,calls,puts,effective_capital,seeds,runs\n",
@@ -646,10 +651,11 @@ net_return_annualized,hurdle_pass_fraction,max_drawdown,liquidations,accepted_rf
         let a = r.at_min_nav.as_ref();
         let lb = r.lower_bound.as_ref();
         csv.push_str(&format!(
-            "prior,{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "prior,{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             r.target_accepted_notional_per_day,
             r.mix,
             r.feasibility,
+            r.limit_label,
             f(r.min_nav),
             f(r.nav_ci_low),
             f(r.nav_ci_high),
@@ -903,6 +909,7 @@ mod tests {
         assert!(ok.min_nav.is_some(), "{ok:?}");
         assert!(ok.at_min_nav.as_ref().unwrap().exercise.calls_exercised > 0, "{ok:?}");
         assert_eq!(capped.feasibility, "venue_limited", "{capped:?}");
+        assert_eq!(capped.limit_label, "venue_limited");
         assert!(capped.min_nav.is_none());
         assert_eq!(capped.simulated_binding, Some("exercise_flash_or_router"));
     }
@@ -935,7 +942,8 @@ mod tests {
         assert!(rs[2].min_nav.unwrap() >= rs[0].min_nav.unwrap() * 0.98, "{:?} vs {:?}", rs[2].min_nav, rs[0].min_nav);
         let csv = std::fs::read_to_string(dir.join("frontier.csv")).unwrap();
         assert_eq!(csv.lines().count(), 4);
-        assert!(csv.starts_with("provenance,target_accepted_per_day,mix,"));
+        assert!(csv.starts_with("provenance,target_accepted_per_day,mix,feasibility,limit_label,"));
+        assert!(rs.iter().all(|r| ["demand_limited", "capital_limited", "venue_limited", "uneconomic"].contains(&r.limit_label)));
         assert!(dir.join("capacity-V20000-balanced/summary.json").exists());
         std::fs::remove_dir_all(&dir).ok();
     }

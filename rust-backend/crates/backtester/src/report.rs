@@ -125,6 +125,17 @@ pub struct Summary {
     pub call_cash_path_sells_spot: bool,
     /// Event-ordering fingerprint (doc 08 §6.2).
     pub trace_hash: String,
+    /// Doc 08 §9.1 (PR O): attribution lines, the idle-cost-adjusted
+    /// return, capital efficiency, and the run-death / margin labels.
+    pub attribution: crate::attribution::AttrLines,
+    pub net_return_after_idle_cost_annualized: f64,
+    /// Depositor-net profit per accepted Earn notional (capacity runs).
+    pub net_profit_per_accepted_notional: Option<f64>,
+    /// Depositor-net profit / peak capital deployed (marks + reservations + margin).
+    pub return_on_peak_capital: Option<f64>,
+    pub bankrupt_ms: Option<i64>,
+    /// `isolated(bluefin_rules)` | `none(doc07_reproduction)`.
+    pub margin_model: &'static str,
     pub determinism_hash: String,
 }
 
@@ -226,6 +237,12 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         flash_capacity_assumed: true,
         call_cash_path_sells_spot: true,
         trace_hash: out.trace_hash.clone(),
+        attribution: out.attribution,
+        net_return_after_idle_cost_annualized: ann((net_nav - out.attribution.idle_cash_cost) / s.nav0 - 1.0),
+        net_profit_per_accepted_notional: if out.stats.volumes.accepted_earn_notional > 0.0 { Some((net_nav - s.nav0) / out.stats.volumes.accepted_earn_notional) } else { None },
+        return_on_peak_capital: if out.stats.peak_capital_deployed > 0.0 { Some((net_nav - s.nav0) / out.stats.peak_capital_deployed) } else { None },
+        bankrupt_ms: out.bankrupt_ms,
+        margin_model: if out.margin_model_enabled { "isolated(bluefin_rules)" } else { "none(doc07_reproduction)" },
         determinism_hash: String::new(),
     };
     let bytes = serde_json::to_vec(&summary).expect("summary serializes");
@@ -256,5 +273,8 @@ pub fn write_all(dir: &Path, s: &Scenario, out: &RunOutput, summary: &Summary) -
         ));
     }
     std::fs::write(dir.join("nav.csv"), nav)?;
+    if let Some(a) = crate::attribution::report(s, out) {
+        std::fs::write(dir.join("attribution.json"), serde_json::to_string_pretty(&a)?)?;
+    }
     Ok(())
 }

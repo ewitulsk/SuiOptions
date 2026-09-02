@@ -358,7 +358,7 @@ impl SimVenue for SimPerpVenue {
         let mut out = Vec::new();
         let mark = self.mark(market);
         // The risk engine runs even through an outage; matching does not.
-        if account.is_liquidatable(mark, self.margin.mmr) {
+        if self.margin.enabled && account.is_liquidatable(mark, self.margin.mmr) {
             self.liquidations += 1;
             let (size_closed, penalty, full) = if self.margin.partial_close > 0.0 {
                 let closed = -self.round_units(account.size * self.margin.partial_close.min(1.0));

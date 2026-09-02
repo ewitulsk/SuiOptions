@@ -19,6 +19,7 @@
 //! price is lake mids through the configured model, and it says so.
 
 pub mod acceptance;
+pub mod attribution;
 pub mod clock;
 pub mod data;
 pub mod engine;
@@ -27,6 +28,8 @@ pub mod exercise;
 pub mod flow;
 pub mod flow_gen;
 pub mod gaps;
+pub mod gates;
+pub mod grid;
 pub mod kernel;
 pub mod latency;
 pub mod ledger;
@@ -35,12 +38,16 @@ pub mod merge;
 pub mod model;
 pub mod oracle;
 pub mod report;
+pub mod results;
 pub mod rng;
 pub mod scenario;
 pub mod solver;
 pub mod stats;
+pub mod stress;
+pub mod study;
 pub mod synth;
 pub mod venue;
+pub mod walkforward;
 
 pub const MS_PER_DAY: i64 = 86_400_000;
 pub const MS_PER_YEAR_F: f64 = 365.0 * 86_400_000.0;

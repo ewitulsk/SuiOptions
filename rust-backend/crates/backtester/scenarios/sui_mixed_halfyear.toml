@@ -1,0 +1,84 @@
+# Half-year SUI mixed book for the expensive PR O sweeps (grid, stress,
+# capacity): generated Earn flow (stated priors, doc 08 §3.1) with the
+# acceptance hazard, HAR q0.35 bids, doc 08 §0.4 caps, the live board,
+# Bluefin margin rules, the modeled exercise route. 2025-08-01 →
+# 2026-01-31 keeps the 2025-10-10 cascade in-sample at a third of the
+# full-year runtime. Coarser revalue cadence (15 min) than the v0 loop.
+name = "sui-mixed-halfyear"
+asset = "SUI"
+spot_exchange = "binance"
+spot_symbol = "SUI-USDT"
+funding_exchange = "binance"
+funding_symbol = "SUI-USDT-PERP"
+from = "2025-08-01"
+to = "2026-01-31"
+nav0 = 1_000_000.0
+revalue_interval_min = 15
+attribution_interval_min = 60
+
+[flow]
+source = "generated"
+call_share = 0.5
+tenor_days = 14.0
+use_expiry_board = true
+
+[flow_gen]
+mode = "market"
+call_share = 0.5
+use_expiry_board = true
+
+[acceptance]
+mode = "hazard"
+
+[estimator]
+kind = "har"
+q_bid = 0.35
+risk_premium = 0.0
+max_lean = 0.0
+sample_interval_s = 900
+
+[hedge]
+band_pct_nav = 20.0
+band_wide_pct_nav = 30.0
+
+[latency]
+strategy = { mean_ms = 200, jitter_ms = 100, assumed = true }
+venue_submit = { mean_ms = 150, jitter_ms = 100, assumed = true }
+venue_fill_report = { mean_ms = 200, jitter_ms = 100, assumed = true }
+sui_inclusion = { mean_ms = 1500, jitter_ms = 1000, assumed = true }
+indexer_detection = { mean_ms = 2000, jitter_ms = 1000, assumed = true }
+seed = 1
+
+[gaps]
+required_feeds = ["spot"]
+max_gap_ms = 300_000
+policy = "invalidate"
+
+[venue]
+execution_assumption = "taker_only"
+maker_fee_bps = 1.0
+contract_size = 1.0
+min_order_units = 1.0
+order_timeout_secs = 60
+
+[margin]
+imr = 0.045
+mmr = 0.025
+leverage = 10.0
+topup_trigger_mr = 0.035
+topup_transfer_ms = 30_000
+max_topup_24h_pct_nav = 0.10
+
+[exercise]
+check_interval_secs = 86_400
+sweep_interval_secs = 300
+near_expiry_hours = 24.0
+min_profit_usd = 10.0
+min_profit_bps = 5.0
+route_uncertainty_bps = 20.0
+route_uncertainty_mult = 2.0
+max_slice_units = 100_000.0
+route_depth_units_per_bps = 2_000.0
+pool_base_balance_units = 5_000_000.0
+pool_quote_balance = 10_000_000.0
+ptb_failure_prob = 0.0
