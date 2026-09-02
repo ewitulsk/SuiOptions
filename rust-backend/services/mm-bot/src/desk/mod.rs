@@ -44,7 +44,8 @@ use crate::pricing::{compute_spot_from_cache, Staleness};
 
 use book::{Book, PnlLine};
 use limits::{BookExposure, LimitsConfig};
-use model::{MarketModel, SurfaceConfig, V1BidParams};
+use model::{EstimatorConfig, EstimatorKind, MarketModel, SurfaceConfig, V1BidParams};
+use vol_forecast::PriceHistory;
 use quote::{Decision, FlowContext, RfqInputs};
 
 // ── config ─────────────────────────────────────────────────────────────
@@ -131,6 +132,16 @@ pub struct SurfaceTomlConfig {
     pub cap_vol: f64,
     pub short_window_weight: f64,
     pub long_window_weight: f64,
+    /// ATM sigma source (SO-440): `"windows"` (two-window blend, default)
+    /// or `"har"` (vol-forecast HAR-RV at `q_bid`). The forecast runs in
+    /// shadow either way and shows on `/desk/state`.
+    pub estimator: EstimatorKind,
+    /// Forecast quantile the bid prices at when `estimator = "har"`.
+    pub q_bid: f64,
+    /// HAR calibration refit cadence.
+    pub refit_secs: u64,
+    /// Derive wing convexity from the asset's own kurtosis (`"har"` only).
+    pub convexity_from_kurtosis: bool,
 }
 
 impl Default for SurfaceTomlConfig {
@@ -146,6 +157,10 @@ impl Default for SurfaceTomlConfig {
             cap_vol: 5.0,
             short_window_weight: 1.0,
             long_window_weight: 1.0,
+            estimator: EstimatorKind::Windows,
+            q_bid: 0.35,
+            refit_secs: 86_400,
+            convexity_from_kurtosis: false,
         }
     }
 }
@@ -430,6 +445,8 @@ pub struct DeskMarket {
     pub decimals: u8,
     pub vol_buf: Arc<RwLock<RollingVolBuffer>>,
     pub vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
+    /// Long price history the vol forecaster reads (SO-440).
+    pub history: Arc<RwLock<PriceHistory>>,
     pub fallback_vol: f64,
 }
 
@@ -544,6 +561,13 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
 
     // Per-market models.
     let surface: SurfaceConfig = p.cfg.surface.into();
+    let estimator = EstimatorConfig {
+        kind: p.cfg.surface.estimator,
+        q_bid: p.cfg.surface.q_bid,
+        refit_secs: p.cfg.surface.refit_secs,
+        horizon_ms: (p.cfg.expected_holding_years * vol_forecast::MS_PER_YEAR).round() as u64,
+        convexity_from_kurtosis: p.cfg.surface.convexity_from_kurtosis,
+    };
     let models: Arc<Vec<MarketModel>> = Arc::new(
         p.markets
             .iter()
@@ -558,6 +582,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
                     p.rate,
                     surface,
                 )
+                .with_estimator(Arc::clone(&m.history), estimator)
             })
             .collect(),
     );

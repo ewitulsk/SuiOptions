@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 tracing = { workspace = true }
 chrono = { workspace = true }
+vol-forecast = { workspace = true }
 
 # Exact-to-~1ulp erfc for the standard normal CDF.
 libm = "0.2"

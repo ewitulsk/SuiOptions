@@ -159,6 +159,10 @@ enabled            = false
 # convexity = 0.0
 # floor_vol = 0.10
 # cap_vol = 5.0
+# estimator = "windows"       # "har" = vol-forecast HAR-RV at q_bid (SO-440)
+# q_bid = 0.35                # forecast quantile the bid prices at
+# refit_secs = 86400          # HAR calibration refit cadence
+# convexity_from_kurtosis = false
 
 # [desk.v1]                   # bid discipline (vol pts are decimals)
 # base_spread_volpts = 0.05   # bid at fair − 5 vol pts
