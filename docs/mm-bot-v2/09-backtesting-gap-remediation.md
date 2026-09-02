@@ -351,8 +351,14 @@ and what fixed it:
 3. **Vault churn.** Discovery drops the desk's own vault once it wires
    direct exchange custody for listings, so every restart provisioned a
    new 1.1M-TUSDC vault (SO-463), and a valid pinned signer fails
-   `fields_match` so every boot mints a stray signer (SO-464). Stopgap:
-   pinned `vault_id` and `quote_signer_id` in the staging config (SO-465).
+   `fields_match` so every boot mints a stray signer (SO-464). The pinned
+   `vault_id` stopgap (SO-465) does not work either: the pinned lookup
+   returns "not a trading vault of this deployment" for a vault the
+   indexer lists, the boot exits, and the restart loop minted a signer
+   every seven seconds until the container was stopped by hand — so the
+   vault stays on auto (one new vault per restart) until SO-463 fixes both
+   discovery and the pinned lookup. Never leave a crash-looping mm-bot
+   running: each restart is an on-chain mint.
 4. **Deploy recipe that works on staging:** roll the indexer alone, wait
    for it to catch up, roll mm-bot alone, then the rest via
    `only_services`. `force_all` restarts the indexer under mm-bot and trips
