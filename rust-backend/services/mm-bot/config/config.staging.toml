@@ -31,7 +31,7 @@ signing_scheme     = "ed25519"
 # by the bot itself (before the ceremony recorded ids); the SO-325 archival
 # gap makes event re-discovery unreliable, hence the pin. Safe to drop
 # after the next contract redeploy.
-quote_signer_id    = "0x05e12bb47a76cd3ab4c83690da778f53769d10dd7ad63981969aaeff57708ad4"
+quote_signer_id    = "0x088476762fd3d20ef7ab366fc93ab5e4ce4b68ed904002687c7a8175cf93775f"  # created 2026-09-02 16:09 UTC on core 0xc3ff509e (SO-462)
 
 # Derive mode: `underlying_symbols` left unset, so the bot makes markets in
 # every enabled token-info token with a Pyth feed and a watcher restarts
