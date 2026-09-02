@@ -49,15 +49,15 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Run { scenario, out } => {
             let s = Scenario::load(&scenario)?;
-            let (bars, funding) = load(&store, &s).await?;
-            let o = engine::run(&s, &bars, &funding)?;
+            let (bars, funding, index) = load(&store, &s).await?;
+            let o = engine::run(&s, &bars, &funding, &index)?;
             let summary = report::summarize(&s, &o);
             report::write_all(&out, &s, &o, &summary)?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Cmd::Sweep { scenario, out, bands, risk_premiums, max_leans, sample_intervals } => {
             let base = Scenario::load(&scenario)?;
-            let (bars, funding) = load(&store, &base).await?;
+            let (bars, funding, index) = load(&store, &base).await?;
             let bands = if bands.is_empty() { vec![base.hedge.band_pct_nav] } else { bands };
             let rps = if risk_premiums.is_empty() { vec![base.estimator.risk_premium] } else { risk_premiums };
             let leans = if max_leans.is_empty() { vec![base.estimator.max_lean] } else { max_leans };
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
                             s.estimator.max_lean = ml;
                             s.estimator.sample_interval_s = iv;
                             s.name = format!("{}-b{b}-rp{rp}-ml{ml}-iv{iv}", base.name);
-                            let o = engine::run(&s, &bars, &funding)?;
+                            let o = engine::run(&s, &bars, &funding, &index)?;
                             let m = report::summarize(&s, &o);
                             report::write_all(&out.join(&s.name), &s, &o, &m)?;
                             csv.push_str(&format!(
@@ -97,12 +97,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn load(store: &data::Store, s: &Scenario) -> Result<(Vec<data::Bar>, Vec<data::FundingRow>)> {
+async fn load(store: &data::Store, s: &Scenario) -> Result<(Vec<data::Bar>, Vec<data::FundingRow>, Vec<(i64, f64)>)> {
     // Warm the estimator: read the long window before `from`.
     let warm_days = (s.estimator.long_window_hours / 24.0).ceil() as i64 + 1;
     let from = (chrono::NaiveDate::parse_from_str(&s.from, "%Y-%m-%d")? - chrono::Duration::days(warm_days)).format("%Y-%m-%d").to_string();
     let bars = data::load_bars(store, &s.spot_exchange, &s.spot_symbol, &from, &s.to).await?;
     let funding = data::load_funding(store, &s.funding_exchange, &s.funding_symbol, &s.from, &s.to).await?;
-    eprintln!("loaded {} bars, {} funding rows", bars.len(), funding.len());
-    Ok((bars, funding))
+    let index = if s.vol_index_symbol.is_empty() {
+        Vec::new()
+    } else {
+        data::load_vol_index(store, &s.vol_index_exchange, &s.vol_index_symbol, &from, &s.to).await?
+    };
+    eprintln!("loaded {} bars, {} funding rows, {} vol-index rows", bars.len(), funding.len(), index.len());
+    Ok((bars, funding, index))
 }

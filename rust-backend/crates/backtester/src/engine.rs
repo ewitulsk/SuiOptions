@@ -113,7 +113,10 @@ fn annualize(row: &FundingRow) -> f64 {
     }
 }
 
-pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow]) -> Result<RunOutput> {
+pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64, f64)]) -> Result<RunOutput> {
+    if s.estimator.kind == "vol_index" {
+        anyhow::ensure!(!vol_index.is_empty(), "estimator.kind = vol_index needs a vol_index series");
+    }
     anyhow::ensure!(!bars.is_empty(), "no bars for {}/{} in {}..{}", s.spot_exchange, s.spot_symbol, s.from, s.to);
     let start_ms = crate::data::date_start_ms(&s.from)?;
     let end_ms = crate::data::date_start_ms(&s.to)? + MS_PER_DAY;
@@ -133,6 +136,8 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow]) -> Result<RunOutp
 
     let mut funding_idx = 0usize;
     let mut funding_annual = 0.0;
+    let mut index_idx = 0usize;
+    let mut index_vol: Option<f64> = None;
     let mut funding_settlements = 0u64;
     let mut next_turn_ms = start_ms;
     let mut next_daily_ms = start_ms + s.flow.hour_utc as i64 * 3_600_000;
@@ -168,6 +173,12 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow]) -> Result<RunOutp
             }
         }
         let spot = decision.map(|d| d.price).unwrap_or(last_spot);
+        // Vol index (percent) LOCF, as of now — never ahead of the clock.
+        while index_idx < vol_index.len() && vol_index[index_idx].0 <= now {
+            index_vol = Some(vol_index[index_idx].1 / 100.0);
+            index_idx += 1;
+        }
+        book.est.set_index_vol(index_vol);
         let readout = book.est.surface(now);
 
         // Funding settlements up to now, against the signed position at
@@ -413,8 +424,8 @@ mod tests {
         let start = crate::data::date_start_ms(&s.from).unwrap();
         let bars = synthetic_bars(70, start);
         let funding: Vec<FundingRow> = (0..70 * 3).map(|i| FundingRow { ts_ms: start + i * 8 * 3_600_000, rate: 0.0001, interval_hours: 8.0 }).collect();
-        let a = run(&s, &bars, &funding).unwrap();
-        let b = run(&s, &bars, &funding).unwrap();
+        let a = run(&s, &bars, &funding, &[]).unwrap();
+        let b = run(&s, &bars, &funding, &[]).unwrap();
         assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap(), "not deterministic");
         assert!(a.turns >= 2, "{}", a.turns);
         assert!(a.ledger.lines.fills >= 2, "fills {} declines cap {} stale {} zero {}", a.ledger.lines.fills, a.ledger.lines.declines_capacity, a.ledger.lines.declines_stale, a.ledger.lines.declines_priced_zero);
@@ -438,7 +449,7 @@ mod tests {
         // Remove the second half of day 29 and all of day 30 — the second
         // turn (day 30 + 1 min) lands deep inside the hole.
         bars.retain(|b| !(b.ts_ms >= start + 29 * MS_PER_DAY + MS_PER_DAY / 2 && b.ts_ms < start + 31 * MS_PER_DAY));
-        let out = run(&s, &bars, &[]).unwrap();
+        let out = run(&s, &bars, &[], &[]).unwrap();
         assert_eq!(out.minutes_total, 70 * 1440);
         assert_eq!(out.minutes_with_bar, 70 * 1440 - 2160);
         assert!(out.minutes_stale >= 2160 - 3, "{}", out.minutes_stale);

@@ -17,6 +17,11 @@ pub struct Scenario {
     /// Silver funding_rates source (exchange / symbol partitions).
     pub funding_exchange: String,
     pub funding_symbol: String,
+    /// Optional silver vol_index source (e.g. deribit / BTC-DVOL) for the
+    /// `vol_index` estimator kind — the "true IV" ceiling of the doc 07
+    /// §3 ablation. Empty = none.
+    pub vol_index_exchange: String,
+    pub vol_index_symbol: String,
     /// Inclusive UTC dates.
     pub from: String,
     pub to: String,
@@ -44,6 +49,8 @@ impl Default for Scenario {
             spot_symbol: "SUI-USDT".into(),
             funding_exchange: "binance".into(),
             funding_symbol: "SUI-USDT-PERP".into(),
+            vol_index_exchange: String::new(),
+            vol_index_symbol: String::new(),
             from: "2025-08-01".into(),
             to: "2026-07-31".into(),
             nav0: 1_000_000.0,
@@ -86,7 +93,9 @@ impl Default for OracleModel {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct EstimatorConfig {
-    /// `windows` = the live desk's two-window blend (pricing::surface).
+    /// `windows` = the live desk's two-window blend (pricing::surface);
+    /// `vol_index` = the scenario's vol index (percent, e.g. DVOL) as the
+    /// base ATM sigma, same risk premium / shape / clamp path.
     pub kind: String,
     /// Realized-vol sampling interval, seconds. Doc 07 §4: SUI ≥ 900.
     pub sample_interval_s: i64,
