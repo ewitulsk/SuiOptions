@@ -393,10 +393,11 @@ impl CapitalSnapshot {
         )
     }
 
-    /// Test-only: a fresh, generously-funded snapshot at `nav` observed
-    /// `now_ms` — every non-NAV constraint is far from binding.
-    #[cfg(test)]
-    pub(crate) fn test_fresh(nav: f64, now_ms: u64) -> Self {
+    /// Test fixture (desk-core, mm-bot and the backtester share it): a
+    /// fresh, generously-funded snapshot at `nav` observed `now_ms` —
+    /// every non-NAV constraint is far from binding.
+    #[doc(hidden)]
+    pub fn test_fresh(nav: f64, now_ms: u64) -> Self {
         Self {
             appraised_nav: Some(nav),
             locally_reconstructed_nav: Some(nav),

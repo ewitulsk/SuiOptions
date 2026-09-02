@@ -1143,143 +1143,33 @@ fn spawn_book_refresher(p: RefresherParams) {
                 }
             }
 
-            // Marks + greeks per holding/written line.
-            let (holdings, written) = {
+            // Marks + greeks per holding/written line: the kernel's mark
+            // pass (`desk_core::exposure`, SO-450) over the book.
+            let pass = {
                 let b = p.book.read();
-                (b.holdings.clone(), b.written.clone())
+                desk_core::exposure::mark_book(desk_core::exposure::MarkInputs {
+                    models: &p.models,
+                    holdings: &b.holdings,
+                    written: &b.written,
+                    spot_by_model: &spot_by_model,
+                    now_ms: now,
+                    stress_gap_down: p.cfg.monitors.stress_gap_down.abs(),
+                    stress_gap_up: p.cfg.monitors.stress_gap_up.abs(),
+                    quote_flash_capacity: p.cfg.capital.quote_flash_capacity,
+                    base_flash_capacity: p.cfg.capital.base_flash_capacity,
+                })
             };
-            let mut exposure = BookExposure::default();
-            let mut marks: HashMap<protocol_types::ids::ObjectId, MarkSnapshot> = HashMap::new();
-            let mut delta_by_coin: HashMap<String, f64> = HashMap::new();
-            let mut deployed = 0.0f64;
-            // Capital-snapshot demands of the marked book (SO-444):
-            // strike cash calls need / underlying value puts deliver at
-            // exercise, and the hedge notional each line needs.
-            let mut call_strike_cash = 0.0f64;
-            let mut put_underlying_value = 0.0f64;
-            let mut exercise_demand_by_expiry: HashMap<u64, f64> = HashMap::new();
-            let mut hedge_notional = 0.0f64;
-            let mut hedge_notional_by_expiry: HashMap<u64, f64> = HashMap::new();
-            for h in &holdings {
-                let Some(mi) = p.models.iter().position(|m| m.coin_type == h.asset_coin_type)
-                else {
-                    continue;
-                };
-                let Some(spot) = spot_by_model[mi] else {
-                    continue;
-                };
-                let t = h.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
-                let k = h.strike_scaled();
-                let (sigma, _) = p.models[mi].sigma(spot, k, t);
-                let mark = p.models[mi].fair_per_unit(h.is_put, spot, k, t, sigma);
-                let g = p.models[mi].greeks_per_unit(h.is_put, spot, k, t, sigma);
-                marks.insert(
-                    h.bucket_id.clone(),
-                    MarkSnapshot { mark_per_unit: mark, sigma, spot, greeks: g, at_ms: now },
-                );
-                let amt = h.amount() as f64;
-                deployed += mark * amt;
-                exposure.net_vega_per_volpt += g.vega * amt / 100.0;
-                exposure.theta_cost_per_day += (-g.theta * amt).max(0.0);
-                *exposure.premium_by_expiry.entry(h.expiry_ms).or_default() += mark * amt;
-                exposure.premium_by_strike_bucket[limits::strike_bucket(k, spot)] += mark * amt;
-                // Composition surfaces (doc 08 §4.5, SO-431).
-                if h.is_put {
-                    exposure.put_premium += mark * amt;
-                    exposure.gamma_units_puts += g.gamma * amt;
-                } else {
-                    exposure.call_premium += mark * amt;
-                    exposure.gamma_units_calls += g.gamma * amt;
-                }
-                let line_delta = g.delta * amt;
-                if line_delta >= 0.0 {
-                    exposure.delta_units_positive += line_delta;
-                } else {
-                    exposure.delta_units_negative += line_delta;
-                }
-                *delta_by_coin.entry(h.asset_coin_type.clone()).or_default() += g.delta * amt;
-                let demand = if h.is_put { spot } else { k } * amt;
-                let line_hedge = line_delta.abs() * spot;
-                let gamma_by_type = exposure.gamma_by_expiry.entry(h.expiry_ms).or_default();
-                let gamma_notional_per_pct = g.gamma * amt * 0.01 * spot * spot;
-                // Composition surfaces per side (doc 08 §4.5, SO-445):
-                // puts need underlying and their LONG hedge loses in a
-                // crash; calls need strike cash and their SHORT hedge
-                // loses in a rally.
-                if h.is_put {
-                    put_underlying_value += demand;
-                    *exposure.put_underlying_value_by_expiry.entry(h.expiry_ms).or_default() +=
-                        demand;
-                    gamma_by_type.puts_units += g.gamma * amt;
-                    gamma_by_type.puts_notional_per_pct += gamma_notional_per_pct;
-                    exposure.crash_loss_put_hedges +=
-                        line_hedge * p.cfg.monitors.stress_gap_down.abs();
-                } else {
-                    call_strike_cash += demand;
-                    *exposure.call_settlement_cash_by_expiry.entry(h.expiry_ms).or_default() +=
-                        demand;
-                    gamma_by_type.calls_units += g.gamma * amt;
-                    gamma_by_type.calls_notional_per_pct += gamma_notional_per_pct;
-                    exposure.rally_loss_call_hedges +=
-                        line_hedge * p.cfg.monitors.stress_gap_up.abs();
-                }
-                *exercise_demand_by_expiry.entry(h.expiry_ms).or_default() += demand;
-                hedge_notional += line_hedge;
-                *hedge_notional_by_expiry.entry(h.expiry_ms).or_default() += line_hedge;
-            }
-            exposure.stress_gap_down = p.cfg.monitors.stress_gap_down.abs();
-            exposure.stress_gap_up = p.cfg.monitors.stress_gap_up.abs();
-            exposure.concurrent_demand = limits::concurrent_demand(
-                &exposure.call_settlement_cash_by_expiry,
-                &exposure.put_underlying_value_by_expiry,
-                exposure.crash_loss_put_hedges,
-                exposure.rally_loss_call_hedges,
-            );
-            for (e, cash) in &exposure.call_settlement_cash_by_expiry {
-                exposure.quote_flash_util_by_expiry.insert(
-                    *e,
-                    limits::flash_utilization(*cash, p.cfg.capital.quote_flash_capacity),
-                );
-            }
-            for (e, value) in &exposure.put_underlying_value_by_expiry {
-                exposure.base_flash_util_by_expiry.insert(
-                    *e,
-                    limits::flash_utilization(*value, p.cfg.capital.base_flash_capacity),
-                );
-            }
-            // Written lines subtract their full greeks so quoting sees
-            // TRUE nets (net vega = held − written, same for delta/
-            // gamma/theta). A written bucket with no held coin still
-            // needs per-unit marks computed here.
-            for w in &written {
-                let Some(mi) = p.models.iter().position(|m| m.coin_type == w.asset_coin_type)
-                else {
-                    continue;
-                };
-                let g = match marks.get(&w.bucket_id) {
-                    Some(m) => m.greeks,
-                    None => {
-                        let Some(spot) = spot_by_model[mi] else {
-                            continue;
-                        };
-                        let t =
-                            w.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
-                        let k = w.strike_scaled();
-                        let (sigma, _) = p.models[mi].sigma(spot, k, t);
-                        let mark = p.models[mi].fair_per_unit(w.is_put, spot, k, t, sigma);
-                        let g = p.models[mi].greeks_per_unit(w.is_put, spot, k, t, sigma);
-                        marks.insert(
-                            w.bucket_id,
-                            MarkSnapshot { mark_per_unit: mark, sigma, spot, greeks: g, at_ms: now },
-                        );
-                        g
-                    }
-                };
-                let amt = w.amount as f64;
-                exposure.net_vega_per_volpt -= g.vega * amt / 100.0;
-                exposure.theta_cost_per_day -= (-g.theta * amt).max(0.0);
-                *delta_by_coin.entry(w.asset_coin_type.clone()).or_default() -= g.delta * amt;
-            }
+            let desk_core::exposure::MarkPass {
+                mut exposure,
+                marks,
+                delta_by_coin,
+                deployed,
+                call_strike_cash,
+                put_underlying_value,
+                exercise_demand_by_expiry,
+                hedge_notional,
+                hedge_notional_by_expiry,
+            } = pass;
             *p.shared.marks.write() = marks;
 
             // Capital snapshot inputs read from chain (SO-444): the

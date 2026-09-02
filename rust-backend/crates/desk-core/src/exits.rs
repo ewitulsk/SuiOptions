@@ -109,7 +109,7 @@ pub fn decide_exit(
         <= cfg.near_expiry_hours;
     let carry = model.forgone_carry(spot, strike, t, sigma);
     let tv = model.remaining_time_value_call(spot, strike, t, sigma);
-    let exercise = (itm && near_expiry) || (itm && carry > tv * cfg.carry_mult);
+    let exercise = itm && (near_expiry || carry > tv * cfg.carry_mult);
     if exercise {
         return if wallet_cash >= strike_cost {
             ExitAction::ExerciseCash

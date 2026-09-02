@@ -27,6 +27,7 @@ pub mod exercise;
 pub mod flow;
 pub mod flow_gen;
 pub mod gaps;
+pub mod kernel;
 pub mod latency;
 pub mod ledger;
 pub mod margin;

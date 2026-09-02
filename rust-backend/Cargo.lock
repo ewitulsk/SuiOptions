@@ -3015,15 +3015,32 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "desk-core",
  "futures",
  "object_store 0.12.5",
+ "parking_lot 0.12.5",
  "parquet",
  "pricing",
+ "protocol-types",
  "serde",
  "serde_json",
  "tokio",
  "toml 0.8.23",
  "url",
+ "vol-forecast",
+]
+
+[[package]]
+name = "desk-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "parking_lot 0.12.5",
+ "pricing",
+ "protocol-types",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
  "vol-forecast",
 ]
 
@@ -6153,6 +6170,7 @@ dependencies = [
  "clap",
  "cli-spec",
  "config",
+ "desk-core",
  "diesel",
  "diesel_migrations",
  "ed25519-dalek",
@@ -11753,6 +11771,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "desk-core",
  "ed25519-dalek",
  "futures",
  "futures-util",

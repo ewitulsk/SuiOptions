@@ -143,6 +143,8 @@ pub fn price_writer_flow(
         };
     };
     let premium = total_bid.floor();
+    // `!(x >= 1)` rather than `x < 1`: a NaN bid must decline too.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     if !(premium >= 1.0) {
         return Decision::Decline {
             reason: "priced to zero".into(),

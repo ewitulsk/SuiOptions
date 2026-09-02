@@ -127,6 +127,7 @@ pub struct MarketModel {
 }
 
 impl MarketModel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         symbol: String,
         coin_type: String,

@@ -46,7 +46,6 @@ use protocol_types::ids::{ObjectId, SuiAddress};
 use serde::{Deserialize, Serialize};
 use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
-use sui_types::transaction::TransactionKind;
 
 pub use desk_core::book::*;
 
@@ -876,3 +875,4 @@ mod tests {
         assert!(text.contains("\"line\":\"spread\""));
         let _ = std::fs::remove_file(&path);
     }
+}

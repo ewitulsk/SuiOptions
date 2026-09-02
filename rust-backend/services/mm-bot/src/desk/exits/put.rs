@@ -32,7 +32,7 @@ use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 
 use crate::desk::book::{self, CoinPosition, Holding};
-use crate::desk::hedge::{HedgeCommand, HedgeEvent, HedgeOrder, HedgeVenue};
+use crate::desk::hedge::{HedgeCommand, HedgeEvent, HedgeOrder};
 use crate::desk::model::MarketModel;
 use crate::desk::CuratorRefs;
 
