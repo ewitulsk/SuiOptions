@@ -18,6 +18,14 @@ pub struct Labels {
     pub constant_flow: bool,
     pub exercise: &'static str,
     pub estimator: String,
+    /// PR N: `constant` | `generated_market` | `generated_capacity`.
+    pub flow_source: &'static str,
+    /// `instant` | `hazard_ttl`.
+    pub acceptance: &'static str,
+    /// `no_resale` | `resale=upside_scenario`.
+    pub resale: &'static str,
+    /// Every arrival/acceptance parameter is a stated prior (doc 08 §3.1).
+    pub flow_provenance: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -67,6 +75,8 @@ pub struct Summary {
     pub vol_pnl_proxy_total: f64,
     pub option_leg_pnl_total: f64,
     pub protocol_fee_wedge_total: f64,
+    /// PR N: the six volumes, quote funnel, capacity peaks and gates.
+    pub stats: crate::stats::RunStats,
     pub determinism_hash: String,
 }
 
@@ -88,9 +98,13 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         scenario: s.name.clone(),
         asset: s.asset.clone(),
         labels: Labels {
-            proxy_oracle: true, proxy_venue: true, taker_only: true, no_resale: true, constant_flow: true,
+            proxy_oracle: true, proxy_venue: true, taker_only: true, no_resale: !s.resale.enabled, constant_flow: out.flow_source == "constant",
             exercise: "at_expiry",
             estimator: if s.estimator.kind == "har" { format!("har(q_bid={})", s.estimator.q_bid) } else { s.estimator.kind.clone() },
+            flow_source: out.flow_source,
+            acceptance: out.acceptance,
+            resale: if s.resale.enabled { "resale=upside_scenario" } else { "no_resale" },
+            flow_provenance: crate::flow_gen::PRIOR_LABEL,
         },
         from: s.from.clone(),
         to: s.to.clone(),
@@ -130,6 +144,7 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         vol_pnl_proxy_total: out.settled.iter().map(|o| o.vol_pnl_proxy).sum(),
         option_leg_pnl_total: out.settled.iter().map(|o| o.option_leg_pnl).sum(),
         protocol_fee_wedge_total: l.premium_paid * s.fees.protocol_premium_fee_bps / 10_000.0,
+        stats: out.stats.clone(),
         determinism_hash: String::new(),
     };
     let bytes = serde_json::to_vec(&summary).expect("summary serializes");

@@ -1,12 +1,14 @@
 //! `desk-backtester run --scenario s.toml --store file:///lake --out dir`
 //! `desk-backtester sweep --scenario s.toml --store … --out dir --bands 1.5,5,20 --risk-premiums 0,0.05 --max-leans 0,0.8`
+//! `desk-backtester capacity --scenario s.toml --store … --out dir --volumes 10000,25000,… --mixes call_only,put_only,balanced,adversarial --seeds 8`
+//! `desk-backtester market --scenario s.toml --store … --out dir --spreads 0.03,0.05,0.08 --seeds 8`
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use desk_backtester::{data, engine, report, scenario::Scenario};
+use desk_backtester::{data, engine, report, scenario::Scenario, solver};
 
 #[derive(Parser)]
 struct Cli {
@@ -38,6 +40,39 @@ enum Cmd {
         max_leans: Vec<f64>,
         #[arg(long, value_delimiter = ',')]
         sample_intervals: Vec<i64>,
+    },
+    /// Capacity mode (doc 08 §8.1/§8.6): minimum starting NAV per target
+    /// accepted Earn notional per day and mix; writes `frontier.csv`.
+    Capacity {
+        #[arg(long)]
+        scenario: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Target accepted spot notional per day (default: the §8.1 log sweep).
+        #[arg(long, value_delimiter = ',')]
+        volumes: Vec<f64>,
+        /// call_only,put_only,balanced,adversarial (default: all four).
+        #[arg(long, value_delimiter = ',')]
+        mixes: Vec<String>,
+        #[arg(long, default_value_t = 8)]
+        seeds: u64,
+        #[arg(long, default_value_t = 1_000.0)]
+        nav_lo: f64,
+        #[arg(long, default_value_t = 1.0e9)]
+        nav_hi: f64,
+    },
+    /// Market mode (doc 08 §8.1): offered flow and acceptance against the
+    /// actual bid at the scenario NAV, over a sweep of base spreads.
+    Market {
+        #[arg(long)]
+        scenario: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Base spreads in vol points (default: the scenario's).
+        #[arg(long, value_delimiter = ',')]
+        spreads: Vec<f64>,
+        #[arg(long, default_value_t = 8)]
+        seeds: u64,
     },
 }
 
@@ -92,6 +127,30 @@ async fn main() -> Result<()> {
             }
             std::fs::write(out.join("sweep.csv"), &csv)?;
             print!("{csv}");
+        }
+        Cmd::Capacity { scenario, out, volumes, mixes, seeds, nav_lo, nav_hi } => {
+            let base = Scenario::load(&scenario)?;
+            let (bars, funding, index) = load(&store, &base).await?;
+            let data = solver::Data { bars: &bars, funding: &funding, vol_index: &index };
+            let volumes = if volumes.is_empty() { solver::default_volumes() } else { volumes };
+            let mixes: Vec<solver::Mix> = if mixes.is_empty() {
+                vec![solver::Mix::CallOnly, solver::Mix::PutOnly, solver::Mix::Balanced, solver::Mix::Adversarial]
+            } else {
+                mixes.iter().map(|m| solver::Mix::parse(m)).collect::<Result<_>>()?
+            };
+            let cfg = solver::SolverConfig { nav_lo, nav_hi, seeds: (1..=seeds).collect(), ..Default::default() };
+            std::fs::create_dir_all(&out)?;
+            let results = solver::capacity_sweep(&base, &data, &volumes, &mixes, &cfg, Some(&out))?;
+            print!("{}", solver::capacity_frontier_csv(&results));
+        }
+        Cmd::Market { scenario, out, spreads, seeds } => {
+            let base = Scenario::load(&scenario)?;
+            let (bars, funding, index) = load(&store, &base).await?;
+            let data = solver::Data { bars: &bars, funding: &funding, vol_index: &index };
+            let spreads = if spreads.is_empty() { vec![base.bid.base_spread_volpts] } else { spreads };
+            let seeds: Vec<u64> = (1..=seeds).collect();
+            let results = solver::market_sweep(&base, &data, &spreads, &seeds, Some(&out))?;
+            print!("{}", solver::market_frontier_csv(&results));
         }
     }
     Ok(())

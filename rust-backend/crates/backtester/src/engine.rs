@@ -1,7 +1,8 @@
 //! The event loop: a minute clock from `from` to `to` (timers advance
 //! through capture holes — doc 08 §6.4), the oracle proxy, the estimator,
-//! the constant-flow injector, the band hedger, funding settlements,
-//! expiry settlement, and the ledger.
+//! a pluggable flow source (constant injector or the PR N generator),
+//! the quote lifecycle (reserve → accept/expire/revert → fill), the band
+//! hedger, funding settlements, expiry settlement, and the ledger.
 
 use std::collections::BTreeMap;
 
@@ -9,13 +10,16 @@ use anyhow::Result;
 use pricing::desk::{expected_hedge_cost, v1_bid, BidContext, HedgeCostParams, V1BidParams};
 use serde::Serialize;
 
+use crate::acceptance::{displayed_apy, AcceptanceModel, LiveQuote, Outcome};
 use crate::data::{Bar, FundingRow};
-use crate::estimator::WindowsEstimator;
-use crate::flow::{rfqs_for, Rfq};
+use crate::estimator::{SigmaReadout, WindowsEstimator};
+use crate::flow_gen::{ConstantSource, FlowCtx, FlowGen, FlowSource, RfqEvent};
 use crate::ledger::{Ledger, Position};
 use crate::model::{fair_per_unit, greeks_per_unit};
 use crate::oracle::OracleProxy;
+use crate::rng::Pcg32;
 use crate::scenario::Scenario;
+use crate::stats::{RunStats, TrailingMin};
 use crate::{MS_PER_DAY, MS_PER_YEAR_F};
 
 /// One settled option, for the vol-P&L study (doc 09 §2.4).
@@ -71,6 +75,9 @@ pub struct RunOutput {
     pub nav_end: f64,
     pub spot_start: f64,
     pub spot_end: f64,
+    pub stats: RunStats,
+    pub flow_source: &'static str,
+    pub acceptance: &'static str,
 }
 
 struct Book {
@@ -115,7 +122,65 @@ fn annualize(row: &FundingRow) -> f64 {
     }
 }
 
+/// One priced spec: fair, greeks, and the V1 bid (None = priced zero).
+struct Priced {
+    sigma: f64,
+    fair: f64,
+    delta: f64,
+    gamma: f64,
+    vega: f64,
+    bid: Option<f64>,
+    sigma_paid: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn price(book: &Book, s: &Scenario, readout: &SigmaReadout, now: i64, spot: f64, nav: f64, funding_annual: f64, is_put: bool, strike: f64, expiry_ms: i64, qty: f64) -> Priced {
+    let carry = s.carry_yield;
+    let t = (expiry_ms - now) as f64 / MS_PER_YEAR_F;
+    let sigma = readout.surface.vol(spot, strike, t);
+    let fair_pu = fair_per_unit(is_put, spot, strike, t, sigma, carry);
+    let g = greeks_per_unit(is_put, spot, strike, t, sigma, carry);
+    let fair = fair_pu * qty;
+    let vega_book: f64 = book.ledger.positions.iter().map(|p| p.vega_open * p.qty / 100.0).sum();
+    let vega_util = if s.limits.vega_cap_nav_per_volpt > 0.0 { vega_book / (s.limits.vega_cap_nav_per_volpt * nav) } else { 0.0 };
+    let ctx = BidContext {
+        nav,
+        premium_notional: fair,
+        vega_utilization: vega_util,
+        hedge_cost: expected_hedge_cost(
+            book.ledger.perp.position,
+            g.delta * qty,
+            spot,
+            funding_annual,
+            s.bid.expected_holding_years,
+            s.bid.funding_income_credit,
+            &book.hedge_cost,
+        ),
+        composition_utilization: 0.0,
+    };
+    let fair_at = |sig: f64| fair_per_unit(is_put, spot, strike, t, sig, carry) * qty;
+    let bid = v1_bid(fair_at, sigma, &ctx, &book.v1);
+    // Recover the struck sigma for the study: the discount total.
+    let discount = pricing::desk::v1_vol_discount(&ctx, &book.v1).map(|d| d.total).unwrap_or(0.0);
+    Priced { sigma, fair, delta: g.delta, gamma: g.gamma, vega: g.vega, bid, sigma_paid: (sigma - discount).max(0.0) }
+}
+
+/// Build the scenario's flow source (`flow.source`).
+pub fn flow_source(s: &Scenario, start_ms: i64) -> Result<Box<dyn FlowSource>> {
+    Ok(match s.flow.source.as_str() {
+        "constant" => Box::new(ConstantSource::new(&s.flow, start_ms)?),
+        "generated" => Box::new(FlowGen::new(&s.flow_gen, &s.flow, s.seed)?),
+        other => anyhow::bail!("unknown flow.source {other}"),
+    })
+}
+
 pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64, f64)]) -> Result<RunOutput> {
+    let start_ms = crate::data::date_start_ms(&s.from)?;
+    let mut source = flow_source(s, start_ms)?;
+    run_with(s, bars, funding, vol_index, source.as_mut())
+}
+
+pub fn run_with(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64, f64)], source: &mut dyn FlowSource) -> Result<RunOutput> {
     if s.estimator.kind == "vol_index" {
         anyhow::ensure!(!vol_index.is_empty(), "estimator.kind = vol_index needs a vol_index series");
     }
@@ -131,6 +196,16 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
         v1: v1_params(s),
         hedge_cost: hedge_cost_params(s),
     };
+    let acceptance = AcceptanceModel::new(s.acceptance.clone(), s.seed);
+    let mut stats = RunStats::default();
+    let mut live: Vec<LiveQuote> = Vec::new();
+    let mut topup = TrailingMin::new(MS_PER_DAY);
+    let revalue_ms = s.revalue_interval_min.max(1) * 60_000;
+    let mut last_revalue_ms = i64::MIN;
+    let mut net_delta_units = 0.0f64;
+    let mut apy_call: Option<f64> = None;
+    let mut apy_put: Option<f64> = None;
+    let mut in_liquidation = false;
     let interval_ms = s.estimator.sample_interval_s * 1000;
     // Sampled decision prices for per-option realized vol.
     let mut price_samples: Vec<(i64, f64)> = Vec::new();
@@ -141,9 +216,6 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
     let mut index_idx = 0usize;
     let mut index_vol: Option<f64> = None;
     let mut funding_settlements = 0u64;
-    let mut next_turn_ms = start_ms;
-    let mut next_daily_ms = start_ms + s.flow.hour_utc as i64 * 3_600_000;
-    let mut turns = 0u64;
     let mut nav_path = Vec::new();
     let mut settled = Vec::new();
     let mut minutes_with_bar = 0u64;
@@ -152,7 +224,8 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
     let mut peak = s.nav0;
     let mut max_dd = 0.0f64;
     let mut last_nav_day = i64::MIN;
-    let tenor_ms = (s.flow.tenor_days * MS_PER_DAY as f64) as i64;
+    let tenor_years = s.flow.tenor_days / 365.0;
+    let fee_wedge = 1.0 - s.fees.protocol_premium_fee_bps / 10_000.0;
 
     let mut now = start_ms;
     while now < end_ms {
@@ -182,6 +255,10 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
         }
         book.est.set_index_vol(index_vol);
         let readout = book.est.surface(now);
+        let revalue_now = now.saturating_sub(last_revalue_ms) >= revalue_ms;
+        if revalue_now {
+            last_revalue_ms = now;
+        }
 
         // Funding settlements up to now, against the signed position at
         // the mark (the spot path is the mark: proxy_venue).
@@ -195,7 +272,8 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
             funding_settlements += 1;
         }
 
-        // Mark every open option at the surface sigma; settle expiries.
+        // Mark every open option at the surface sigma (at the revalue
+        // cadence); settle expiries every minute.
         let carry = s.carry_yield;
         let mut expired: Vec<Position> = Vec::new();
         let mut i = 0;
@@ -205,12 +283,16 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
                 expired.push(book.ledger.positions.remove(i));
                 continue;
             }
-            let t = (p.expiry_ms - now) as f64 / MS_PER_YEAR_F;
-            let sigma = readout.surface.vol(spot, p.strike, t);
-            p.mark = fair_per_unit(p.is_put, spot, p.strike, t, sigma, carry);
+            if revalue_now {
+                let t = (p.expiry_ms - now) as f64 / MS_PER_YEAR_F;
+                let sigma = readout.surface.vol(spot, p.strike, t);
+                p.mark = fair_per_unit(p.is_put, spot, p.strike, t, sigma, carry);
+            }
             i += 1;
         }
+        let book_changed = !expired.is_empty();
         for p in expired {
+            stats.expiries_settled += 1;
             let intrinsic_per_unit = if p.is_put { (p.strike - spot).max(0.0) } else { (spot - p.strike).max(0.0) };
             let mut payoff = 0.0;
             let mut costs = 0.0;
@@ -226,6 +308,16 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
                 costs = notional * fee + s.exercise.gas_per_exercise;
                 payoff = gross - costs;
                 book.ledger.lines.exercise_turnover_notional += notional;
+                stats.volumes.exercise_spot_turnover += notional;
+                if p.is_put { stats.exercised_put += 1 } else { stats.exercised_call += 1 }
+                // Flash/router capacity: an assumption until PR M lands.
+                // Over the cap the exercise is laddered (counted, still
+                // settled at the same price here).
+                let cap = s.venue.flash_max_notional_per_exercise;
+                if cap > 0.0 && notional > cap {
+                    stats.flash_cap_hits += 1;
+                    stats.exercise_laddered += 1;
+                }
             }
             book.ledger.cash += payoff;
             book.ledger.lines.option_payoff += payoff;
@@ -241,117 +333,217 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
             });
         }
 
-        // Flow.
-        let nav_now = book.ledger.nav(spot);
-        let mut wanted: Vec<Rfq> = Vec::new();
-        match s.flow.mode.as_str() {
-            // A turn/day that lands on a stale price is retried every
-            // minute until the price is fresh again (the writer keeps
-            // asking; the desk keeps declining) — time is not skipped.
-            "per_turn" => {
-                if now >= next_turn_ms {
-                    if stale {
-                        book.ledger.lines.declines_stale += 1;
-                    } else {
-                        next_turn_ms = now + tenor_ms;
-                        turns += 1;
-                        wanted = rfqs_for(&s.flow, now, spot, readout.surface.atm(s.flow.tenor_days / 365.0), s.flow.notional_nav_multiple * nav_now);
-                    }
+        // Resale: a labeled upside scenario, off by default (doc 08 §8.5).
+        let mut resold = false;
+        if s.resale.enabled && revalue_now && !stale {
+            let dt_days = revalue_ms as f64 / MS_PER_DAY as f64;
+            let min_hold = (s.resale.min_holding_days * MS_PER_DAY as f64) as i64;
+            let mut i = 0;
+            while i < book.ledger.positions.len() {
+                let p = &book.ledger.positions[i];
+                if now - p.opened_ms < min_hold + s.resale.latency_ms {
+                    i += 1;
+                    continue;
                 }
-            }
-            "daily" => {
-                if now >= next_daily_ms {
-                    if stale {
-                        book.ledger.lines.declines_stale += 1;
-                    } else {
-                        next_daily_ms += MS_PER_DAY;
-                        wanted = rfqs_for(&s.flow, now, spot, readout.surface.atm(s.flow.tenor_days / 365.0), s.flow.notional_per_day);
-                    }
+                let demand = if p.is_put { s.resale.put_demand_per_day } else { s.resale.call_demand_per_day };
+                let p_sell = 1.0 - (-demand * s.resale.fill_prob * dt_days).exp();
+                let u = Pcg32::keyed(s.seed, &[p.id, (now / revalue_ms) as u64, 0x72]).uniform();
+                if u < p_sell {
+                    let p = book.ledger.positions.remove(i);
+                    let proceeds = p.mark * p.qty * (1.0 - s.resale.price_discount);
+                    book.ledger.cash += proceeds;
+                    book.ledger.lines.option_payoff += proceeds;
+                    stats.resales += 1;
+                    stats.resale_pnl += proceeds - p.premium_paid;
+                    resold = true;
+                    continue;
                 }
+                i += 1;
             }
-            other => anyhow::bail!("unknown flow.mode {other}"),
-        }
-        for rfq in wanted {
-            let t = (rfq.expiry_ms - now) as f64 / MS_PER_YEAR_F;
-            let sigma = readout.surface.vol(spot, rfq.strike, t);
-            let fair_pu = fair_per_unit(rfq.is_put, spot, rfq.strike, t, sigma, carry);
-            let g = greeks_per_unit(rfq.is_put, spot, rfq.strike, t, sigma, carry);
-            let premium_fair = fair_pu * rfq.qty;
-            // Limits (doc 08 §0.4): total, per type, per expiry.
-            let deployed = book.ledger.premium_deployed();
-            let by_type = book.ledger.premium_by_type(rfq.is_put);
-            let by_expiry = book.ledger.premium_by_expiry(rfq.expiry_ms);
-            let type_cap = if rfq.is_put { s.limits.put_premium_max } else { s.limits.call_premium_max };
-            if deployed + premium_fair > s.limits.premium_budget_hard * nav_now
-                || by_type + premium_fair > type_cap * nav_now
-                || by_expiry + premium_fair > s.limits.per_expiry_max * nav_now
-            {
-                book.ledger.lines.declines_capacity += 1;
-                continue;
-            }
-            let vega_book: f64 = book.ledger.positions.iter().map(|p| p.vega_open * p.qty / 100.0).sum();
-            let vega_util = if s.limits.vega_cap_nav_per_volpt > 0.0 { vega_book / (s.limits.vega_cap_nav_per_volpt * nav_now) } else { 0.0 };
-            let ctx = BidContext {
-                nav: nav_now,
-                premium_notional: premium_fair,
-                vega_utilization: vega_util,
-                hedge_cost: expected_hedge_cost(
-                    book.ledger.perp.position,
-                    g.delta * rfq.qty,
-                    spot,
-                    funding_annual,
-                    s.bid.expected_holding_years,
-                    s.bid.funding_income_credit,
-                    &book.hedge_cost,
-                ),
-                composition_utilization: 0.0,
-            };
-            let fair_at = |sig: f64| fair_per_unit(rfq.is_put, spot, rfq.strike, t, sig, carry) * rfq.qty;
-            let Some(bid) = v1_bid(fair_at, sigma, &ctx, &book.v1) else {
-                book.ledger.lines.declines_priced_zero += 1;
-                continue;
-            };
-            // Recover the struck sigma for the study: the discount total.
-            let discount = pricing::desk::v1_vol_discount(&ctx, &book.v1).map(|d| d.total).unwrap_or(0.0);
-            let sigma_paid = (sigma - discount).max(0.0);
-            book.ledger.cash -= bid;
-            book.ledger.lines.premium_paid += bid;
-            book.ledger.lines.fills += 1;
-            let id = book.ledger.next_id;
-            book.ledger.next_id += 1;
-            book.ledger.positions.push(Position {
-                id, is_put: rfq.is_put, strike: rfq.strike, expiry_ms: rfq.expiry_ms, qty: rfq.qty, premium_paid: bid,
-                sigma_paid, sigma_surface: sigma, opened_ms: now, spot_open: spot, delta_open: g.delta, gamma_open: g.gamma,
-                vega_open: g.vega, writer_net_premium: bid * (1.0 - s.fees.protocol_premium_fee_bps / 10_000.0),
-                mark: fair_pu,
-            });
         }
 
-        // Hedge: bands not clocks; no trades on a stale price.
-        let net_delta_units = book.ledger.positions.iter().map(|p| {
-            let t = (p.expiry_ms - now) as f64 / MS_PER_YEAR_F;
-            let sigma = readout.surface.vol(spot, p.strike, t);
-            greeks_per_unit(p.is_put, spot, p.strike, t, sigma, carry).delta * p.qty
-        }).sum::<f64>();
+        // Displayed APY menu for the arrival model (market mode).
+        let nav_now = book.ledger.nav(spot);
+        let ctx0 = FlowCtx { now_ms: now, spot, sigma_atm: readout.surface.atm(tenor_years), nav: nav_now, stale, apy_call, apy_put };
+        if revalue_now {
+            if stale {
+                apy_call = None;
+                apy_put = None;
+            } else {
+                for (is_put, strike, expiry_ms) in source.indicative_specs(&ctx0) {
+                    let qty = s.flow_gen.apy_reference_notional / spot;
+                    let pr = price(&book, s, &readout, now, spot, nav_now, funding_annual, is_put, strike, expiry_ms, qty);
+                    let apy = pr.bid.map(|b| displayed_apy(is_put, b * fee_wedge, qty, spot, strike, (expiry_ms - now) as f64 / MS_PER_YEAR_F));
+                    if is_put { apy_put = apy } else { apy_call = apy }
+                }
+            }
+        }
+
+        // Flow: RFQs → decline or quote (premium reserved).
+        let ctx = FlowCtx { apy_call, apy_put, ..ctx0 };
+        let reserved_total: f64 = live.iter().map(|q| q.bid).sum();
+        for rfq in source.rfqs(&ctx) {
+            stats.rfqs_offered += 1;
+            if rfq.is_put { stats.rfqs_put += 1 } else { stats.rfqs_call += 1 }
+            stats.volumes.offered_earn_notional += rfq.offered_notional;
+            if stale {
+                book.ledger.lines.declines_stale += 1;
+                stats.declined.count_stale += 1;
+                stats.declined.stale += rfq.offered_notional;
+                continue;
+            }
+            let pr = price(&book, s, &readout, now, spot, nav_now, funding_annual, rfq.is_put, rfq.strike, rfq.expiry_ms, rfq.qty);
+            // Limits (doc 08 §0.4): total, per type, per expiry — live
+            // reservations counted once in each numerator.
+            let deployed = book.ledger.premium_deployed() + reserved_total;
+            let by_type = book.ledger.premium_by_type(rfq.is_put) + live.iter().filter(|q| q.rfq.is_put == rfq.is_put).map(|q| q.bid).sum::<f64>();
+            let by_expiry = book.ledger.premium_by_expiry(rfq.expiry_ms) + live.iter().filter(|q| q.rfq.expiry_ms == rfq.expiry_ms).map(|q| q.bid).sum::<f64>();
+            let type_cap = if rfq.is_put { s.limits.put_premium_max } else { s.limits.call_premium_max };
+            let over_total = deployed + pr.fair > s.limits.premium_budget_hard * nav_now;
+            let over_type = by_type + pr.fair > type_cap * nav_now;
+            let over_expiry = by_expiry + pr.fair > s.limits.per_expiry_max * nav_now;
+            if over_total || over_type || over_expiry {
+                book.ledger.lines.declines_capacity += 1;
+                stats.declined.count_capacity += 1;
+                stats.declined.capacity += rfq.offered_notional;
+                stats.declined.count_total_cap += over_total as u64;
+                stats.declined.count_expiry_cap += over_expiry as u64;
+                if over_type {
+                    if rfq.is_put { stats.declined.count_put_cap += 1 } else { stats.declined.count_call_cap += 1 }
+                }
+                continue;
+            }
+            let Some(bid) = pr.bid else {
+                book.ledger.lines.declines_priced_zero += 1;
+                stats.declined.count_priced_zero += 1;
+                stats.declined.priced_zero += rfq.offered_notional;
+                continue;
+            };
+            stats.quotes_sent += 1;
+            stats.volumes.quoted_earn_notional += rfq.offered_notional;
+            let q = acceptance.open(rfq, now, bid, bid * fee_wedge, spot, pr.fair, pr.sigma, pr.sigma_paid, (pr.delta, pr.gamma, pr.vega));
+            stats.sample_apy(rfq.is_put, q.displayed_apy);
+            live.push(q);
+        }
+
+        // Quote lifecycle: hazard over the remaining TTL against the
+        // current option value; fill, expire, or revert.
+        let mut filled = false;
+        let mut i = 0;
+        while i < live.len() {
+            let current_fair = {
+                let q = &live[i];
+                let t = (q.rfq.expiry_ms - now) as f64 / MS_PER_YEAR_F;
+                let sigma = readout.surface.vol(spot, q.rfq.strike, t);
+                fair_per_unit(q.rfq.is_put, spot, q.rfq.strike, t, sigma, carry) * q.rfq.qty
+            };
+            match acceptance.step(&mut live[i], now, current_fair) {
+                None => i += 1,
+                Some(Outcome::Expired) => {
+                    live.remove(i);
+                    stats.quotes_expired += 1;
+                }
+                Some(Outcome::Reverted) => {
+                    live.remove(i);
+                    stats.quotes_reverted += 1;
+                }
+                Some(Outcome::Filled(_)) => {
+                    let q = live.remove(i);
+                    let rfq: RfqEvent = q.rfq;
+                    filled = true;
+                    stats.quotes_accepted += 1;
+                    stats.volumes.accepted_earn_notional += rfq.offered_notional;
+                    stats.volumes.premium_turnover += q.bid;
+                    if rfq.is_put { stats.fills_put += 1 } else { stats.fills_call += 1 }
+                    book.ledger.cash -= q.bid;
+                    book.ledger.lines.premium_paid += q.bid;
+                    book.ledger.lines.fills += 1;
+                    let id = book.ledger.next_id;
+                    book.ledger.next_id += 1;
+                    book.ledger.positions.push(Position {
+                        id, is_put: rfq.is_put, strike: rfq.strike, expiry_ms: rfq.expiry_ms, qty: rfq.qty, premium_paid: q.bid,
+                        sigma_paid: q.sigma_paid, sigma_surface: q.sigma_quote, opened_ms: now, spot_open: spot, delta_open: q.delta,
+                        gamma_open: q.gamma, vega_open: q.vega, writer_net_premium: q.writer_net,
+                        mark: current_fair / rfq.qty,
+                    });
+                }
+            }
+        }
+
+        // Hedge: bands not clocks; no trades on a stale price. Net delta
+        // is recomputed at the revalue cadence or when the book changed.
+        if revalue_now || filled || book_changed || resold {
+            net_delta_units = book.ledger.positions.iter().map(|p| {
+                let t = (p.expiry_ms - now) as f64 / MS_PER_YEAR_F;
+                let sigma = readout.surface.vol(spot, p.strike, t);
+                greeks_per_unit(p.is_put, spot, p.strike, t, sigma, carry).delta * p.qty
+            }).sum::<f64>();
+        }
         if !stale {
             let pct = if funding_annual < s.hedge.funding_widen_threshold { s.hedge.band_wide_pct_nav } else { s.hedge.band_pct_nav };
             let band_units = (pct / 100.0) * nav_now / spot;
             let net = net_delta_units + book.ledger.perp.position;
             if net.abs() > band_units {
-                let size = -net_delta_units - book.ledger.perp.position;
-                let slip = spot * s.hedge.slippage_bps / 10_000.0;
-                let px = spot + slip * size.signum();
-                let notional = size.abs() * spot;
-                let fee = notional * s.hedge.taker_fee_bps / 10_000.0 + s.hedge.fixed_fee_per_fill;
-                let realized = book.ledger.perp.fill(size, px);
-                book.ledger.cash += realized - fee - s.exercise.gas_per_rebalance;
-                book.ledger.lines.hedge_realized += realized;
-                book.ledger.lines.hedge_fees += fee;
-                book.ledger.lines.hedge_slippage += size.abs() * slip;
-                book.ledger.lines.gas += s.exercise.gas_per_rebalance;
-                book.ledger.lines.hedge_turnover_notional += notional;
-                book.ledger.lines.hedge_fills += 1;
+                let mut target = -net_delta_units;
+                // Venue capacity: an assumption until measured.
+                let cap = s.venue.max_hedge_notional;
+                if cap > 0.0 && target.abs() * spot > cap {
+                    target = target.signum() * cap / spot;
+                    stats.venue_cap_hits += 1;
+                }
+                let size = target - book.ledger.perp.position;
+                if size != 0.0 {
+                    let slip = spot * s.hedge.slippage_bps / 10_000.0;
+                    let px = spot + slip * size.signum();
+                    let notional = size.abs() * spot;
+                    let fee = notional * s.hedge.taker_fee_bps / 10_000.0 + s.hedge.fixed_fee_per_fill;
+                    let realized = book.ledger.perp.fill(size, px);
+                    book.ledger.cash += realized - fee - s.exercise.gas_per_rebalance;
+                    book.ledger.lines.hedge_realized += realized;
+                    book.ledger.lines.hedge_fees += fee;
+                    book.ledger.lines.hedge_slippage += size.abs() * slip;
+                    book.ledger.lines.gas += s.exercise.gas_per_rebalance;
+                    book.ledger.lines.hedge_turnover_notional += notional;
+                    book.ledger.lines.hedge_fills += 1;
+                    stats.volumes.hedge_turnover += notional;
+                    if book.ledger.lines.hedge_fills == 1 {
+                        stats.initial_hedge_margin = book.ledger.perp.position.abs() * spot * s.hedge.initial_margin_fraction;
+                    }
+                }
             }
+        }
+
+        // Capacity stats: reservations, premium at risk, margin, gates.
+        let reserved: f64 = live.iter().map(|q| q.bid).sum();
+        stats.sample_reserved(reserved);
+        let margin_req = book.ledger.perp.position.abs() * spot * s.hedge.initial_margin_fraction;
+        stats.peak_hedge_margin = stats.peak_hedge_margin.max(margin_req);
+        stats.peak_24h_margin_topup = stats.peak_24h_margin_topup.max(topup.push(now, margin_req));
+        let free = book.ledger.cash - reserved;
+        stats.min_free_settlement = stats.min_free_settlement.min(free);
+        stats.min_margin_headroom = stats.min_margin_headroom.min(free - margin_req);
+        let maint = s.venue.maintenance_margin_fraction * book.ledger.perp.position.abs() * spot;
+        let liquidating = book.ledger.perp.position != 0.0 && free + book.ledger.perp.unrealized(spot) < maint;
+        if liquidating && !in_liquidation {
+            stats.liquidations += 1;
+        }
+        in_liquidation = liquidating;
+        if revalue_now || filled {
+            let marks = book.ledger.option_marks();
+            stats.peak_premium_at_risk_total = stats.peak_premium_at_risk_total.max(marks + reserved);
+            let call_res: f64 = live.iter().filter(|q| !q.rfq.is_put).map(|q| q.bid).sum();
+            stats.peak_premium_at_risk_call = stats.peak_premium_at_risk_call.max(book.ledger.premium_by_type(false) + call_res);
+            stats.peak_premium_at_risk_put = stats.peak_premium_at_risk_put.max(book.ledger.premium_by_type(true) + reserved - call_res);
+            let mut by_expiry: BTreeMap<i64, f64> = BTreeMap::new();
+            for p in &book.ledger.positions {
+                *by_expiry.entry(p.expiry_ms).or_default() += p.mark * p.qty;
+            }
+            for q in &live {
+                *by_expiry.entry(q.rfq.expiry_ms).or_default() += q.bid;
+            }
+            let peak_exp = by_expiry.values().copied().fold(0.0, f64::max);
+            stats.peak_expiry_premium_at_risk = stats.peak_expiry_premium_at_risk.max(peak_exp);
+            stats.peak_capital_deployed = stats.peak_capital_deployed.max(marks + reserved + margin_req);
         }
 
         // NAV, drawdown, daily sample.
@@ -367,19 +559,23 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
                 ts_ms: now, spot, nav, cash: book.ledger.cash, option_marks: book.ledger.option_marks(),
                 perp_position: book.ledger.perp.position, net_delta_units,
                 premium_deployed_pct: if nav > 0.0 { book.ledger.premium_deployed() / nav } else { 0.0 },
-                sigma_surface: if readout.fallback { None } else { Some(readout.surface.atm(s.flow.tenor_days / 365.0)) },
+                sigma_surface: if readout.fallback { None } else { Some(readout.surface.atm(tenor_years)) },
                 stale,
             });
         }
         now += 60_000;
     }
 
+    // Quotes still live at the end never reached a terminal event.
+    stats.quotes_expired += live.len() as u64;
+    book.ledger.lines.declines_stale += source.stale_declines();
     let nav_end = book.ledger.nav(last_spot);
     Ok(RunOutput {
         nav_path, settled, ledger: book.ledger,
         minutes_total: ((end_ms - start_ms) / 60_000) as u64,
-        minutes_with_bar, minutes_stale, funding_settlements, turns, max_drawdown: max_dd, nav_end,
+        minutes_with_bar, minutes_stale, funding_settlements, turns: source.turns(), max_drawdown: max_dd, nav_end,
         spot_start: bars[0].close, spot_end: last_spot,
+        stats, flow_source: source.label(), acceptance: acceptance.label(),
     })
 }
 
@@ -448,6 +644,16 @@ mod tests {
         let final_spot = a.spot_end;
         assert!((a.nav_end - (a.ledger.cash + a.ledger.option_marks() + a.ledger.perp.unrealized(final_spot))).abs() < 1e-6);
         assert!(a.settled.iter().all(|o| o.sigma_realized > 0.0));
+        // The six volumes are all reported; instant acceptance means
+        // quoted == accepted and premium turnover == premium paid.
+        let v = &a.stats.volumes;
+        assert!(v.offered_earn_notional > 0.0);
+        assert_eq!(v.quoted_earn_notional, v.accepted_earn_notional);
+        assert!((v.premium_turnover - l.premium_paid).abs() < 1e-6);
+        assert!((v.hedge_turnover - l.hedge_turnover_notional).abs() < 1e-6);
+        assert!((v.exercise_spot_turnover - l.exercise_turnover_notional).abs() < 1e-6);
+        assert_eq!(a.flow_source, "constant");
+        assert_eq!(a.acceptance, "instant");
     }
 
     #[test]
@@ -466,5 +672,43 @@ mod tests {
         // the price is fresh again, then filled — never skipped in time.
         assert!(out.ledger.lines.declines_stale > 1000, "{}", out.ledger.lines.declines_stale);
         assert!(out.turns >= 2);
+    }
+
+    #[test]
+    fn generated_flow_with_hazard_acceptance_reserves_then_fills_or_expires() {
+        let mut s = scenario();
+        s.to = "2025-01-15".into();
+        s.flow.source = "generated".into();
+        s.acceptance.mode = "hazard".into();
+        s.revalue_interval_min = 15;
+        s.limits.per_expiry_max = 0.10;
+        s.limits.call_premium_max = 0.20;
+        let start = crate::data::date_start_ms(&s.from).unwrap();
+        let bars = synthetic_bars(15, start);
+        let a = run(&s, &bars, &[], &[]).unwrap();
+        let b = run(&s, &bars, &[], &[]).unwrap();
+        assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap(), "not deterministic");
+        let st = &a.stats;
+        assert!(st.rfqs_offered > 20, "{}", st.rfqs_offered);
+        assert!(st.rfqs_call > 0 && st.rfqs_put > 0);
+        assert!(st.quotes_sent > 0);
+        assert!(st.quotes_accepted > 0, "{st:?}");
+        assert!(st.quotes_expired > 0, "some quotes must expire under the hazard: {st:?}");
+        assert_eq!(st.quotes_sent, st.quotes_accepted + st.quotes_expired + st.quotes_reverted);
+        assert!(st.peak_reserved > 0.0, "premium must be reserved while quotes are live");
+        assert!(st.volumes.accepted_earn_notional < st.volumes.quoted_earn_notional);
+        assert!(st.volumes.quoted_earn_notional <= st.volumes.offered_earn_notional);
+        assert_eq!(a.flow_source, "generated_market");
+        assert_eq!(a.acceptance, "hazard_ttl");
+        // Cash identity still holds (no resale).
+        let l = &a.ledger.lines;
+        let cash_expected = s.nav0 - l.premium_paid + l.option_payoff + l.hedge_realized - l.funding_paid - l.hedge_fees - l.gas;
+        assert!((a.ledger.cash - cash_expected).abs() < 1e-6);
+        assert_eq!(st.resales, 0);
+        // A wider bid accepts less of the same flow (common random numbers).
+        let mut wide = s.clone();
+        wide.bid.base_spread_volpts = 0.30;
+        let w = run(&wide, &bars, &[], &[]).unwrap();
+        assert!(w.stats.quotes_accepted < st.quotes_accepted, "wide {} vs base {}", w.stats.quotes_accepted, st.quotes_accepted);
     }
 }
