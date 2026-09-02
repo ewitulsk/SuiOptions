@@ -209,6 +209,9 @@ pub struct V1Config {
     /// Fraction of expected funding INCOME credited into the bid
     /// (doc 08 §4.3). 0 = conservative: income is upside, never priced.
     pub funding_income_credit: f64,
+    /// Composition soft throttle (doc 08 §4.5, SO-445): bid widening at
+    /// a hard composition threshold, vol points. Provisional 0.05.
+    pub composition_penalty_volpts: f64,
 }
 
 impl Default for V1Config {
@@ -221,6 +224,7 @@ impl Default for V1Config {
             inventory_penalty_start_util: 0.6,
             max_single_fill_pct_nav: 5.0,
             funding_income_credit: 0.0,
+            composition_penalty_volpts: 0.05,
         }
     }
 }
@@ -235,6 +239,7 @@ impl From<V1Config> for V1BidParams {
             inventory_penalty_start_util: c.inventory_penalty_start_util,
             max_single_fill_pct_nav: c.max_single_fill_pct_nav,
             funding_income_credit: c.funding_income_credit,
+            composition_penalty_volpts: c.composition_penalty_volpts,
         }
     }
 }
@@ -1206,15 +1211,53 @@ fn spawn_book_refresher(p: RefresherParams) {
                 }
                 *delta_by_coin.entry(h.asset_coin_type.clone()).or_default() += g.delta * amt;
                 let demand = if h.is_put { spot } else { k } * amt;
+                let line_hedge = line_delta.abs() * spot;
+                let gamma_by_type = exposure.gamma_by_expiry.entry(h.expiry_ms).or_default();
+                let gamma_notional_per_pct = g.gamma * amt * 0.01 * spot * spot;
+                // Composition surfaces per side (doc 08 §4.5, SO-445):
+                // puts need underlying and their LONG hedge loses in a
+                // crash; calls need strike cash and their SHORT hedge
+                // loses in a rally.
                 if h.is_put {
                     put_underlying_value += demand;
+                    *exposure.put_underlying_value_by_expiry.entry(h.expiry_ms).or_default() +=
+                        demand;
+                    gamma_by_type.puts_units += g.gamma * amt;
+                    gamma_by_type.puts_notional_per_pct += gamma_notional_per_pct;
+                    exposure.crash_loss_put_hedges +=
+                        line_hedge * p.cfg.monitors.stress_gap_down.abs();
                 } else {
                     call_strike_cash += demand;
+                    *exposure.call_settlement_cash_by_expiry.entry(h.expiry_ms).or_default() +=
+                        demand;
+                    gamma_by_type.calls_units += g.gamma * amt;
+                    gamma_by_type.calls_notional_per_pct += gamma_notional_per_pct;
+                    exposure.rally_loss_call_hedges +=
+                        line_hedge * p.cfg.monitors.stress_gap_up.abs();
                 }
                 *exercise_demand_by_expiry.entry(h.expiry_ms).or_default() += demand;
-                let line_hedge = line_delta.abs() * spot;
                 hedge_notional += line_hedge;
                 *hedge_notional_by_expiry.entry(h.expiry_ms).or_default() += line_hedge;
+            }
+            exposure.stress_gap_down = p.cfg.monitors.stress_gap_down.abs();
+            exposure.stress_gap_up = p.cfg.monitors.stress_gap_up.abs();
+            exposure.concurrent_demand = limits::concurrent_demand(
+                &exposure.call_settlement_cash_by_expiry,
+                &exposure.put_underlying_value_by_expiry,
+                exposure.crash_loss_put_hedges,
+                exposure.rally_loss_call_hedges,
+            );
+            for (e, cash) in &exposure.call_settlement_cash_by_expiry {
+                exposure.quote_flash_util_by_expiry.insert(
+                    *e,
+                    limits::flash_utilization(*cash, p.cfg.capital.quote_flash_capacity),
+                );
+            }
+            for (e, value) in &exposure.put_underlying_value_by_expiry {
+                exposure.base_flash_util_by_expiry.insert(
+                    *e,
+                    limits::flash_utilization(*value, p.cfg.capital.base_flash_capacity),
+                );
             }
             // Written lines subtract their full greeks so quoting sees
             // TRUE nets (net vega = held − written, same for delta/

@@ -26,6 +26,11 @@ pub struct BidContext {
     /// (doc 08 §4.3): direction-aware funding on incremental signed
     /// hedge notional, plus fees/slippage/fixed costs.
     pub hedge_cost: ExpectedHedgeCost,
+    /// Composition throttle (doc 08 §4.5, SO-445): 0 while every
+    /// composition metric (gamma by type/expiry, stressed hedge loss,
+    /// exercise demand, concurrent demand) sits under its soft
+    /// threshold, 1.0 when one reaches its hard threshold, and beyond.
+    pub composition_utilization: f64,
 }
 
 /// Expected cash cost of hedging one proposed fill over its holding
@@ -179,16 +184,22 @@ pub struct V1BidParams {
     /// Fraction of expected funding INCOME credited into the bid
     /// (0 = conservative: income is upside, never priced — doc 08 §4.3).
     pub funding_income_credit: f64,
+    /// Bid widening at composition utilization 1.0 (a hard composition
+    /// threshold), vol points; keeps growing above it (SO-445).
+    pub composition_penalty_volpts: f64,
 }
 
 /// The V1 vol discount decomposed into its terms (all vol points), so each
 /// can be logged and unit-tested on its own. `total = base + size +
-/// inventory`.
+/// inventory + composition`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VolDiscount {
     pub base: f64,
     pub size: f64,
     pub inventory: f64,
+    /// Composition throttle (doc 08 §4.5): linear in the composition
+    /// utilization, alongside — not instead of — the vega inventory term.
+    pub composition: f64,
     pub total: f64,
 }
 
@@ -225,8 +236,16 @@ pub fn v1_vol_discount(ctx: &BidContext, p: &V1BidParams) -> Option<VolDiscount>
             / (1.0 - p.inventory_penalty_start_util)
     };
 
+    let composition = p.composition_penalty_volpts * ctx.composition_utilization.max(0.0);
+
     let base = p.base_spread_volpts;
-    Some(VolDiscount { base, size, inventory, total: base + size + inventory })
+    Some(VolDiscount {
+        base,
+        size,
+        inventory,
+        composition,
+        total: base + size + inventory + composition,
+    })
 }
 
 /// The V1 bid: fair value repriced at the discounted vol, minus the
@@ -270,6 +289,7 @@ mod tests {
             inventory_penalty_start_util: 0.6,
             max_single_fill_pct_nav: 5.0,
             funding_income_credit: 0.0,
+            composition_penalty_volpts: 0.05,
         }
     }
 
@@ -281,7 +301,26 @@ mod tests {
             premium_notional: 1_000.0 * premium_pct,
             vega_utilization: util,
             hedge_cost: ExpectedHedgeCost::default(),
+            composition_utilization: 0.0,
         }
+    }
+
+    /// Doc 08 §4.5 (SO-445): the composition throttle widens the bid
+    /// linearly in its utilization, on top of the vega inventory term.
+    #[test]
+    fn v1_composition_throttle_widens_alongside_inventory() {
+        let p = v1_params();
+        let flat = v1_vol_discount(&ctx(0.0, 0.8), &p).unwrap();
+        close(flat.composition, 0.0, 1e-12);
+        let c = BidContext { composition_utilization: 0.5, ..ctx(0.0, 0.8) };
+        let d = v1_vol_discount(&c, &p).unwrap();
+        close(d.composition, 0.025, 1e-12);
+        close(d.inventory, flat.inventory, 1e-12);
+        close(d.total, flat.total + 0.025, 1e-12);
+        // At a hard threshold the full penalty applies, and it keeps
+        // growing past it — widen, never stop.
+        let c = BidContext { composition_utilization: 1.5, ..ctx(0.0, 0.8) };
+        close(v1_vol_discount(&c, &p).unwrap().composition, 0.075, 1e-12);
     }
 
     #[test]
@@ -366,6 +405,7 @@ mod tests {
                 slippage: fair * 0.002,
                 ..Default::default()
             },
+            composition_utilization: 0.0,
         };
         let bid = v1_bid(fair_at, sigma, &c, &v1_params()).unwrap();
         assert!(bid > 0.0 && bid < fair, "bid {bid} not inside (0, fair {fair})");

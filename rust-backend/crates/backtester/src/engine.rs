@@ -90,6 +90,8 @@ fn v1_params(s: &Scenario) -> V1BidParams {
         inventory_penalty_start_util: s.bid.inventory_penalty_start_util,
         max_single_fill_pct_nav: s.bid.max_single_fill_pct_nav,
         funding_income_credit: s.bid.funding_income_credit,
+        // Composition limits (SO-445) are not modeled in v0.
+        composition_penalty_volpts: 0.0,
     }
 }
 
@@ -302,6 +304,7 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
                     s.bid.funding_income_credit,
                     &book.hedge_cost,
                 ),
+                composition_utilization: 0.0,
             };
             let fair_at = |sig: f64| fair_per_unit(rfq.is_put, spot, rfq.strike, t, sig, carry) * rfq.qty;
             let Some(bid) = v1_bid(fair_at, sigma, &ctx, &book.v1) else {

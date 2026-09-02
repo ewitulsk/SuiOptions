@@ -48,6 +48,27 @@ pub struct LimitsConfig {
     /// `kill_window_days`. 00-plan: 10% in 7d.
     pub kill_drawdown: f64,
     pub kill_window_days: f64,
+    // ── composition limits (doc 08 §4.5, SO-445) ──
+    // Soft = start of the bid-widening throttle; hard = solvency
+    // decline. Provisional defaults: the 00-plan sets none of these, the
+    // backtester must select them out of sample.
+    /// Gamma per option type AND expiry as delta-notional change per 1%
+    /// spot move, fraction of risk NAV.
+    pub gamma_soft_nav_per_pct_move: f64,
+    pub gamma_hard_nav_per_pct_move: f64,
+    /// Crash loss on long-perp put hedges / rally loss on short-perp
+    /// call hedges before monetization, fraction of risk NAV. Hard =
+    /// doc 08 §0.4's max margin top-up in 24h (10%).
+    pub hedge_stress_loss_soft: f64,
+    pub hedge_stress_loss_hard: f64,
+    /// Per-expiry call settlement cash / put underlying required, as a
+    /// utilization of the exercise sources (free balance + flash + spot).
+    pub exercise_demand_soft: f64,
+    pub exercise_demand_hard: f64,
+    /// Concurrent exercise + margin top-up demand as a utilization of
+    /// every exercise source plus the top-up cap.
+    pub concurrent_demand_soft: f64,
+    pub concurrent_demand_hard: f64,
 }
 
 impl Default for LimitsConfig {
@@ -64,8 +85,26 @@ impl Default for LimitsConfig {
             per_strike_bucket_max: 0.10,
             kill_drawdown: 0.10,
             kill_window_days: 7.0,
+            gamma_soft_nav_per_pct_move: 0.05,
+            gamma_hard_nav_per_pct_move: 0.10,
+            hedge_stress_loss_soft: 0.05,
+            hedge_stress_loss_hard: 0.10,
+            exercise_demand_soft: 0.80,
+            exercise_demand_hard: 1.00,
+            concurrent_demand_soft: 0.80,
+            concurrent_demand_hard: 1.00,
         }
     }
+}
+
+/// Composition throttle position of one metric: 0 at or under the soft
+/// threshold, 1 at the hard one, growing beyond (bid widening never
+/// stops); `> 1` is the hard-decline condition.
+pub fn throttle(value: f64, soft: f64, hard: f64) -> f64 {
+    if hard <= soft {
+        return if value > hard { f64::INFINITY } else { 0.0 };
+    }
+    ((value - soft) / (hard - soft)).max(0.0)
 }
 
 /// Moneyness bucket index for the concentration cap: 0 = strike <90% of
@@ -319,11 +358,25 @@ impl CapitalSnapshot {
     }
 
     /// Best spot capacity across the configured tiers.
-    fn spot_buy_max(&self) -> f64 {
+    pub fn spot_buy_max(&self) -> f64 {
         self.spot_buy_capacity_by_slippage.iter().map(|t| t.capacity).fold(0.0, f64::max)
     }
-    fn spot_sell_max(&self) -> f64 {
+    pub fn spot_sell_max(&self) -> f64 {
         self.spot_sell_capacity_by_slippage.iter().map(|t| t.capacity).fold(0.0, f64::max)
+    }
+
+    /// Settlement cash a call exercise can draw on: free settlement,
+    /// quote flash, spot sale of the received underlying.
+    pub fn call_exercise_sources(&self) -> f64 {
+        self.free_settlement + self.quote_flash_capacity + self.spot_sell_max()
+    }
+
+    /// Underlying value a put exercise can deliver from: vault-held
+    /// underlying, base flash, spot purchase (the three §4.4 paths).
+    pub fn put_exercise_sources(&self) -> f64 {
+        self.free_underlying_by_asset.values().sum::<f64>()
+            + self.base_flash_capacity
+            + self.spot_buy_max()
     }
 
     /// Margin cash a new hedge position can draw on: the on-chain
@@ -720,8 +773,77 @@ pub struct BookExposure {
     /// Gamma by option type, underlying units per 1.0 spot move.
     pub gamma_units_calls: f64,
     pub gamma_units_puts: f64,
+    // ── composition surfaces (doc 08 §4.5, SO-445) ──
+    /// Gamma by option type AND expiry.
+    pub gamma_by_expiry: HashMap<u64, GammaByType>,
+    /// Loss on the LONG-perp hedges backing puts in a `stress_gap_down`
+    /// crash, before the puts are monetized (settlement raw).
+    pub crash_loss_put_hedges: f64,
+    /// Loss on the SHORT-perp hedges backing calls in a `stress_gap_up`
+    /// rally, before the calls are monetized.
+    pub rally_loss_call_hedges: f64,
+    /// Strike cash the held calls need at exercise, per expiry.
+    pub call_settlement_cash_by_expiry: HashMap<u64, f64>,
+    /// Underlying value the held puts must deliver at exercise, per
+    /// expiry (settlement value at spot).
+    pub put_underlying_value_by_expiry: HashMap<u64, f64>,
+    /// Per-expiry demand over the CONFIGURED flash capacity (report-only:
+    /// `INFINITY` when demand exists against zero assumed capacity).
+    pub base_flash_util_by_expiry: HashMap<u64, f64>,
+    pub quote_flash_util_by_expiry: HashMap<u64, f64>,
+    /// Worst concurrent cash need: the largest single-expiry exercise
+    /// demand plus the worse of the two stressed hedge losses.
+    pub concurrent_demand: f64,
+    /// The stress gaps the losses above were sized for.
+    pub stress_gap_down: f64,
+    pub stress_gap_up: f64,
     /// Kill switch already latched (from [`KillSwitch::check`]).
     pub kill_switch: bool,
+}
+
+/// Gamma split by option type: underlying units per 1.0 spot move, and
+/// the delta-notional change per 1% spot move (`γ·amount·0.01·S²`,
+/// settlement raw — additive across underlyings, the limit's unit).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GammaByType {
+    pub calls_units: f64,
+    pub puts_units: f64,
+    pub calls_notional_per_pct: f64,
+    pub puts_notional_per_pct: f64,
+}
+
+/// Concurrent exercise + margin top-up demand of a book: the largest
+/// single-expiry exercise demand (calls' strike cash + puts' underlying
+/// value) plus the worse stressed hedge loss (pure; the refresher and
+/// tests share it).
+pub fn concurrent_demand(
+    call_cash_by_expiry: &HashMap<u64, f64>,
+    put_value_by_expiry: &HashMap<u64, f64>,
+    crash_loss: f64,
+    rally_loss: f64,
+) -> f64 {
+    let worst_expiry = call_cash_by_expiry
+        .keys()
+        .chain(put_value_by_expiry.keys())
+        .map(|e| {
+            call_cash_by_expiry.get(e).copied().unwrap_or(0.0)
+                + put_value_by_expiry.get(e).copied().unwrap_or(0.0)
+        })
+        .fold(0.0, f64::max);
+    worst_expiry + crash_loss.max(rally_loss)
+}
+
+/// Demand over a configured flash capacity: 0 without demand,
+/// `INFINITY` with demand against zero capacity.
+pub fn flash_utilization(demand: f64, capacity: f64) -> f64 {
+    if demand <= 0.0 {
+        0.0
+    } else if capacity <= 0.0 {
+        f64::INFINITY
+    } else {
+        demand / capacity
+    }
 }
 
 /// The proposed new buy being tested against the caps.
@@ -741,6 +863,9 @@ pub struct ProposedFill {
     pub hedge_notional: f64,
     /// Exercise demand: strike cash (calls) or underlying value (puts).
     pub exercise_cash: f64,
+    /// Delta-notional change per 1% spot move the fill adds
+    /// (`γ·amount·0.01·S²`, settlement raw) — SO-445.
+    pub gamma_notional_per_pct: f64,
 }
 
 impl ProposedFill {
@@ -764,6 +889,11 @@ pub struct Utilization {
     /// The fresh risk NAV the caps were scaled from (the bid's size
     /// denominator).
     pub risk_nav: f64,
+    /// Composition throttle (doc 08 §4.5): the worst [`throttle`] across
+    /// gamma by type/expiry, stressed hedge loss, per-expiry exercise
+    /// demand and concurrent demand, book INCLUDING the fill. 0 = under
+    /// every soft threshold; 1 = at a hard one.
+    pub composition: f64,
 }
 
 /// Hard-decline reasons — the only cases where the desk refuses to quote
@@ -782,6 +912,18 @@ pub enum HardDecline {
     KillSwitch,
     /// The capital snapshot cannot back new risk (doc 08 §0.4).
     StaleCapital(Stale),
+    // ── composition solvency declines (doc 08 §4.5, SO-445) ──
+    /// Gamma for this option type at this expiry over the hard cap.
+    GammaConcentration,
+    /// Stressed hedge loss (crash on put hedges / rally on call hedges)
+    /// over the margin top-up cap.
+    HedgeStressLoss,
+    /// Call settlement cash at this expiry exceeds the exercise sources.
+    CallSettlementCash,
+    /// Put underlying at this expiry exceeds the three delivery paths.
+    PutUnderlying,
+    /// Concurrent exercise + top-up demand exceeds every source.
+    ConcurrentDemand,
 }
 
 impl HardDecline {
@@ -810,6 +952,11 @@ impl HardDecline {
             HardDecline::StrikeConcentration => "per-strike-bucket concentration cap",
             HardDecline::KillSwitch => "kill switch (NAV drawdown)",
             HardDecline::StaleCapital(s) => s.as_str(),
+            HardDecline::GammaConcentration => "gamma concentration (type × expiry) hard cap",
+            HardDecline::HedgeStressLoss => "stressed hedge loss over the margin top-up cap",
+            HardDecline::CallSettlementCash => "call settlement cash exceeds exercise sources",
+            HardDecline::PutUnderlying => "put underlying exceeds delivery paths",
+            HardDecline::ConcurrentDemand => "concurrent exercise + top-up demand exceeds sources",
         }
     }
 }
@@ -869,13 +1016,81 @@ pub fn evaluate(
     if x.premium_by_strike_bucket[bucket] + fill.premium > cfg.per_strike_bucket_max * risk_nav {
         return Err(HardDecline::StrikeConcentration);
     }
+    let composition = composition_throttle(cfg, x, fill, risk_nav)?;
     Ok(Utilization {
         premium: premium_after / (cfg.premium_budget_soft * risk_nav).max(f64::MIN_POSITIVE),
         vega: vega_after.abs() / vega_cap.max(f64::MIN_POSITIVE),
         theta: (theta_after / (cfg.theta_soft_nav_per_day * risk_nav).max(f64::MIN_POSITIVE))
             .max(0.0),
         risk_nav,
+        composition,
     })
+}
+
+/// Composition-aware limits (doc 08 §4.5, SO-445) for the book INCLUDING
+/// the fill: each metric past its hard threshold is a distinct solvency
+/// decline; otherwise the worst [`throttle`] position feeds the bid's
+/// composition term. A fill only loads the surfaces of ITS side and
+/// expiry, so a put against a call-heavy book is not charged the calls'
+/// rally loss.
+fn composition_throttle(
+    cfg: &LimitsConfig,
+    x: &BookExposure,
+    fill: &ProposedFill,
+    risk_nav: f64,
+) -> Result<f64, HardDecline> {
+    let s = &x.capital;
+    let at = |m: &HashMap<u64, f64>| m.get(&fill.expiry_ms).copied().unwrap_or(0.0);
+    let gamma = x.gamma_by_expiry.get(&fill.expiry_ms).copied().unwrap_or_default();
+    // Gamma by type × expiry.
+    let gamma_after = if fill.is_put { gamma.puts_notional_per_pct } else { gamma.calls_notional_per_pct }
+        + fill.gamma_notional_per_pct;
+    let (gamma_soft, gamma_hard) =
+        (cfg.gamma_soft_nav_per_pct_move * risk_nav, cfg.gamma_hard_nav_per_pct_move * risk_nav);
+    if gamma_after > gamma_hard {
+        return Err(HardDecline::GammaConcentration);
+    }
+    // Stressed hedge loss before monetization on the fill's side.
+    let fill_stress_loss =
+        fill.hedge_notional * if fill.is_put { x.stress_gap_down } else { x.stress_gap_up };
+    let stress_after =
+        if fill.is_put { x.crash_loss_put_hedges } else { x.rally_loss_call_hedges } + fill_stress_loss;
+    let (stress_soft, stress_hard) =
+        (cfg.hedge_stress_loss_soft * risk_nav, cfg.hedge_stress_loss_hard * risk_nav);
+    if stress_after > stress_hard {
+        return Err(HardDecline::HedgeStressLoss);
+    }
+    // Exercise demand at the fill's expiry against its side's sources.
+    let (demand_after, sources, decline) = if fill.is_put {
+        (
+            at(&x.put_underlying_value_by_expiry) + fill.exercise_cash,
+            s.put_exercise_sources(),
+            HardDecline::PutUnderlying,
+        )
+    } else {
+        (
+            at(&x.call_settlement_cash_by_expiry) + fill.exercise_cash,
+            s.call_exercise_sources(),
+            HardDecline::CallSettlementCash,
+        )
+    };
+    let (exercise_soft, exercise_hard) =
+        (cfg.exercise_demand_soft * sources, cfg.exercise_demand_hard * sources);
+    if demand_after > exercise_hard {
+        return Err(decline);
+    }
+    // Concurrent exercise + top-up demand against everything.
+    let concurrent_after = x.concurrent_demand + fill.exercise_cash + fill_stress_loss;
+    let all_sources = s.call_exercise_sources() + s.put_exercise_sources() + s.margin_topup_cap;
+    let (concurrent_soft, concurrent_hard) =
+        (cfg.concurrent_demand_soft * all_sources, cfg.concurrent_demand_hard * all_sources);
+    if concurrent_after > concurrent_hard {
+        return Err(HardDecline::ConcurrentDemand);
+    }
+    Ok(throttle(gamma_after, gamma_soft, gamma_hard)
+        .max(throttle(stress_after, stress_soft, stress_hard))
+        .max(throttle(demand_after, exercise_soft, exercise_hard))
+        .max(throttle(concurrent_after, concurrent_soft, concurrent_hard)))
 }
 
 // ── kill switch ────────────────────────────────────────────────────────
@@ -940,11 +1155,14 @@ mod tests {
         BookExposure {
             nav: 1e9,
             capital: CapitalSnapshot::test_fresh(1e9, NOW),
+            stress_gap_down: 0.60,
+            stress_gap_up: 0.80,
             ..Default::default()
         }
     }
 
-    /// ATM-ish call: hedge notional 6× premium, strike cash 12× premium.
+    /// ATM-ish call: hedge notional 6× premium, strike cash 12× premium,
+    /// gamma 0.4× premium of delta notional per 1% move.
     fn fill() -> ProposedFill {
         ProposedFill {
             premium: 1e6,
@@ -955,6 +1173,7 @@ mod tests {
             strike_bucket: 1,
             hedge_notional: 6e6,
             exercise_cash: 12e6,
+            gamma_notional_per_pct: 4e5,
         }
     }
 
@@ -999,6 +1218,7 @@ mod tests {
         f.premium = 0.002 * 1e9;
         f.hedge_notional = 6.0 * f.premium;
         f.exercise_cash = 12.0 * f.premium;
+        f.gamma_notional_per_pct = 0.4 * f.premium;
         assert_eq!(
             evaluate(&cfg(), &x, &f, NOW),
             Err(HardDecline::CallCapacity(Binding::PremiumBudget))
@@ -1049,6 +1269,7 @@ mod tests {
         f.premium = 0.002 * 1e9;
         f.hedge_notional = 6.0 * f.premium;
         f.exercise_cash = 12.0 * f.premium;
+        f.gamma_notional_per_pct = 0.4 * f.premium;
         assert_eq!(
             evaluate(&cfg(), &x, &f, NOW),
             Err(HardDecline::ExpiryCapacity(Binding::PremiumBudget))
@@ -1071,6 +1292,178 @@ mod tests {
         let mut x = base();
         x.kill_switch = true;
         assert_eq!(evaluate(&cfg(), &x, &fill(), NOW), Err(HardDecline::KillSwitch));
+    }
+
+    // ── composition limits (doc 08 §4.5 gate, SO-445) ──────────────────
+
+    /// The same clip on the other side.
+    fn put_fill() -> ProposedFill {
+        ProposedFill { is_put: true, ..fill() }
+    }
+
+    fn composition_of(x: &BookExposure, f: &ProposedFill) -> Result<f64, HardDecline> {
+        evaluate(&cfg(), x, f, NOW).map(|u| u.composition)
+    }
+
+    #[test]
+    fn throttle_is_zero_under_soft_one_at_hard_and_keeps_growing() {
+        assert_eq!(throttle(0.04, 0.05, 0.10), 0.0);
+        assert_eq!(throttle(0.05, 0.05, 0.10), 0.0);
+        assert!((throttle(0.075, 0.05, 0.10) - 0.5).abs() < 1e-12);
+        assert!((throttle(0.10, 0.05, 0.10) - 1.0).abs() < 1e-12);
+        assert!((throttle(0.15, 0.05, 0.10) - 2.0).abs() < 1e-12);
+        // Degenerate soft == hard: a step.
+        assert_eq!(throttle(0.9, 1.0, 1.0), 0.0);
+        assert_eq!(throttle(1.1, 1.0, 1.0), f64::INFINITY);
+    }
+
+    #[test]
+    fn concurrent_demand_takes_the_worst_expiry_plus_worst_stress() {
+        let calls = HashMap::from([(1u64, 5e8), (2, 1e8)]);
+        let puts = HashMap::from([(2u64, 6e8), (3, 2e8)]);
+        // Expiry 2: 1e8 + 6e8 = 7e8 is the worst; + max(crash 3e7, rally 4e7).
+        assert_eq!(concurrent_demand(&calls, &puts, 3e7, 4e7), 7e8 + 4e7);
+        assert_eq!(concurrent_demand(&HashMap::new(), &HashMap::new(), 0.0, 0.0), 0.0);
+        assert_eq!(flash_utilization(0.0, 0.0), 0.0);
+        assert_eq!(flash_utilization(1.0, 0.0), f64::INFINITY);
+        assert_eq!(flash_utilization(5e8, 1e9), 0.5);
+    }
+
+    /// Call-heavy book: the SHORT-perp hedges backing the calls are
+    /// already 9% of NAV underwater in the +80% rally (soft 5% / hard
+    /// 10%). Another call widens; a big call declines on the rally loss;
+    /// a put is charged nothing — its side is empty.
+    #[test]
+    fn call_heavy_book_throttles_and_declines_calls_only() {
+        let mut x = base();
+        x.rally_loss_call_hedges = 0.09 * 1e9;
+        x.call_premium = 0.15 * 1e9;
+        x.capital.call_premium_marked = 0.15 * 1e9;
+        x.premium_deployed = 0.15 * 1e9;
+        // Small call: 6e6 × 0.8 = 4.8e6 more loss → 0.0948 NAV, past soft
+        // but under hard → throttle ≈ 0.9.
+        let t = composition_of(&x, &fill()).unwrap();
+        assert!((t - (0.0948 - 0.05) / 0.05).abs() < 1e-9, "{t}");
+        // Big call: +1.6e7 loss → 0.106 NAV > hard.
+        let big = ProposedFill { hedge_notional: 2e7, ..fill() };
+        assert_eq!(composition_of(&x, &big), Err(HardDecline::HedgeStressLoss));
+        // The same big clip as a PUT loads the crash side (empty): the
+        // composition term stays 0 and it quotes.
+        let big_put = ProposedFill { is_put: true, ..big };
+        assert_eq!(composition_of(&x, &big_put), Ok(0.0));
+        // Gamma concentration is per type × expiry: calls at expiry 42
+        // near the hard cap decline a call there, not at expiry 43 and
+        // not a put.
+        let mut x = base();
+        x.gamma_by_expiry.insert(42, GammaByType { calls_notional_per_pct: 0.099 * 1e9, ..Default::default() });
+        let g = ProposedFill { gamma_notional_per_pct: 2e6, ..fill() };
+        assert_eq!(composition_of(&x, &g), Err(HardDecline::GammaConcentration));
+        assert!(composition_of(&x, &ProposedFill { expiry_ms: 43, ..g }).is_ok());
+        assert!(composition_of(&x, &ProposedFill { is_put: true, ..g }).is_ok());
+        // Under the hard cap it widens: 0.06 NAV after the fill → 0.2.
+        x.gamma_by_expiry.insert(42, GammaByType { calls_notional_per_pct: 0.058 * 1e9, ..Default::default() });
+        let t = composition_of(&x, &g).unwrap();
+        assert!((t - 0.2).abs() < 1e-9, "{t}");
+    }
+
+    /// Put-heavy book: the LONG-perp hedges backing the puts carry the
+    /// crash loss, and the puts' underlying demand at expiry 42 nearly
+    /// exhausts the three delivery paths. Puts widen then decline;
+    /// calls are untouched.
+    #[test]
+    fn put_heavy_book_throttles_and_declines_puts_only() {
+        let mut x = base();
+        // Delivery paths: 1e8 of free underlying, no flash, no spot.
+        x.capital.free_underlying_by_asset.insert("TSUI".into(), 1e8);
+        x.capital.base_flash_capacity = 0.0;
+        x.put_underlying_value_by_expiry.insert(42, 0.85e8);
+        // 0.85e8 + 1.2e7 = 0.97e8 → past soft 0.8e8, under hard 1e8:
+        // throttle (0.97 − 0.8) / 0.2 = 0.85.
+        let t = composition_of(&x, &put_fill()).unwrap();
+        assert!((t - 0.85).abs() < 1e-9, "{t}");
+        // A bigger put needs 2e7 of underlying → 1.05e8 > every path.
+        let big = ProposedFill { exercise_cash: 2e7, ..put_fill() };
+        assert_eq!(composition_of(&x, &big), Err(HardDecline::PutUnderlying));
+        // The same clip as a CALL pays strike cash from settlement (1e9
+        // free + flash): untouched.
+        assert_eq!(composition_of(&x, &ProposedFill { is_put: false, ..big }), Ok(0.0));
+        // Crash loss mirrors the call-heavy case.
+        let mut x = base();
+        x.crash_loss_put_hedges = 0.098 * 1e9;
+        let big = ProposedFill { hedge_notional: 1e7, ..put_fill() }; // +6e6 → 0.104
+        assert_eq!(composition_of(&x, &big), Err(HardDecline::HedgeStressLoss));
+        assert!(composition_of(&x, &ProposedFill { is_put: false, ..big }).is_ok());
+    }
+
+    /// Mixed book: neither side trips its own surfaces, but the
+    /// CONCURRENT demand — the worst expiry's calls' strike cash + puts'
+    /// underlying, plus the worse stressed hedge loss — against every
+    /// source and the top-up cap does.
+    #[test]
+    fn mixed_book_trips_the_concurrent_demand_limit() {
+        let mut x = base();
+        // Sources: 1e9 free settlement (calls), 2e8 free underlying
+        // (puts), no flash, top-up cap 5e7 → 1.25e9 total; soft 1e9,
+        // hard 1.25e9.
+        x.capital.quote_flash_capacity = 0.0;
+        x.capital.base_flash_capacity = 0.0;
+        x.capital.free_underlying_by_asset.insert("TSUI".into(), 2e8);
+        x.capital.margin_topup_cap = 5e7;
+        x.call_settlement_cash_by_expiry.insert(42, 0.78e9);
+        x.put_underlying_value_by_expiry.insert(42, 0.21e9);
+        x.crash_loss_put_hedges = 0.04 * 1e9;
+        x.rally_loss_call_hedges = 0.04 * 1e9;
+        x.concurrent_demand = concurrent_demand(
+            &x.call_settlement_cash_by_expiry,
+            &x.put_underlying_value_by_expiry,
+            x.crash_loss_put_hedges,
+            x.rally_loss_call_hedges,
+        );
+        assert_eq!(x.concurrent_demand, 0.99e9 + 0.04e9);
+        // A small call: +1.2e7 cash + 4.8e6 rally loss → 1.0468e9 → past
+        // soft, throttle ≈ 0.19. No per-side limit trips: call cash
+        // 0.792e9 of the 1e9 settlement sources is under soft 0.8, the
+        // rally loss 0.0448 NAV under soft 0.05.
+        let t = composition_of(&x, &fill()).unwrap();
+        assert!((t - (1.0468e9 - 1e9) / 0.25e9).abs() < 1e-9, "{t}");
+        // A big call (strike cash 3.5e8): call cash at 42 → 1.13e9 > the
+        // 1e9 settlement sources — the per-side solvency decline.
+        let big = ProposedFill { exercise_cash: 3.5e8, ..fill() };
+        assert_eq!(composition_of(&x, &big), Err(HardDecline::CallSettlementCash));
+        // A call that fits its own side (cash 0.998e9 ≤ 1e9) still busts
+        // the concurrent total: 1.03e9 + 2.18e8 + 4.8e6 > 1.25e9.
+        let concurrent = ProposedFill { exercise_cash: 2.18e8, ..fill() };
+        assert_eq!(composition_of(&x, &concurrent), Err(HardDecline::ConcurrentDemand));
+    }
+
+    /// Balanced, moderately sized book: no composition surface reaches
+    /// its soft threshold, so nothing widens and nothing declines.
+    #[test]
+    fn balanced_book_trips_no_composition_limit() {
+        let mut x = base();
+        x.gamma_by_expiry.insert(
+            42,
+            GammaByType {
+                calls_units: 10.0,
+                puts_units: 10.0,
+                calls_notional_per_pct: 0.02 * 1e9,
+                puts_notional_per_pct: 0.02 * 1e9,
+            },
+        );
+        x.crash_loss_put_hedges = 0.03 * 1e9;
+        x.rally_loss_call_hedges = 0.03 * 1e9;
+        x.call_settlement_cash_by_expiry.insert(42, 2e8);
+        x.put_underlying_value_by_expiry.insert(42, 2e8);
+        x.capital.free_underlying_by_asset.insert("TSUI".into(), 5e8);
+        x.capital.margin_topup_cap = 1e8;
+        x.concurrent_demand = concurrent_demand(
+            &x.call_settlement_cash_by_expiry,
+            &x.put_underlying_value_by_expiry,
+            x.crash_loss_put_hedges,
+            x.rally_loss_call_hedges,
+        );
+        assert_eq!(composition_of(&x, &fill()), Ok(0.0));
+        assert_eq!(composition_of(&x, &put_fill()), Ok(0.0));
     }
 
     // ── capital snapshot + policy (doc 08 §4.6 gates, SO-444) ──────────

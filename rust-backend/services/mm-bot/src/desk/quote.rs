@@ -104,6 +104,8 @@ pub fn price_writer_flow(
         // the underlying value a put exercise delivers.
         hedge_notional: (greeks.delta * amount).abs() * ctx.spot,
         exercise_cash: if inputs.is_put { ctx.spot } else { strike } * amount,
+        // Delta-notional change per 1% spot move (doc 08 §4.5, SO-445).
+        gamma_notional_per_pct: greeks.gamma * amount * 0.01 * ctx.spot * ctx.spot,
     };
     let util = match limits::evaluate(limits_cfg, &ctx.exposure, &fill, now_ms) {
         Ok(u) => u,
@@ -131,6 +133,7 @@ pub fn price_writer_flow(
             v1.funding_income_credit,
             &ctx.hedge_cost,
         ),
+        composition_utilization: util.composition,
     };
     let Some((total_bid, _sigma)) =
         model.v1_bid_total(inputs.is_put, ctx.spot, strike, t, amount, &bid_ctx, v1)
