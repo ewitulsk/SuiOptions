@@ -91,7 +91,16 @@ impl WindowsEstimator {
     }
 
     pub fn push(&mut self, ts_ms: i64, price: f64) {
-        if self.is_har() && ts_ms >= 0 && self.raw.last().is_none_or(|(t, _)| (ts_ms as u64) > *t) {
+        let interval = self.cfg.sample_interval_s * 1000;
+        if ts_ms.saturating_sub(self.last_sample_ms) < interval {
+            return;
+        }
+        self.last_sample_ms = ts_ms;
+        self.samples.push((ts_ms, price));
+        // The forecaster sees the same sampled series (doc 07 §4: the
+        // per-asset interval is the floor for SUI anyway); a minute-level
+        // year would make every forecast re-sort a million points.
+        if self.is_har() && ts_ms >= 0 {
             self.raw.push((ts_ms as u64, price));
             let keep_from = (ts_ms as u64).saturating_sub(self.har_cfg.required_history_ms() + 86_400_000);
             if self.raw.first().is_some_and(|(t, _)| *t < keep_from) {
@@ -99,12 +108,6 @@ impl WindowsEstimator {
                 self.raw.drain(..first);
             }
         }
-        let interval = self.cfg.sample_interval_s * 1000;
-        if ts_ms.saturating_sub(self.last_sample_ms) < interval {
-            return;
-        }
-        self.last_sample_ms = ts_ms;
-        self.samples.push((ts_ms, price));
         // Keep a little more than the long window.
         let keep_from = ts_ms - (self.cfg.long_window_hours * 3_600_000.0) as i64 - interval;
         if let Some(first) = self.samples.iter().position(|(t, _)| *t >= keep_from) {
