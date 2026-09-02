@@ -279,6 +279,8 @@ pub struct VenueDto {
     /// |position| × spot, settlement raw.
     pub notional: f64,
     pub realized_pnl: f64,
+    /// Cumulative funding paid on the venue (negative = received) — SO-438.
+    pub funding_paid: f64,
     /// `None` when a venue read failed this snapshot.
     pub read_ok: bool,
 }
@@ -472,6 +474,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
     for mv in &desk.venue_roster {
         let spot = spots.get(&mv.symbol).map(|s| s.spot).unwrap_or(0.0);
         let realized_pnl = mv.venue.realized_pnl().await.unwrap_or(0.0);
+        let funding_paid = mv.venue.funding_paid().await.unwrap_or(0.0);
         match read_venue(mv, spot).await {
             Some(r) => venues.push(VenueDto {
                 name: r.name,
@@ -482,6 +485,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
                 margin_headroom: r.margin_headroom,
                 notional: r.notional,
                 realized_pnl,
+                funding_paid,
                 read_ok: true,
             }),
             None => venues.push(VenueDto {
@@ -493,6 +497,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
                 margin_headroom: 0.0,
                 notional: 0.0,
                 realized_pnl,
+                funding_paid,
                 read_ok: false,
             }),
         }

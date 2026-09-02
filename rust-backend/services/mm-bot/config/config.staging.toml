@@ -128,6 +128,7 @@ kind                = "paper"
 name                = "paper"
 slippage_bps        = 3.5                  # doc 07 §6.1: taker 3.5 bp + spread
 funding_rate_annual = 0.05
+fill_fraction       = 0.5                  # exercise the partial-fill path (SO-438)
 
 # ── Testnet counterparty sim (SO-299) ──────────────────────────────────
 # Retail stand-in: redeems expired wallet Positions + faucet funding.
