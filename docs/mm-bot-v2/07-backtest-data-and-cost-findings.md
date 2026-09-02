@@ -107,7 +107,7 @@ only real quote data we will ever get for SUI, and it is the only way to
   the wrong engine** —
   daily OHLC CSVs, synthetic paths, targeting the deprecated
   covered-call vault. Daily bars destroy the intraday rebalancing that
-  the P&L actually lives in. (Being cut separately.)
+  the P&L actually lives in. (Removed in SO-452.)
 
 ---
 

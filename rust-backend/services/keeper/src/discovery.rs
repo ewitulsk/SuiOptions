@@ -1,60 +1,22 @@
-//! Vault auto-discovery: the keeper finds its vaults instead of being
-//! configured with them. As soon as a vault is created on chain, the
-//! indexer materializes it from `VaultCreated` (C3/D2 `vaults` view) and
-//! the next keeper tick picks it up — no config edit, no redeploy.
+//! Pyth `PriceInfoObject` lookup for the trading-vault cranks.
 //!
-//! Per discovered vault the keeper still needs two things that aren't
-//! in the event: the shared Pyth `PriceInfoObject` ids for the vault's
-//! two pinned feeds. Both are derivable on chain:
+//! Pyth's state object maps feed id → `PriceInfoObject` through a
+//! `Table<PriceIdentifier, ID>` hung off the state as the dynamic field
+//! named `b"price_info"` (the same lookup pyth-sui-js does in
+//! `getPriceFeedObjectId`). The table handle is resolved once and cached
+//! ([`PriceInfoTable`]); each feed then costs one dynamic-field read
+//! ([`price_info_object_for`]).
 //!
-//!   1. The vault object's config carries the pinned feed ids and the
-//!      pair decimals (`state::VaultConfigView`) — authoritative, since
-//!      they're what `oracle::spot_cross` enforces.
-//!   2. Pyth's state object maps feed id → `PriceInfoObject` through a
-//!      `Table<PriceIdentifier, ID>` hung off the state as the dynamic
-//!      field named `b"price_info"` (the same lookup pyth-sui-js does in
-//!      `getPriceFeedObjectId`). The table handle is resolved once and
-//!      cached; each feed costs one dynamic-field read after that.
-//!
-//! Type-string forms (see move-type-normalization.md): the indexer
-//! stores chain `TypeName`s (no `0x`) for both vaults and buckets, so
-//! the *indexer-form* strings are kept for bucket filters (exact match
-//! by construction), while the canonical `0x` forms feed PTB type args.
+//! The covered-call vault auto-discovery that used to live here
+//! (`DiscoveredVault` / `resolve_vault`) was removed in SO-452.
 
 use anyhow::{anyhow, Context, Result};
 use move_core_types::language_storage::TypeTag;
-use serde_json::json;
 use std::str::FromStr;
 use sui_tx::chain::ChainClient;
 use sui_types::base_types::ObjectID;
-use sui_types::dynamic_field::DynamicFieldName;
 
 use protocol_types::PriceFeedId;
-
-use crate::state::fetch_vault_view;
-
-/// One vault the keeper cranks, fully resolved from chain + indexer
-/// state at discovery time. Everything here is immutable for the
-/// vault's life (feeds and decimals are pinned in `VaultConfig`; a
-/// `PriceInfoObject` is never re-created for a feed).
-#[derive(Debug, Clone)]
-pub struct DiscoveredVault {
-    pub vault_id: ObjectID,
-    /// Chain `TypeName` form, exactly as the indexer stores bucket
-    /// types — used for `buckets(assetType:…)` filters.
-    pub underlying_type_indexer: String,
-    pub settlement_type_indexer: String,
-    /// Canonical `0x`-prefixed forms — used for PTB type args.
-    pub underlying_type: String,
-    pub settlement_type: String,
-    pub share_type: String,
-    pub underlying_decimals: u8,
-    pub settlement_decimals: u8,
-    pub underlying_feed: PriceFeedId,
-    pub settlement_feed: PriceFeedId,
-    pub underlying_price_info: ObjectID,
-    pub settlement_price_info: ObjectID,
-}
 
 /// The Pyth state's feed → `PriceInfoObject` table, resolved once.
 #[derive(Debug, Clone)]
@@ -187,57 +149,9 @@ pub async fn price_info_object_for(
         .with_context(|| format!("parsing PriceInfoObject id {id:?} for feed {feed}"))
 }
 
-/// Fully resolve one indexer vault row into a crankable
-/// [`DiscoveredVault`]: read the vault object (pinned feeds, decimals),
-/// then map both feeds to their `PriceInfoObject`s.
-pub async fn resolve_vault(
-    client: &ChainClient,
-    row: &indexer_graphql::Vault,
-    table: &PriceInfoTable,
-) -> Result<DiscoveredVault> {
-    let vault_id = ObjectID::new(*row.vault_id.as_bytes());
-    let view = fetch_vault_view(client, vault_id).await?;
-    let underlying_feed = feed_from_bytes(&view.config.underlying_feed_id)
-        .with_context(|| format!("vault {vault_id} underlying feed"))?;
-    let settlement_feed = feed_from_bytes(&view.config.settlement_feed_id)
-        .with_context(|| format!("vault {vault_id} settlement feed"))?;
-    let underlying_price_info = price_info_object_for(client, table, underlying_feed).await?;
-    let settlement_price_info = price_info_object_for(client, table, settlement_feed).await?;
-    Ok(DiscoveredVault {
-        vault_id,
-        underlying_type_indexer: row.underlying_type.as_str().to_string(),
-        settlement_type_indexer: row.settlement_type.as_str().to_string(),
-        underlying_type: row.underlying_type.to_canonical(),
-        settlement_type: row.settlement_type.to_canonical(),
-        share_type: row.share_type.to_canonical(),
-        underlying_decimals: view.config.underlying_decimals,
-        settlement_decimals: view.config.settlement_decimals,
-        underlying_feed,
-        settlement_feed,
-        underlying_price_info,
-        settlement_price_info,
-    })
-}
-
-fn feed_from_bytes(bytes: &[u8]) -> Result<PriceFeedId> {
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("pinned feed id is {} bytes, want 32", bytes.len()))?;
-    Ok(PriceFeedId(arr))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn feed_from_bytes_round_trips() {
-        let hex = "50c67b3fd225db8912a424dd4baed60ffdde625ed2feaaf283724f9608fea266";
-        let bytes: Vec<u8> = (0..64).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
-        let feed = feed_from_bytes(&bytes).unwrap();
-        assert_eq!(feed, PriceFeedId::from_hex(hex).unwrap());
-        assert!(feed_from_bytes(&bytes[..31]).is_err());
-    }
 
     /// Live-network check of the two dynamic-field lookups, pinned to
     /// the values verified by hand against the Sui testnet fullnode

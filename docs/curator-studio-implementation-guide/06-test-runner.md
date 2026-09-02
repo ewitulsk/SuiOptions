@@ -1,6 +1,6 @@
 # 06 — P2: `test-runner`
 
-API-first simulation service (spec D12/D13). New crate `rust-backend/services/test-runner`, port **9021**, nginx-routed (dashboard + agents call it; BYO API keys at P4). Fork the skeleton from **`rust-backend/tools/backtester`** (scenario/sweep/report/rayon structure — `scenario.rs`, `run.rs`, `report.rs` transfer directly) and the engine ideas from **`crates/vault-sim`**; the covered-call-vault specifics get replaced with the studio strategy model.
+API-first simulation service (spec D12/D13). New crate `rust-backend/services/test-runner`, port **9021**, nginx-routed (dashboard + agents call it; BYO API keys at P4). Fork the skeleton from **`rust-backend/tools/backtester`** (scenario/sweep/report/rayon structure — `scenario.rs`, `run.rs`, `report.rs` transfer directly) and the engine ideas from **`crates/vault-sim`** (both removed in SO-452 — recover from git history, or start from the new `crates/backtester`); the covered-call-vault specifics get replaced with the studio strategy model.
 
 ```
 services/test-runner/

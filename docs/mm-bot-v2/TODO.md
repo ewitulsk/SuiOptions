@@ -127,7 +127,7 @@ what it costs).
 9. [ ] **Pyth-leg gas-station templates** so attestation-bearing
     deposits are sponsorable (pre-existing follow-up; equity-record leg
     IS now allowed, pyth legs still aren't).
-10. [ ] **Sim/desk soak on staging** vs the vault-sim reference before
+10. [ ] **Sim/desk soak on staging** vs the backtester reference before
     real-money parameters (00-plan sequencing: paper-hedged staging soak
     gates the real perps venue; venue mix decided empirically after).
 

@@ -1,11 +1,11 @@
-//! TOML config for the vault-keeper (README §11).
+//! TOML config for the keeper.
 //!
 //! Vaults are **discovered**, not configured: the tick loop reads the
-//! indexer's `vaults` view (fed by `VaultCreated`) and resolves each
-//! vault's pinned feeds / decimals from its chain object and its
-//! `PriceInfoObject`s from the Pyth state table (`src/discovery.rs`).
-//! The config carries only the endpoints, the Pyth deployment handles,
-//! and the strategy defaults applied to every discovered vault.
+//! indexer's `trading_vaults` view and resolves the Pyth
+//! `PriceInfoObject`s for the token catalog's feeds from the Pyth state
+//! table (`src/discovery.rs`). The config carries only the endpoints,
+//! the Pyth deployment handles, and the defaults applied to every
+//! discovered vault.
 //!
 //! ```toml
 //! indexer_graphql_url = "http://127.0.0.1:9002/graphql"
@@ -13,19 +13,13 @@
 //!
 //! [pyth]
 //! hermes_url          = "https://hermes-beta.pyth.network"  # testnet = beta feeds
-//! benchmarks_url      = "https://benchmarks.pyth.network"
 //! pyth_package_id     = "0x…"   # latest (upgraded) pyth package
 //! wormhole_package_id = "0x…"
 //! pyth_state_id       = "0x…"
 //! wormhole_state_id   = "0x…"
 //!
 //! [vault_defaults]
-//! iv_ratio = 1.15
-//! target_delta = 0.20
-//! sigma_fallback = 0.85
-//! [vault_defaults.slicing]
-//! slices = 4
-//! stagger_minutes = 90
+//! vol_window_days = 30
 //! ```
 
 use std::net::SocketAddr;
@@ -50,20 +44,8 @@ fn default_hermes_url() -> String {
 fn default_update_fee_mist() -> u64 {
     1
 }
-fn default_iv_ratio() -> f64 {
-    1.15
-}
-fn default_target_delta() -> f64 {
-    0.10
-}
 fn default_vol_window_days() -> u32 {
     30
-}
-fn default_slices() -> u64 {
-    4
-}
-fn default_stagger_minutes() -> u64 {
-    90
 }
 fn default_reconciliation_tolerance_bps() -> u64 {
     2_000
@@ -87,14 +69,13 @@ pub struct KeeperConfig {
     #[serde(default = "default_mark_refresh_interval_ms")]
     pub mark_refresh_interval_ms: u64,
 
-    /// Indexer GraphQL endpoint — vault discovery (`vaults` view),
-    /// bucket candidates for strike selection, and the call type of the
-    /// round's current bucket.
+    /// Indexer GraphQL endpoint — trading-vault discovery
+    /// (`trading_vaults` view) and option-bucket lookups.
     pub indexer_graphql_url: String,
 
     pub pyth: PythKeeperConfig,
 
-    /// Strategy knobs applied to every discovered vault.
+    /// Defaults applied to every discovered vault.
     #[serde(default)]
     pub vault_defaults: VaultDefaults,
 
@@ -191,7 +172,7 @@ pub struct PythKeeperConfig {
     /// Hermes endpoint serving the SAME feed set the network's
     /// PriceInfoObjects are keyed by: `hermes-beta.pyth.network` for Sui
     /// testnet (beta feed ids), `hermes.pyth.network` for mainnet. Used only
-    /// for the on-chain VAA (submit.rs); spot/σ come from oracle-service.
+    /// for the on-chain VAA (trading_vault.rs); spot/σ come from oracle-service.
     #[serde(default = "default_hermes_url")]
     pub hermes_url: String,
 
@@ -211,84 +192,19 @@ pub struct PythKeeperConfig {
     pub update_fee_mist: u64,
 }
 
-/// Strategy defaults applied to every discovered vault (the per-vault
-/// chain identity — types, feeds, decimals, price-info objects — is
-/// resolved by `discovery.rs`, not configured).
+/// Defaults applied to every discovered vault.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct VaultDefaults {
-    /// IV ≈ realized σ × this ratio (calibrated: BTC 1.19, ETH 1.08).
-    pub iv_ratio: f64,
-
-    /// Strike-selection delta target. 0.10 is the doc 04 design point;
-    /// the SUI launch memo (guide doc 08) picks 0.20 — at 0.10 the grid
-    /// snap-up plus the auction haircut leaves too little premium above
-    /// the reserve floor.
-    pub target_delta: f64,
-
-    /// Per-cadence override of `target_delta` for short-round (hourly)
-    /// vaults — those with `round_ms <= SHORT_ROUND_THRESHOLD_MS`. At an
-    /// hourly tenor a 0.20-delta call's premium falls below the reserve, so
-    /// these vaults target closer to ATM (higher delta) to stay sellable.
-    /// Absent ⇒ `target_delta` applies to every cadence.
-    pub short_round_target_delta: Option<f64>,
-
-    /// σ when the Benchmarks fetch fails (always, on testnet — beta
-    /// feed ids aren't served there). No fallback ⇒ the vault skips
-    /// strike selection that tick.
-    pub sigma_fallback: Option<f64>,
-
+    /// Realized-vol window (days) for the options-adapter `VolBook`
+    /// premium-mark crank (σ comes from oracle-service).
     pub vol_window_days: u32,
-
-    pub slicing: SlicingConfig,
 }
 
 impl Default for VaultDefaults {
     fn default() -> Self {
         Self {
-            iv_ratio: default_iv_ratio(),
-            target_delta: default_target_delta(),
-            short_round_target_delta: None,
-            sigma_fallback: None,
             vol_window_days: default_vol_window_days(),
-            slicing: SlicingConfig::default(),
-        }
-    }
-}
-
-/// Round duration at/below which a vault is "short cadence" (hourly): its tiny
-/// option tenor needs a closer-to-ATM strike to clear the reserve, so
-/// `short_round_target_delta` (when set) overrides `target_delta`.
-pub const SHORT_ROUND_THRESHOLD_MS: u64 = 6 * 3_600_000; // 6h
-
-impl VaultDefaults {
-    /// The strike-selection delta target for a vault of this cadence.
-    pub fn target_delta_for(&self, round_ms: u64) -> f64 {
-        if round_ms <= SHORT_ROUND_THRESHOLD_MS {
-            self.short_round_target_delta.unwrap_or(self.target_delta)
-        } else {
-            self.target_delta
-        }
-    }
-}
-
-/// RFQ slice schedule (README §6). The keeper opens one auction at a
-/// time, sized `deployable / remaining_stagger_slots` (capped at
-/// `slices` slots and the vault's `max_slice_amount`); unsold collateral
-/// returns to `deployable` and is re-offered while the window is open.
-#[derive(Debug, Clone, Copy, Deserialize)]
-pub struct SlicingConfig {
-    #[serde(default = "default_slices")]
-    pub slices: u64,
-    #[serde(default = "default_stagger_minutes")]
-    pub stagger_minutes: u64,
-}
-
-impl Default for SlicingConfig {
-    fn default() -> Self {
-        Self {
-            slices: default_slices(),
-            stagger_minutes: default_stagger_minutes(),
         }
     }
 }
@@ -326,41 +242,8 @@ mod tests {
             assert!(cfg.pyth.pyth_state_id.starts_with("0x243759"), "{env}");
             assert!(cfg.pyth.wormhole_state_id.starts_with("0x31358d"), "{env}");
             assert_eq!(cfg.pyth.update_fee_mist, 1, "{env}");
-            // Launch-memo strategy defaults (guide doc 08).
-            assert_eq!(cfg.vault_defaults.target_delta, 0.20, "{env}");
-            // Hourly (short-round) vaults target closer to ATM to clear the reserve.
-            assert_eq!(
-                cfg.vault_defaults.short_round_target_delta,
-                Some(0.25),
-                "{env}"
-            );
-            assert_eq!(cfg.vault_defaults.target_delta_for(3_600_000), 0.25, "{env}: hourly");
-            assert_eq!(cfg.vault_defaults.target_delta_for(604_800_000), 0.20, "{env}: weekly");
-            assert_eq!(cfg.vault_defaults.iv_ratio, 1.15, "{env}");
-            assert_eq!(
-                cfg.vault_defaults.sigma_fallback,
-                Some(0.85),
-                "{env}: sigma_fallback backstops unmapped feeds / benchmark outages"
-            );
-            assert_eq!(cfg.vault_defaults.slicing.slices, 4, "{env}");
-            assert_eq!(cfg.vault_defaults.slicing.stagger_minutes, 90, "{env}");
+            assert_eq!(cfg.vault_defaults.vol_window_days, 30, "{env}");
         }
-    }
-
-    #[test]
-    fn target_delta_for_overrides_only_short_rounds() {
-        let d = VaultDefaults {
-            target_delta: 0.20,
-            short_round_target_delta: Some(0.25),
-            ..VaultDefaults::default()
-        };
-        // Hourly (≤ 6h) takes the override; weekly keeps the global target.
-        assert_eq!(d.target_delta_for(3_600_000), 0.25); // 1h
-        assert_eq!(d.target_delta_for(SHORT_ROUND_THRESHOLD_MS), 0.25); // boundary
-        assert_eq!(d.target_delta_for(604_800_000), 0.20); // weekly
-        // No override ⇒ global target at every cadence.
-        let d = VaultDefaults { short_round_target_delta: None, ..d };
-        assert_eq!(d.target_delta_for(3_600_000), 0.20);
     }
 
     /// `[external]` defaults apply when the section is absent (as in the
@@ -438,7 +321,6 @@ mod tests {
     fn example_config_parses() {
         let cfg: KeeperConfig =
             toml::from_str(include_str!("../config/config.example.toml")).unwrap();
-        assert_eq!(cfg.vault_defaults.target_delta, 0.20);
-        assert_eq!(cfg.vault_defaults.slicing.slices, 4);
+        assert_eq!(cfg.vault_defaults.vol_window_days, 30);
     }
 }

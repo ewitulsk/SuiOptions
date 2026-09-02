@@ -11,8 +11,10 @@
 > This guide is kept as the design record. The live curated-vault product
 > is [`docs/vault-curator-product.md`](../vault-curator-product.md)
 > (`contracts/trading-vault`). Docs 01–02 (contract modularization,
-> on-chain RFQ) and 06 (`vault-sim`) still describe live code; docs 03–05
-> and 07–08 describe the retired product.
+> on-chain RFQ) still describe live code; docs 03–08 describe the retired
+> product. The `vault-sim` crate and `tools/backtester` (doc 06) were
+> removed in SO-452 — see `docs/mm-bot-v2/08-backtesting-framework.md`
+> for the replacement `crates/backtester`.
 
 **Status**: Design / implementation guide (v1)
 **Scope**: Everything required to ship automated covered-call vaults (SUI-C, wBTC-C) on top of

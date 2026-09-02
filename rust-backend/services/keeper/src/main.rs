@@ -12,11 +12,6 @@
 //! expired positions, sweep DeepBook and `vault_mm` transfer-ins, post
 //! external-account equity, and fulfill the withdrawal queue with a composed
 //! attestation-bearing appraisal.
-//!
-//! The covered-call ("Ribbon-style") vault crank this binary used to run
-//! alongside the above is deprecated (SO-332) and now lives in
-//! [`keeper::legacy_vault`], reached only through the undeployed
-//! `keeper-legacy` binary.
 
 use std::str::FromStr;
 use std::time::Duration;

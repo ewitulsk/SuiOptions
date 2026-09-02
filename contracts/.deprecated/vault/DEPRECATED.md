@@ -5,8 +5,10 @@ is no longer published to any network and nothing off-chain drives it.
 
 The code stays in-tree deliberately: it is the reference for how the round
 state machine, the share/pps accounting and the oracle-bounded cranks were
-built, and `vault-sim` still cross-validates its integer math. Do not extend
-it, and do not wire anything new to it.
+built. Do not extend it, and do not wire anything new to it. Its off-chain
+counterparts (`crates/vault-sim`, `tools/backtester`, the keeper's
+covered-call crank) were removed in SO-452; `vault_tests.move` is now the
+only golden for the integer math.
 
 ## What "deprecated" means concretely
 
@@ -16,7 +18,7 @@ it, and do not wire anything new to it.
 | Move CI | in the `move-ci.yml` matrix | **not built or tested** in CI |
 | `deployments.json` | `packageInfo.vault` written each deploy | **absent** on fresh records; the field stays `Option` so old records still parse |
 | Vault creation | `option-scheduler` vault-ensure pass | **off** — no `[vault_template]` in any shipped config |
-| Cranks | `keeper` covered-call tick | **moved** to `keeper::legacy_vault`, reachable only via the undeployed `keeper-legacy` binary |
+| Cranks | `keeper` covered-call tick | **removed** (SO-452) — recover `keeper::legacy_vault` from git history |
 | Events | 17 families indexed | **not subscribed** — the indexer's `vault` package id is `None` |
 | Sponsorship | 5 `vault:*` gas-station templates | **not registered** |
 | Read API | `GET /vaults*` on api-service | **unrouted** |
@@ -38,7 +40,9 @@ leaves `vault_entries` empty and the pass never runs.
    `packageInfo.vault`. Every consumer already reads it as optional, so the
    indexer, gas-station and scheduler light back up on their own.
 2. Re-add `[vault_template]` to the scheduler config to provision vaults.
-3. Run `cargo run --bin keeper-legacy` to crank them.
+3. Restore the keeper's covered-call crank (`services/keeper/src/legacy_vault.rs`
+   and its `keeper-legacy` binary, deleted in SO-452) from git history to
+   crank them.
 4. Re-route the api-service `/vaults` handlers, the price-charting
    `/vault-apy` route + sampler, and the frontend `/vault` screen.
 
