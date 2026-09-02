@@ -19,21 +19,13 @@
 //! [`crate::handlers::buckets`], which fetches them from oracle-service and
 //! degrades to real-buckets-only when either is unavailable).
 
+#[cfg(test)]
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde::Deserialize;
 
-/// Epoch-aligned weekly cadence. Unix epoch was a Thursday, so every
-/// boundary is Thursday 00:00 UTC — the same alignment the retired roll
-/// cadence used, which keeps already-created buckets (e.g. the 2026-08-27
-/// series) on the board rather than orphaned beside it.
-pub const WEEK_MS: i64 = 604_800_000;
-
-/// How many month-end expiries the board lists beyond the two weeklies.
-const MONTH_ENDS: usize = 2;
-
-/// Bound on the forward walk that finds month-ends. Two month-ends are never
-/// more than ~10 weeks out; this is purely a runaway guard.
-const MAX_WEEKS_SCAN: i64 = 60;
+/// The board math lives in `pricing::grid` (SO-439) so the backtester's
+/// flow generator lists exactly these expiries; re-exported unchanged.
+pub use pricing::grid::{expiry_board, WEEK_MS};
 
 /// One configured series family — which (underlying, settlement, kind) the
 /// board lists, and how its lattice is shaped.
@@ -84,48 +76,7 @@ impl LadderPair {
     }
 }
 
-/// The listed expiries, ascending: the active week, the next week, and the
-/// next [`MONTH_ENDS`] month-end expiries.
-///
-/// "Month-end" is the last weekly boundary *within* a calendar month rather
-/// than the calendar's last day, so the whole board sits on one cadence and a
-/// month-end that coincides with a listed weekly collapses into it instead of
-/// producing a duplicate series.
-pub fn expiry_board(now_ms: i64) -> Vec<i64> {
-    let active = next_weekly_after(now_ms);
-    let next = active + WEEK_MS;
-
-    let mut board = vec![active, next];
-    let mut t = next;
-    let mut found = 0;
-    for _ in 0..MAX_WEEKS_SCAN {
-        t += WEEK_MS;
-        if found == MONTH_ENDS {
-            break;
-        }
-        if is_last_weekly_of_month(t) {
-            board.push(t);
-            found += 1;
-        }
-    }
-
-    board.sort_unstable();
-    board.dedup();
-    board
-}
-
-/// First epoch-aligned weekly boundary strictly after `now_ms`.
-fn next_weekly_after(now_ms: i64) -> i64 {
-    (now_ms.div_euclid(WEEK_MS) + 1) * WEEK_MS
-}
-
-/// True when the next weekly boundary lands in a different calendar month —
-/// i.e. `t` is the last weekly expiry its month lists.
-fn is_last_weekly_of_month(t: i64) -> bool {
-    let (a, b) = (to_utc(t), to_utc(t + WEEK_MS));
-    (a.year(), a.month()) != (b.year(), b.month())
-}
-
+#[cfg(test)]
 fn to_utc(ms: i64) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(ms).single().unwrap_or_else(Utc::now)
 }

@@ -1,0 +1,19 @@
+# Capacity-mode style daily flow: $100k/day spot notional, balanced
+# calls/puts, weekly-board expiries, doc 08 §0.4 limits.
+name = "sui-mixed-daily"
+asset = "SUI"
+spot_exchange = "binance"
+spot_symbol = "SUI-USDT"
+funding_exchange = "binance"
+funding_symbol = "SUI-USDT-PERP"
+from = "2025-08-01"
+to = "2026-07-31"
+nav0 = 1_000_000.0
+
+[flow]
+mode = "daily"
+notional_per_day = 100_000.0
+hour_utc = 14
+call_share = 0.5
+tenor_days = 14.0
+use_expiry_board = true

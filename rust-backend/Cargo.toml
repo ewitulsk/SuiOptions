@@ -21,6 +21,7 @@ members = [
     "crates/exchange-signing",
     "crates/exchange-book",
     "crates/exchange-router",
+    "crates/backtester",
     "services/indexer",
     "services/keeper",
     "services/quoting-service",
