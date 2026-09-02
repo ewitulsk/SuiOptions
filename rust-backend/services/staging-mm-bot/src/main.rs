@@ -328,6 +328,8 @@ struct Shared {
     cache: PriceCache,
     staleness: Staleness,
     watermarks: Mutex<HashMap<ObjectID, MarketWatermark>>,
+    /// Funding-pass backoff per ticker / commitment (SO-461).
+    funding_backoff: Mutex<staging_mm_bot::funding_backoff::Backoff>,
     /// `Some` in vault-direct mode.
     direct: Option<DirectCtx>,
 }
@@ -570,6 +572,7 @@ async fn main() -> Result<()> {
         cache,
         staleness,
         watermarks: Mutex::new(HashMap::new()),
+        funding_backoff: Mutex::new(Default::default()),
         direct,
     });
 
@@ -976,8 +979,14 @@ async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot)
     // breach, which un-parks quoting.
     if need_commitment {
         let cap = d.curator_cap.expect("need_commitment implies a cap");
+        let now = Instant::now();
+        let blocked = s.funding_backoff.lock().unwrap().blocked("commitment", now);
+        if let Some(left) = blocked {
+            tracing::warn!(retry_in_secs = left.as_secs(), "funding: commitment deposit backing off after failures");
+        } else {
         match fund_commitment(s, d, f, tokens, &descriptor, cap).await {
             Ok(_) => {
+                s.funding_backoff.lock().unwrap().succeed("commitment");
                 tracing::info!(
                     amount = d.commitment_deposit,
                     "funding: escrowed curator commitment funded"
@@ -990,7 +999,10 @@ async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot)
                     error = %format!("{e:#}"),
                     "funding: commitment deposit failed"
                 );
+                let n = s.funding_backoff.lock().unwrap().fail("commitment", now);
+                tracing::warn!(streak = n, next_delay_secs = staging_mm_bot::funding_backoff::delay(n).as_secs(), "funding: commitment deposit backing off");
             }
+        }
         }
     }
 
@@ -1006,21 +1018,37 @@ async fn direct_funding_pass(s: &Shared, snapshot: &token_info_client::Snapshot)
                     return;
                 }
             };
+        let now = Instant::now();
+        let blocked = s.funding_backoff.lock().unwrap().blocked(&ticker, now);
+        if let Some(left) = blocked {
+            tracing::debug!(ticker, retry_in_secs = left.as_secs(), "funding: deposit backing off after failures");
+            continue;
+        }
         match direct_deposit(s, d, f, &holdings, &descriptor, token, &canonical, amount).await {
             Ok(_) => {
+                s.funding_backoff.lock().unwrap().succeed(&ticker);
                 deposited = true;
                 tracing::info!(ticker, amount, "funding: minted and deposited into vault");
                 metrics::counter!("staging_mm_bot_mints_total", "ticker" => ticker.clone())
                     .increment(1);
             }
             Err(e) => {
-                tracing::error!(
-                    alert_id = "tx-failed-staging-mm-bot",
-                    ticker,
-                    amount,
-                    error = %format!("{e:#}"),
-                    "funding: vault deposit failed"
-                );
+                let n = s.funding_backoff.lock().unwrap().fail(&ticker, now);
+                let delay = staging_mm_bot::funding_backoff::delay(n).as_secs();
+                // Alert on the FIRST failure of a streak; the rest are the
+                // same fault backing off, not new incidents.
+                if n == 1 {
+                    tracing::error!(
+                        alert_id = "tx-failed-staging-mm-bot",
+                        ticker,
+                        amount,
+                        error = %format!("{e:#}"),
+                        next_delay_secs = delay,
+                        "funding: vault deposit failed"
+                    );
+                } else {
+                    tracing::warn!(ticker, amount, streak = n, next_delay_secs = delay, error = %format!("{e:#}"), "funding: vault deposit still failing; backing off");
+                }
             }
         }
     }
@@ -1126,8 +1154,42 @@ async fn fund_commitment(
         coin,
     )
     .await?;
-    sui_tx::tx::submit_ptb(&s.wrap.client, &s.wrap.signer, pt, s.gas_budget, "commitment deposit")
-        .await?;
+    simulate_then_submit(s, pt, "commitment deposit").await?;
+    Ok(())
+}
+
+/// Dev-inspect first — it is free — and only pay gas for a transaction the
+/// simulation says will land (SO-461). A Move abort in the simulation is
+/// returned as an error without touching the chain.
+async fn simulate_then_submit(
+    s: &Shared,
+    pt: ProgrammableTransactionBuilder,
+    label: &str,
+) -> Result<()> {
+    use sui_types::effects::TransactionEffectsAPI;
+    let programmable = pt.finish();
+    let inspect_tx = sui_types::transaction::TransactionData::new_programmable(
+        s.wrap.signer.address,
+        vec![],
+        programmable.clone(),
+        50_000_000_000,
+        1_000,
+    );
+    let inspect = s
+        .wrap
+        .client
+        .dev_inspect(&inspect_tx)
+        .await
+        .with_context(|| format!("{label}: pre-simulation"))?;
+    let status = inspect.transaction.effects.status();
+    if status.is_err() {
+        bail!("{label}: pre-simulation aborted, not submitted (no gas spent): {status:?}");
+    }
+    sui_tx::tx::submit_ptb_rebuilding(&s.wrap.client, &s.wrap.signer, s.gas_budget, label, || {
+        let p = programmable.clone();
+        async move { Ok(p) }
+    })
+    .await?;
     Ok(())
 }
 
@@ -1230,8 +1292,7 @@ async fn direct_deposit(
         .await?;
         pt.transfer_arg(s.wrap.signer.address, position);
     }
-    sui_tx::tx::submit_ptb(&s.wrap.client, &s.wrap.signer, pt, s.gas_budget, "vault deposit")
-        .await?;
+    simulate_then_submit(s, pt, "vault deposit").await?;
     Ok(())
 }
 
