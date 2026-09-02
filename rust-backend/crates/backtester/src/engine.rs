@@ -38,6 +38,7 @@ use desk_core::book::{Reservation, ReservationState};
 use serde::Serialize;
 
 use crate::acceptance::{displayed_apy, AcceptanceModel, LiveQuote, Outcome};
+use crate::attribution::{Accum, AttrLines, DailyAttr};
 use crate::clock::{ActionableTime, CommandTime, EventQueue, EventTime, FillTime, Key, Stage};
 use crate::data::{Bar, FundingRow};
 use crate::estimator::{SigmaReadout, WindowsEstimator};
@@ -152,6 +153,15 @@ pub struct RunOutput {
     pub first_liquidation_ms: Option<i64>,
     /// Doc 08 §7.5/§7.6 exercise counters and labels.
     pub exercise: ExerciseStats,
+    /// Doc 08 §9.1 attribution (PR O): the per-type / Greek split of the
+    /// ledger's lines, daily snapshots, fill instants, the bankruptcy
+    /// instant (NAV ≤ 0: trading halts, the run is reported as dead).
+    pub attribution: AttrLines,
+    pub daily: Vec<DailyAttr>,
+    pub fill_ms: Vec<i64>,
+    pub bankrupt_ms: Option<i64>,
+    /// `MarginConfig::enabled` (false = doc 07 reproduction assumption).
+    pub margin_model_enabled: bool,
 }
 
 /// The external feeds of one run.
@@ -392,6 +402,10 @@ struct Engine<'a> {
     timer_counts: BTreeMap<String, u64>,
     stage_counts: BTreeMap<String, u64>,
     trace_hash: u64,
+    attr: Accum,
+    daily: Vec<DailyAttr>,
+    fill_ms: Vec<i64>,
+    bankrupt_ms: Option<i64>,
 }
 
 fn bump(map: &mut BTreeMap<String, u64>, key: &str) {
@@ -561,6 +575,7 @@ impl<'a> Engine<'a> {
     fn on_funding(&mut self, at_: EventTime, row: FundingRow) {
         self.funding_annual = annualize(&row);
         let paid = row.rate * self.perp().units * self.mark();
+        self.attr.on_funding(self.perp().units, paid);
         self.apply(LedgerEvent::Funding { market: self.perp_key.clone(), paid, at_ms: ms_u64(at_.ms()) });
         self.funding_settlements += 1;
     }
@@ -620,9 +635,10 @@ impl<'a> Engine<'a> {
             self.gaps.needed_truth("spot", now, "expiry settlement");
         }
         for id in expired {
-            let (held, pending) =
-                self.ledger.options.get(&option_id(id)).map_or((0.0, 0.0), |p| (p.free_units(), p.pending_units));
+            let (held, pending, value) =
+                self.ledger.options.get(&option_id(id)).map_or((0.0, 0.0, 0.0), |p| (p.free_units(), p.pending_units, p.value()));
             let st = self.studies[&id].clone();
+            self.attr.on_mark_change(st.is_put, -value);
             self.expire_worthless(held, spot, &st);
             if pending <= 1e-12 {
                 self.studies.remove(&id);
@@ -631,6 +647,7 @@ impl<'a> Engine<'a> {
         }
         self.apply(LedgerEvent::ExpireOptions { at_ms: ms_u64(now) });
         if revalue_now {
+            let mut split = [0.0f64; 2];
             let marks: Vec<(String, f64)> = self
                 .ledger
                 .options
@@ -639,10 +656,30 @@ impl<'a> Engine<'a> {
                 .map(|(k, p)| {
                     let t = (p.spec.expiry_ms as i64 - now) as f64 / MS_PER_YEAR_F;
                     let sigma = readout.surface.vol(spot, p.spec.strike, t);
-                    (k.clone(), fair_per_unit(p.spec.kind.is_put(), spot, p.spec.strike, t, sigma, carry))
+                    let m = fair_per_unit(p.spec.kind.is_put(), spot, p.spec.strike, t, sigma, carry);
+                    split[p.spec.kind.is_put() as usize] += (m - p.mark_per_unit) * p.qty;
+                    (k.clone(), m)
                 })
                 .collect();
+            self.attr.on_mark_change(false, split[0]);
+            self.attr.on_mark_change(true, split[1]);
             self.apply(LedgerEvent::MarkOptions { marks, at_ms: ms_u64(now) });
+            // Greek explanation step (doc 08 §9.1) on the fresh marks.
+            if !stale && self.attr.explain_due(now) {
+                let book: Vec<(u64, bool, f64, f64, f64, f64, crate::model::Greeks)> = self
+                    .studies
+                    .values()
+                    .filter_map(|st| {
+                        let p = self.ledger.options.get(&option_id(st.id))?;
+                        let t = (p.spec.expiry_ms as i64 - now) as f64 / MS_PER_YEAR_F;
+                        let sigma = readout.surface.vol(spot, p.spec.strike, t);
+                        Some((st.id, st.is_put, p.qty, p.mark_per_unit, spot, sigma, greeks_per_unit(st.is_put, spot, p.spec.strike, t, sigma, carry)))
+                    })
+                    .collect();
+                let mark = self.mark();
+                let perp = (self.perp().units, self.market.spot, mark, self.ledger.perp_realized() + self.ledger.perp_unrealized(), self.ledger.lines.hedge_slippage);
+                self.attr.explain(now, &book, perp);
+            }
         }
 
         // Resale: a labeled upside scenario, off by default (doc 08 §8.5).
@@ -666,6 +703,7 @@ impl<'a> Engine<'a> {
                 let u = Pcg32::keyed(s.seed, &[id, (now / self.revalue_ms) as u64, 0x72]).uniform();
                 if u < p_sell {
                     let (qty, proceeds, premium_paid) = (pos.qty, pos.value() * (1.0 - s.resale.price_discount), st.premium_paid);
+                    self.attr.on_exit(id, st.is_put, qty, proceeds, pos.mark_per_unit, 0.0);
                     let op = self.next_op();
                     self.apply(LedgerEvent::ResaleSubmitted { op, option: key, qty, expected_proceeds: proceeds, at_ms: ms_u64(now) });
                     self.apply(LedgerEvent::ResaleSettled { op, proceeds: Some(proceeds), at_ms: ms_u64(now) });
@@ -715,6 +753,9 @@ impl<'a> Engine<'a> {
     /// expire, or revert.
     fn on_flow(&mut self, now: i64) {
         let s = self.s;
+        if self.bankrupt_ms.is_some() {
+            return;
+        }
         let Some(ctx) = self.cur.filter(|c| c.ms == now) else { return };
         let (spot, stale, readout) = (ctx.spot, ctx.stale, ctx.readout);
         let carry = s.carry_yield;
@@ -815,6 +856,8 @@ impl<'a> Engine<'a> {
                 Outcome::Filled(_) => {
                     let rfq: RfqEvent = q.rfq;
                     filled = true;
+                    self.attr.on_fill(rfq.is_put, current_fair, q.bid);
+                    self.fill_ms.push(now);
                     self.stats.quotes_accepted += 1;
                     self.stats.volumes.accepted_earn_notional += rfq.offered_notional;
                     self.stats.volumes.premium_turnover += q.bid;
@@ -852,6 +895,9 @@ impl<'a> Engine<'a> {
     /// not re-submitted every minute (mm-bot `plan_hedge_order`).
     fn on_hedge(&mut self, now: i64) {
         let s = self.s;
+        if self.bankrupt_ms.is_some() {
+            return;
+        }
         let Some(ctx) = self.cur.filter(|c| c.ms == now) else { return };
         let spot = ctx.spot;
         let carry = s.carry_yield;
@@ -899,7 +945,7 @@ impl<'a> Engine<'a> {
             // be fundable from free cash at the entry ratio, else it is not
             // sent (counted; the band re-plans next minute).
             let after = perp.units + working + size;
-            if after.abs() > (perp.units + working).abs() {
+            if s.margin.enabled && after.abs() > (perp.units + working).abs() {
                 let need = entry_margin(after.abs() * self.mark(), &s.margin) - perp.collateral;
                 if need > self.ledger.settlement {
                     self.counters.hedge_declines_margin += 1;
@@ -924,6 +970,9 @@ impl<'a> Engine<'a> {
         let next = now + s.margin.check_secs.max(1) * 1000;
         if next < self.end_ms {
             self.schedule(next, Stage::Timer, Timer::Margin.sub(), Queued::Timer(Timer::Margin));
+        }
+        if !s.margin.enabled || self.bankrupt_ms.is_some() {
+            return;
         }
         let want = topup_amount(&self.account(), self.mark(), &s.margin);
         if want <= 0.0 {
@@ -959,7 +1008,7 @@ impl<'a> Engine<'a> {
             self.schedule(next, Stage::Timer, Timer::Exit.sub(), Queued::Timer(Timer::Exit));
         }
         let Some(ctx) = self.cur.filter(|c| c.ms == now) else { return };
-        if ctx.stale {
+        if ctx.stale || self.bankrupt_ms.is_some() {
             return;
         }
         let spot = ctx.spot;
@@ -1108,6 +1157,7 @@ impl<'a> Engine<'a> {
         if !self.studies.contains_key(&x.position_id) {
             return;
         }
+        let mark_before = self.ledger.options.get(&key).map_or(0.0, |p| p.mark_per_unit);
         self.apply(LedgerEvent::ExerciseSettled { op: x.op, ok: !x.failed, actual: None, at_ms: ms_u64(at_.ms()) });
         if x.failed {
             self.xstats.ptb_failed += 1;
@@ -1119,6 +1169,11 @@ impl<'a> Engine<'a> {
             return;
         }
         self.studies.get_mut(&x.position_id).expect("present").exercise_net += x.net;
+        let strike = self.studies[&x.position_id].strike;
+        let intrinsic = if x.is_put { (strike - x.spot).max(0.0) } else { (x.spot - strike).max(0.0) } * x.units;
+        self.attr.on_exercise(intrinsic, x.net);
+        let remaining = self.ledger.options.get(&key).map_or(0.0, |p| p.qty + p.pending_units);
+        self.attr.on_exit(x.position_id, x.is_put, x.units, x.net, mark_before, remaining);
         self.stats.volumes.exercise_spot_turnover += x.turnover;
         if x.is_put { self.stats.exercised_put += 1 } else { self.stats.exercised_call += 1 }
         self.xstats.path(x.path);
@@ -1131,7 +1186,15 @@ impl<'a> Engine<'a> {
         // the configured extra delay, through the normal hedge path (the
         // working order counts against the band so the rebalancer does
         // not double up).
-        let size = x.delta_per_unit * x.units;
+        // Reduce-only: the close never extends the perp past flat (after
+        // a liquidation there is nothing to close; the band re-hedges).
+        let pos = self.perp().units + self.open.working_units();
+        let mut size = x.delta_per_unit * x.units;
+        if pos == 0.0 || pos.signum() == size.signum() {
+            size = 0.0;
+        } else if size.abs() > pos.abs() {
+            size = -pos;
+        }
         if size.abs() >= self.s.venue.min_order_units {
             let delay = self.s.exercise.hedge_close_delay_ms.max(0) + self.lat.draw(LatencyStage::Strategy);
             let order = HedgeOrder { id: self.next_order_id, size_units: size, spot: x.spot };
@@ -1297,6 +1360,9 @@ impl<'a> Engine<'a> {
     /// both. Losses erode the ratio — only a top-up (or the risk engine)
     /// restores it.
     fn sync_collateral(&mut self, before: f64, size: f64, price: f64) {
+        if !self.s.margin.enabled {
+            return;
+        }
         let closed = if before == 0.0 || before.signum() == size.signum() { 0.0 } else { size.abs().min(before.abs()) };
         let market = self.perp_key.clone();
         if closed > 0.0 {
@@ -1343,6 +1409,10 @@ impl<'a> Engine<'a> {
         }
 
         let nav = self.ledger.nav();
+        self.attr.on_cash_sample(now, self.ledger.settlement);
+        if nav <= 0.0 && self.bankrupt_ms.is_none() {
+            self.bankrupt_ms = Some(now);
+        }
         self.peak = self.peak.max(nav);
         if self.peak > 0.0 {
             self.max_dd = self.max_dd.max((self.peak - nav) / self.peak);
@@ -1350,6 +1420,7 @@ impl<'a> Engine<'a> {
         let day = now.div_euclid(MS_PER_DAY);
         if day != self.last_nav_day {
             self.last_nav_day = day;
+            self.daily.push(self.snapshot(now, spot));
             self.nav_path.push(NavPoint {
                 ts_ms: now, spot, nav, cash: self.ledger.settlement, option_marks: self.ledger.option_marks(),
                 perp_position: self.perp().units, net_delta_units: self.net_delta_units,
@@ -1358,6 +1429,26 @@ impl<'a> Engine<'a> {
                 stale: ctx.stale,
                 margin_ratio: self.account().margin_ratio(mark),
             });
+        }
+    }
+
+    /// The daily attribution snapshot: the ledger's own decomposition
+    /// (`nav_explained`) plus the per-type / Greek split.
+    fn snapshot(&self, now: i64, spot: f64) -> DailyAttr {
+        let l = &self.ledger;
+        DailyAttr {
+            ts_ms: now,
+            spot,
+            nav: l.nav(),
+            cash: l.settlement,
+            option_marks: l.option_marks(),
+            perp_unrealized: l.perp_unrealized(),
+            equity_flows: l.equity_flows.total(),
+            lines: l.lines,
+            attr: self.attr.lines,
+            fills: l.lines.fills,
+            fills_call: self.stats.fills_call,
+            fills_put: self.stats.fills_put,
         }
     }
 
@@ -1470,6 +1561,10 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         timer_counts: BTreeMap::new(),
         stage_counts: BTreeMap::new(),
         trace_hash: 0xcbf2_9ce4_8422_2325,
+        attr: Accum::new(s.attribution_interval_min, s.hurdle.settlement_cash_yield),
+        daily: Vec::new(),
+        fill_ms: Vec::new(),
+        bankrupt_ms: None,
     };
     e.schedule(start_ms, Stage::Timer, Timer::Mark.sub(), Queued::Timer(Timer::Mark));
     e.schedule(start_ms, Stage::Timer, Timer::Flow.sub(), Queued::Timer(Timer::Flow));
@@ -1511,6 +1606,17 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
     let pending_outcomes = e.queue.len() as u64;
     let spot_end = e.last_spot;
     let nav_end = e.ledger.nav();
+    e.attr.finish(e.ledger.perp_realized() + e.ledger.perp_unrealized(), e.ledger.lines.hedge_slippage);
+    // Close the daily path on the final state so windows reach the end.
+    let last_ms = e.daily.last().map(|d| d.ts_ms);
+    if let Some(t) = last_ms {
+        let snap = e.snapshot(end_ms - 60_000, spot_end);
+        if t < end_ms - 60_000 {
+            e.daily.push(snap);
+        } else {
+            *e.daily.last_mut().expect("present") = snap;
+        }
+    }
     let spot_start = e.spot_start.unwrap_or(spot_end);
     let coverage = e.gaps.finish();
     Ok(RunOutput {
@@ -1551,6 +1657,11 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         closest_margin_headroom: e.closest_headroom,
         first_liquidation_ms: e.first_liquidation_ms,
         exercise: e.xstats,
+        attribution: e.attr.lines,
+        daily: e.daily,
+        fill_ms: e.fill_ms,
+        bankrupt_ms: e.bankrupt_ms,
+        margin_model_enabled: s.margin.enabled,
     })
 }
 

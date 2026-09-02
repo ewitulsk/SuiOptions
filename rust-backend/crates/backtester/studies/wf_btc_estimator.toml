@@ -1,0 +1,43 @@
+# Walk-forward estimator study on BTC (doc 10 §4 ablation, out of sample):
+# yearly training folds, 2024 validation, 2025-01 → 2026-07 holdout.
+name = "btc-estimator"
+scenario = "../scenarios/btc_rv_calls.toml"
+calibration_from = "2020-01-01"
+train = [["2021-01-01", "2021-12-31"], ["2022-01-01", "2022-12-31"], ["2023-01-01", "2023-12-31"]]
+validation = [["2024-01-01", "2024-12-31"]]
+holdout = ["2025-01-01", "2026-07-31"]
+objective = "depositor_net_return_annualized"
+gate_max_drawdown = 0.15
+
+# Doc 10 §4 framing: no margin model, 3x NAV per turn.
+[overrides]
+"margin.enabled" = false
+
+[[candidates]]
+name = "windows"
+[candidates.overrides]
+"estimator.kind" = "windows"
+
+[[candidates]]
+name = "har-q0.25"
+[candidates.overrides]
+"estimator.kind" = "har"
+"estimator.q_bid" = 0.25
+"estimator.risk_premium" = 0.0
+"estimator.max_lean" = 0.0
+
+[[candidates]]
+name = "har-q0.35"
+[candidates.overrides]
+"estimator.kind" = "har"
+"estimator.q_bid" = 0.35
+"estimator.risk_premium" = 0.0
+"estimator.max_lean" = 0.0
+
+[[candidates]]
+name = "har-q0.45"
+[candidates.overrides]
+"estimator.kind" = "har"
+"estimator.q_bid" = 0.45
+"estimator.risk_premium" = 0.0
+"estimator.max_lean" = 0.0

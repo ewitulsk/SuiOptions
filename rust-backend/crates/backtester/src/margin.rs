@@ -36,6 +36,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct MarginConfig {
+    /// `false` = no margin model at all (no entry margin, no top-ups, no
+    /// liquidation): the doc 07 / doc 10-v0 assumption, for reproduction
+    /// runs only. Every summary labels it.
+    pub enabled: bool,
     /// Initial margin ratio (max leverage = 1 / IMR).
     pub imr: f64,
     /// Maintenance margin ratio: liquidation below it.
@@ -66,6 +70,7 @@ pub struct MarginConfig {
 impl Default for MarginConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             imr: 0.045,
             mmr: 0.025,
             leverage: 10.0,

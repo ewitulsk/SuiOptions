@@ -1,0 +1,18 @@
+case,limit_drawdown,nav_end,nav_end_vs_historical,depositor_net_return_annualized,max_drawdown,drawdown_pass,liquidations,liquidation_pass,closest_margin_headroom,bankrupt,fills,exercise_cost,option_payoff,hedge_realized,funding_paid,pass,labels
+historical,0.15,1062562.88,0.00,0.10173,0.0514,true,1,false,-0.0299,false,2822,2840.53,375658.96,31221.32,-218.78,false,transform=none|proxy_oracle|proxy_venue
+gap_down_60,0.25,1061957.43,-605.46,0.10072,0.1308,true,5,false,-25.1491,false,3619,4320.02,591244.79,-36596.59,81.42,false,transform=price×0.40|proxy_oracle|proxy_venue
+gap_up_80,0.25,1350805.01,288242.13,0.63345,0.0543,true,1,false,-2.7011,false,3158,2967.06,406372.43,346360.88,-857.23,false,transform=price×1.80|proxy_oracle|proxy_venue
+crash_multistep_delayed_oracle,0.25,1190234.41,127671.52,0.32447,0.0593,true,1,false,-0.2930,false,2985,3427.82,535180.86,30310.24,-45.36,false,transform=−12%/day×5|oracle.update_ms=300000|oracle.latency_ms=60000|proxy_oracle|proxy_venue
+rally_multistep_delayed_oracle,0.25,1049276.35,-13286.53,0.07972,0.0951,true,4,false,-2.9982,false,2954,2933.26,427009.42,-18638.98,-445.31,false,transform=+15%/day×5|oracle.update_ms=300000|oracle.latency_ms=60000|proxy_oracle|proxy_venue
+flat_six_months,0.25,964999.04,-97563.84,-0.06824,0.0506,true,0,true,0.2919,false,939,954.89,56591.96,29590.74,-450.22,true,transform=flat×183d|funding=0|proxy_oracle|proxy_venue
+vol_collapse_after_purchase,0.25,1012668.93,-49893.96,0.02021,0.0506,true,0,true,0.2919,false,1110,1189.45,115284.34,29590.74,-450.22,true,transform=returns×0.25|proxy_oracle|proxy_venue
+funding_plus_50,0.25,1055091.80,-7471.08,0.08932,0.0618,true,3,false,-0.4406,false,2702,2686.05,330323.09,48073.32,2000.52,false,funding=+0.50/yr×30d|proxy_oracle|proxy_venue
+funding_minus_50,0.25,1073924.39,11361.51,0.12073,0.0647,true,1,false,-0.0299,false,2651,2849.27,381251.84,19591.07,-222.73,false,funding=−0.50/yr×30d|proxy_oracle|proxy_venue
+venue_outage_exercise_margin,0.25,1128842.92,66280.04,0.21483,0.0741,true,4,false,-5.2938,false,2927,3152.61,459381.18,29377.32,-119.09,false,margin.outages=[expiry−12h, expiry+36h]|transform=price×0.75@outage|proxy_oracle|proxy_venue
+sui_congestion_near_expiry,0.25,1076928.16,14365.28,0.12578,0.0508,true,1,false,-0.0299,false,2823,2812.54,375395.86,40265.53,-223.82,false,latency.sui_inclusion=600000±300000|latency.indexer_detection=120000|exercise.ptb_failure_prob=0.2|scope=whole_run(conservative)|proxy_oracle|proxy_venue
+no_resale,0.25,1062562.88,0.00,0.10173,0.0514,true,1,false,-0.0299,false,2822,2840.53,375658.96,31221.32,-218.78,false,resale.enabled=false|proxy_oracle|proxy_venue
+no_base_flash,0.25,1062562.88,0.00,0.10173,0.0514,true,1,false,-0.0299,false,2822,2840.53,375658.96,31221.32,-218.78,false,exercise.pool_base_balance_units=0|proxy_oracle|proxy_venue
+no_quote_flash,0.25,1062562.88,0.00,0.10173,0.0514,true,1,false,-0.0299,false,2822,2840.53,375658.96,31221.32,-218.78,false,exercise.pool_quote_balance=0|proxy_oracle|proxy_venue
+router_depth_collapse,0.25,1066161.19,3598.31,0.10773,0.0510,true,0,true,0.0320,false,2827,10920.54,353497.08,46218.07,-214.22,true,exercise.route_depth_units_per_bps=÷20|proxy_oracle|proxy_venue
+concentrated_expiry,0.25,997498.25,-65064.64,-0.00496,0.0668,true,2,false,-0.5616,false,2920,5099.09,774038.99,68484.74,-280.29,false,flow_gen.herd_prob=1|flow_gen.expiry_concentration=1|limits.per_expiry_max=premium_budget_hard|proxy_oracle|proxy_venue
+settlement_depeg,0.25,1065287.82,2724.93,0.10627,0.0514,true,2,false,-0.0994,false,2820,2840.04,375528.86,34645.91,-222.14,false,venue.basis=−300bps×7d|depeg=basis_series_proxy|proxy_oracle|proxy_venue

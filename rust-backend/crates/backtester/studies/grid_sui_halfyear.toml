@@ -1,0 +1,28 @@
+# Doc 08 §9.3/§9.4 break-even surface on the half-year SUI window
+# (2025-08-01 → 2026-01-31, the 2025-10-10 cascade in-sample) with common
+# random numbers. Expensive axes are deliberately coarse: this is a
+# surface, not an optimum. Extend by adding `[[axes]]` entries — any
+# scenario field is addressable by its dotted TOML path (the doc 08 §9.4
+# axes: flow_gen.target_notional_per_day, flow_gen.call_share,
+# flow_gen.call.size_log_sd, flow_gen.expiry_concentration,
+# acceptance.call.apy_elasticity, bid.base_spread_volpts, estimator.skew,
+# hedge.band_pct_nav, venue.execution_assumption, flow_gen.tenor_menu_days,
+# resale.enabled, limits.premium_budget_hard, latency.sui_inclusion,
+# estimator.q_bid, margin.topup_trigger_mr).
+name = "sui-halfyear"
+scenario = "../scenarios/sui_mixed_halfyear.toml"
+seeds = [1, 2]
+mixes = ["balanced", "call_heavy", "put_heavy"]
+
+[[axes]]
+path = "hedge.band_pct_nav"
+values = [10.0, 20.0]
+
+[[axes]]
+path = "venue.execution_assumption"
+values = ["taker_only", "conservative"]
+
+# Hedge leverage: the isolated-margin survivability question (doc 08 §7.3).
+[[axes]]
+path = "margin.leverage"
+values = [3.0, 10.0]
