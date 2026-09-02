@@ -1,12 +1,15 @@
 //! Outputs: `summary.json` (labels, params, metrics, determinism hash),
 //! `settled.csv` (per-option study rows), `nav.csv` (daily path).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::Result;
 use serde::Serialize;
 
 use crate::engine::RunOutput;
+use crate::gaps::{GapSpan, InvalidatedSpan};
+use crate::latency::LatencyConfig;
 use crate::scenario::Scenario;
 
 #[derive(Clone, Debug, Serialize)]
@@ -77,6 +80,22 @@ pub struct Summary {
     pub protocol_fee_wedge_total: f64,
     /// PR N: the six volumes, quote funnel, capacity peaks and gates.
     pub stats: crate::stats::RunStats,
+    /// Doc 08 §7.2: the queue/fill assumption (`taker_only` until PR L).
+    pub execution_assumption: String,
+    /// Doc 08 §6.3: every stage's distribution and whether it is assumed.
+    pub latency_assumptions: LatencyConfig,
+    /// Doc 08 §6.4: `invalidate` or `bound`.
+    pub gap_policy: String,
+    pub required_feeds: Vec<String>,
+    pub coverage_by_feed: BTreeMap<String, f64>,
+    pub gaps: Vec<GapSpan>,
+    pub invalidated_spans: Vec<InvalidatedSpan>,
+    pub source_rows: Vec<(String, u64)>,
+    pub timer_counts: BTreeMap<String, u64>,
+    pub hedge_rejects: u64,
+    pub pending_outcomes: u64,
+    /// Event-ordering fingerprint (doc 08 §6.2).
+    pub trace_hash: String,
     pub determinism_hash: String,
 }
 
@@ -98,7 +117,7 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         scenario: s.name.clone(),
         asset: s.asset.clone(),
         labels: Labels {
-            proxy_oracle: true, proxy_venue: true, taker_only: true, no_resale: !s.resale.enabled, constant_flow: out.flow_source == "constant",
+            proxy_oracle: true, proxy_venue: true, taker_only: out.execution_assumption == "taker_only", no_resale: !s.resale.enabled, constant_flow: out.flow_source == "constant",
             exercise: "at_expiry",
             estimator: if s.estimator.kind == "har" { format!("har(q_bid={})", s.estimator.q_bid) } else { s.estimator.kind.clone() },
             flow_source: out.flow_source,
@@ -145,6 +164,18 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         option_leg_pnl_total: out.settled.iter().map(|o| o.option_leg_pnl).sum(),
         protocol_fee_wedge_total: l.premium_paid * s.fees.protocol_premium_fee_bps / 10_000.0,
         stats: out.stats.clone(),
+        execution_assumption: out.execution_assumption.clone(),
+        latency_assumptions: out.latency.clone(),
+        gap_policy: out.coverage.policy.clone(),
+        required_feeds: out.coverage.required_feeds.clone(),
+        coverage_by_feed: out.coverage.feeds.iter().map(|(k, v)| (k.clone(), v.fraction)).collect(),
+        gaps: out.coverage.gaps.clone(),
+        invalidated_spans: out.coverage.invalidated_spans.clone(),
+        source_rows: out.source_rows.clone(),
+        timer_counts: out.timer_counts.clone(),
+        hedge_rejects: l.hedge_rejects,
+        pending_outcomes: out.pending_outcomes,
+        trace_hash: out.trace_hash.clone(),
         determinism_hash: String::new(),
     };
     let bytes = serde_json::to_vec(&summary).expect("summary serializes");

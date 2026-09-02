@@ -17,3 +17,17 @@ hour_utc = 14
 call_share = 0.5
 tenor_days = 14.0
 use_expiry_board = true
+
+# Doc 08 §6.3/§6.4 (PR K): assumed per-stage latencies and the gap policy.
+[latency]
+strategy = { mean_ms = 200, jitter_ms = 100, assumed = true }
+venue_submit = { mean_ms = 150, jitter_ms = 100, assumed = true }
+venue_fill_report = { mean_ms = 200, jitter_ms = 100, assumed = true }
+sui_inclusion = { mean_ms = 1500, jitter_ms = 1000, assumed = true }
+indexer_detection = { mean_ms = 2000, jitter_ms = 1000, assumed = true }
+seed = 1
+
+[gaps]
+required_feeds = ["spot"]
+max_gap_ms = 300_000
+policy = "invalidate"

@@ -207,3 +207,17 @@ Reading:
 - Realized vol per option is measured on the same 15-minute decision-price
   samples the estimator sees; a sub-interval measure would read higher for
   SUI (doc 07 §4 signature).
+
+## 7. Second pass (PR K, SO-453): causal replay
+
+- The replay is now an event queue with explicit timestamp types and the
+  doc 08 §6.2 tie order; every summary carries `latency_assumptions`
+  (all stages `assumed = true` until captured), `execution_assumption`,
+  `gap_policy`, `coverage_by_feed`, `gaps` and `invalidated_spans`. The
+  numbers above were produced with every latency at zero; the zero-latency
+  replay reproduces them (regression test on the synthetic path), and the
+  SUI scenario files now carry assumed non-zero latencies, so a re-run
+  moves the hedge fills by the strategy + submit + report latency.
+- The v0 loop ignored the warm-up bars loaded before `from`; the replay
+  feeds them to the oracle and estimator, so the first turn of a re-run
+  prices off a warm surface instead of `fallback_vol`.

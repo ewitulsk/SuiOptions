@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::gaps::GapConfig;
+use crate::latency::LatencyConfig;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Scenario {
@@ -47,6 +50,10 @@ pub struct Scenario {
     pub acceptance: AcceptanceConfig,
     pub resale: ResaleConfig,
     pub venue: VenueConfig,
+    /// Per-stage latency distributions (doc 08 §6.3).
+    pub latency: LatencyConfig,
+    /// Required feeds and the gap policy (doc 08 §6.4).
+    pub gaps: GapConfig,
 }
 
 impl Default for Scenario {
@@ -79,6 +86,8 @@ impl Default for Scenario {
             acceptance: AcceptanceConfig::default(),
             resale: ResaleConfig::default(),
             venue: VenueConfig::default(),
+            latency: LatencyConfig::default(),
+            gaps: GapConfig::default(),
         }
     }
 }
@@ -638,5 +647,26 @@ impl Scenario {
         anyhow::ensure!((0.0..=1.0).contains(&s.flow.call_share), "call_share in [0,1]");
         anyhow::ensure!(s.estimator.sample_interval_s >= 60, "sample_interval_s ≥ 60");
         Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every checked-in scenario parses with the current schema.
+    #[test]
+    fn scenario_files_load() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios");
+        let mut n = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                let s = Scenario::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                assert!(!s.name.is_empty());
+                n += 1;
+            }
+        }
+        assert!(n >= 4, "{n} scenarios");
     }
 }
