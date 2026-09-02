@@ -35,6 +35,9 @@ pub struct WindowsEstimator {
     /// Sampled decision prices at the derived interval.
     samples: Vec<(i64, f64)>,
     last_sample_ms: i64,
+    /// Latest vol-index reading (annualized decimal) for `kind =
+    /// "vol_index"`; the engine sets it from the LOCF series.
+    index_vol: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -47,7 +50,11 @@ pub struct SigmaReadout {
 
 impl WindowsEstimator {
     pub fn new(cfg: EstimatorConfig) -> Self {
-        Self { cfg, samples: Vec::new(), last_sample_ms: i64::MIN }
+        Self { cfg, samples: Vec::new(), last_sample_ms: i64::MIN, index_vol: None }
+    }
+
+    pub fn set_index_vol(&mut self, annualized: Option<f64>) {
+        self.index_vol = annualized.filter(|v| v.is_finite() && *v > 0.0);
     }
 
     pub fn push(&mut self, ts_ms: i64, price: f64) {
@@ -85,6 +92,10 @@ impl WindowsEstimator {
         let short_rv = realized_vol(&self.samples, (self.cfg.short_window_hours * 3_600_000.0) as i64, now_ms);
         let long_rv = realized_vol(&self.samples, (self.cfg.long_window_hours * 3_600_000.0) as i64, now_ms);
         let params = self.params();
+        if self.cfg.kind == "vol_index" {
+            let surface = VolSurface::from_windows(&[WindowSample { annualized_vol: self.index_vol, weight: 1.0 }], self.cfg.fallback_vol, &params);
+            return SigmaReadout { surface, short_rv, long_rv, fallback: surface.is_fallback() };
+        }
         let surface = if self.cfg.max_lean >= 0.8 - 1e-12 && self.cfg.max_lean <= 0.8 + 1e-12 {
             VolSurface::from_windows(
                 &[

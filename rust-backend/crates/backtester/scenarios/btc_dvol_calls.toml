@@ -1,0 +1,34 @@
+# BTC ablation leg (d): true IV (Deribit DVOL) as the sigma ceiling.
+# Same desk, same costs; only the sigma source differs.
+name = "btc-dvol-calls"
+asset = "BTC"
+spot_exchange = "binance"
+spot_symbol = "BTC-USDT-PERP"
+funding_exchange = "binance"
+funding_symbol = "BTC-USDT-PERP"
+vol_index_exchange = "deribit"
+vol_index_symbol = "BTC-DVOL"
+from = "2022-01-01"
+to = "2026-07-31"
+nav0 = 1_000_000.0
+
+[limits]
+per_expiry_max = 0.30
+call_premium_max = 0.30
+
+[bid]
+size_penalty_volpts_per_pct_nav = 0.0
+
+[flow]
+mode = "per_turn"
+notional_nav_multiple = 3.0
+call_share = 1.0
+tenor_days = 30.0
+
+[estimator]
+kind = "vol_index"
+sample_interval_s = 300
+
+[hedge]
+band_pct_nav = 20.0
+band_wide_pct_nav = 30.0
