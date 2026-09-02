@@ -228,9 +228,9 @@ pub struct SeedStats {
     pub q25: f64,
     pub q75: f64,
     pub q95: f64,
-    /// Student-t interval on the mean (small n ⇒ wide; n = 1 ⇒ ±∞ reported as NaN).
-    pub ci95_low: f64,
-    pub ci95_high: f64,
+    /// Student-t interval on the mean (small n ⇒ wide; None when n < 2).
+    pub ci95_low: Option<f64>,
+    pub ci95_high: Option<f64>,
     /// Mean of the values at or below the 5% quantile (lower tail).
     pub cvar05: f64,
 }
@@ -273,7 +273,7 @@ pub fn seed_stats(values: &[f64]) -> SeedStats {
     let n = v.len();
     let mean = v.iter().sum::<f64>() / n as f64;
     let sd = if n > 1 { (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt() } else { 0.0 };
-    let half = t975(n) * sd / (n as f64).sqrt();
+    let half = if n >= 2 { Some(t975(n) * sd / (n as f64).sqrt()) } else { None };
     let k = ((n as f64) * 0.05).ceil().max(1.0) as usize;
     SeedStats {
         n,
@@ -286,8 +286,8 @@ pub fn seed_stats(values: &[f64]) -> SeedStats {
         q25: quantile(&v, 0.25),
         q75: quantile(&v, 0.75),
         q95: quantile(&v, 0.95),
-        ci95_low: mean - half,
-        ci95_high: mean + half,
+        ci95_low: half.map(|h| mean - h),
+        ci95_high: half.map(|h| mean + h),
         cvar05: v[..k].iter().sum::<f64>() / k as f64,
     }
 }
@@ -323,7 +323,7 @@ pub fn distribution(ms: &[Metric]) -> Distribution {
     Distribution {
         seeds: ms.len(),
         median_clears_hurdle: ret.median >= required,
-        lower_ci_clears_hurdle: ret.ci95_low.is_finite() && ret.ci95_low >= required,
+        lower_ci_clears_hurdle: ret.ci95_low.is_some_and(|l| l >= required),
         depositor_net_return_annualized: ret,
         net_return_after_idle_cost_annualized: f(&|m| m.net_return_after_idle_cost_annualized),
         max_drawdown: f(&|m| m.max_drawdown),
@@ -392,8 +392,8 @@ mod tests {
         assert!((s.cvar05 - 0.10).abs() < 1e-12);
         let sd = (((0.15f64).powi(2) * 2.0 + (0.05f64).powi(2) * 2.0) / 3.0).sqrt();
         assert!((s.sd - sd).abs() < 1e-12);
-        assert!((s.ci95_low - (0.25 - 3.182 * sd / 2.0)).abs() < 1e-9);
-        assert!(seed_stats(&[0.1]).ci95_low.is_nan());
+        assert!((s.ci95_low.unwrap() - (0.25 - 3.182 * sd / 2.0)).abs() < 1e-9);
+        assert!(seed_stats(&[0.1]).ci95_low.is_none());
         assert_eq!(seed_stats(&[]).n, 0);
     }
 

@@ -218,8 +218,8 @@ pub fn validated(r: &Results) -> Vec<ValidatedItem> {
     let lower: Vec<String> = r
         .walkforward
         .iter()
-        .map(|m| format!("{} validation({} folds): mean {:+.4} ci95 [{:+.4}, {:+.4}] lower-clears={}", m.name, m.validation_distribution_selected.seeds, m.validation_distribution_selected.depositor_net_return_annualized.mean, m.validation_distribution_selected.depositor_net_return_annualized.ci95_low, m.validation_distribution_selected.depositor_net_return_annualized.ci95_high, m.validation_distribution_selected.lower_ci_clears_hurdle))
-        .chain(r.grid.iter().flat_map(|g| g.points.iter().filter(|p| p.break_even).map(|p| format!("grid {} ci95 [{:+.4}, {:+.4}] lower-clears={}", p.coordinates.join("|"), p.distribution.depositor_net_return_annualized.ci95_low, p.distribution.depositor_net_return_annualized.ci95_high, p.distribution.lower_ci_clears_hurdle))))
+        .map(|m| format!("{} validation({} folds): mean {:+.4} ci95 [{}, {}] lower-clears={}", m.name, m.validation_distribution_selected.seeds, m.validation_distribution_selected.depositor_net_return_annualized.mean, pct_opt(m.validation_distribution_selected.depositor_net_return_annualized.ci95_low), pct_opt(m.validation_distribution_selected.depositor_net_return_annualized.ci95_high), m.validation_distribution_selected.lower_ci_clears_hurdle))
+        .chain(r.grid.iter().flat_map(|g| g.points.iter().filter(|p| p.break_even).map(|p| format!("grid {} ci95 [{}, {}] lower-clears={}", p.coordinates.join("|"), pct_opt(p.distribution.depositor_net_return_annualized.ci95_low), pct_opt(p.distribution.depositor_net_return_annualized.ci95_high), p.distribution.lower_ci_clears_hurdle))))
         .collect();
     let any_lower = r.walkforward.iter().any(|m| m.validation_distribution_selected.lower_ci_clears_hurdle) || r.grid.iter().any(|g| g.points.iter().any(|p| p.distribution.lower_ci_clears_hurdle));
     push(&mut v, 8, "The lower confidence bound, not only the mean, clears the chosen hurdle", if lower.is_empty() { "no_data" } else if any_lower { "pass" } else { "fail" }, lower.join("; "));
@@ -269,6 +269,10 @@ fn pct(x: f64) -> String {
     format!("{:+.1}%", x * 100.0)
 }
 
+fn pct_opt(x: Option<f64>) -> String {
+    x.map(pct).unwrap_or_else(|| "n/a".into())
+}
+
 fn money(x: f64) -> String {
     format!("{x:.0}")
 }
@@ -304,7 +308,7 @@ pub fn render_md(r: &Results) -> String {
             ));
         }
         let d = &m.validation_distribution_selected;
-        s.push_str(&format!("\nSelected on training folds only (`ranked_on = {:?}`): **{}** (train score {}{}). Validation of the selected candidate: mean {} median {} ci95 [{}, {}] over {} fold(s); lower bound clears hurdle {:.1}%: **{}**.\n\n", m.ranked_on, m.selection.candidate, pct(m.selection.score), if m.selection.gate_failed_all { ", every candidate failed the gate" } else { "" }, pct(d.depositor_net_return_annualized.mean), pct(d.depositor_net_return_annualized.median), pct(d.depositor_net_return_annualized.ci95_low), pct(d.depositor_net_return_annualized.ci95_high), d.seeds, d.required_return * 100.0, d.lower_ci_clears_hurdle));
+        s.push_str(&format!("\nSelected on training folds only (`ranked_on = {:?}`): **{}** (train score {}{}). Validation of the selected candidate: mean {} median {} ci95 [{}, {}] over {} fold(s); lower bound clears hurdle {:.1}%: **{}**.\n\n", m.ranked_on, m.selection.candidate, pct(m.selection.score), if m.selection.gate_failed_all { ", every candidate failed the gate" } else { "" }, pct(d.depositor_net_return_annualized.mean), pct(d.depositor_net_return_annualized.median), pct_opt(d.depositor_net_return_annualized.ci95_low), pct_opt(d.depositor_net_return_annualized.ci95_high), d.seeds, d.required_return * 100.0, d.lower_ci_clears_hurdle));
         match (&m.holdout_opened, &m.holdout) {
             (true, Some(h)) => s.push_str(&format!("Holdout **opened** for {} only: net {} (hurdle {:.1}%) → {}, max DD {:.3}, liquidations {}, fills {}.\n\n", m.selection.candidate, pct(h.depositor_net_return_annualized), h.required_return * 100.0, if h.hurdle_pass { "PASS" } else { "FAIL" }, h.max_drawdown, h.liquidations, h.fills)),
             _ => s.push_str("Holdout: **SEALED** (not opened).\n\n"),
@@ -341,7 +345,7 @@ pub fn render_md(r: &Results) -> String {
         s.push_str("| point | net median | net mean | ci95 | after idle cost | worst DD | CVaR95 daily | liq | fills | accepted | break-even | binding | limit |\n|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---|---|---|\n");
         for p in &g.points {
             let d = &p.distribution;
-            s.push_str(&format!("| {} | {} | {} | [{}, {}] | {} | {:.3} | {:.4} | {} | {:.0} | {} | {} | {} | {} |\n", p.coordinates.join(" "), pct(d.depositor_net_return_annualized.median), pct(d.depositor_net_return_annualized.mean), pct(d.depositor_net_return_annualized.ci95_low), pct(d.depositor_net_return_annualized.ci95_high), pct(d.net_return_after_idle_cost_annualized.median), d.max_drawdown_worst, d.daily_cvar95.median, d.liquidation_count_total, d.fills.median, money(d.accepted_notional.median), if p.break_even { "yes" } else { "no" }, p.binding, p.limit_label));
+            s.push_str(&format!("| {} | {} | {} | [{}, {}] | {} | {:.3} | {:.4} | {} | {:.0} | {} | {} | {} | {} |\n", p.coordinates.join(" "), pct(d.depositor_net_return_annualized.median), pct(d.depositor_net_return_annualized.mean), pct_opt(d.depositor_net_return_annualized.ci95_low), pct_opt(d.depositor_net_return_annualized.ci95_high), pct(d.net_return_after_idle_cost_annualized.median), d.max_drawdown_worst, d.daily_cvar95.median, d.liquidation_count_total, d.fills.median, money(d.accepted_notional.median), if p.break_even { "yes" } else { "no" }, p.binding, p.limit_label));
         }
         s.push_str("\nSensitivity (other axes at their base value):\n\n| axis | values | median net | break-even | range |\n|---|---|---|---|---:|\n");
         for x in &g.sensitivity {

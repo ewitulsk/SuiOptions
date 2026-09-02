@@ -319,7 +319,79 @@ Reading:
 
 ## 6. Break-even surface (doc 08 §9.3/§9.4)
 
-_(filled from `grid-sui/grid.json`)_
+`studies/grid_sui_halfyear.toml` on the half-year mixed book: hedge band
+{10, 20} % NAV × execution assumption {taker_only (central), conservative}
+× hedge leverage {3, 10} × mix {balanced, call_heavy 85 %, put_heavy 15 %},
+two flow seeds with common random numbers (the same arrivals, sizes,
+buckets and acceptance draws at every point; the mixes rescale the
+per-type arrival rates at constant total intensity). A point breaks even
+when the median depositor-net annualized return clears the 12 % hurdle,
+the worst seed's drawdown is ≤ 15 %, and no seed liquidates or goes
+bankrupt. **0 of 24 points break even**; liquidation is the binding line at
+21 of them and the hurdle at the other 3 (`surface.csv`).
+
+| band | execution | leverage | mix | net median (ann.) | ci95 (n = 2) | after idle cost | worst DD | liq (2 seeds) | fills | accepted | binding | label |
+|---:|---|---:|---|---:|---|---:|---:|---:|---:|---:|---|---|
+| 10 | taker | 3 | balanced | +12.4 % | [−26 %, +51 %] | +8.5 % | 0.099 | 2 | 2,944 | 12.5 M | liquidation | demand_limited |
+| 10 | taker | 3 | call_heavy | +5.0 % | [−76 %, +86 %] | +1.1 % | 0.050 | 1 | 2,586 | 10.1 M | liquidation | uneconomic |
+| 10 | taker | 3 | put_heavy | +17.4 % | [−5 %, +40 %] | +13.5 % | 0.186 | 2 | 3,057 | 14.1 M | liquidation | capital_limited |
+| 10 | taker | 10 | balanced | +6.3 % | [−48 %, +61 %] | +2.4 % | 0.108 | 11 | 2,945 | 12.5 M | liquidation | uneconomic |
+| 10 | taker | 10 | call_heavy | +5.0 % | [−44 %, +54 %] | +1.1 % | 0.050 | 2 | 2,586 | 10.1 M | liquidation | uneconomic |
+| 10 | taker | 10 | put_heavy | +20.7 % | [+1 %, +41 %] | +16.5 % | 0.150 | 10 | 3,067 | 14.2 M | liquidation | demand_limited |
+| 10 | conservative | 3 | balanced | −6.4 % | [−19 %, +6 %] | −9.7 % | 0.185 | 4 | 2,942 | 12.5 M | liquidation | uneconomic |
+| 10 | conservative | 3 | call_heavy | +3.3 % | [−72 %, +78 %] | −0.5 % | 0.049 | 1 | 2,584 | 10.1 M | liquidation | uneconomic |
+| 10 | conservative | 3 | put_heavy | +18.6 % | [−65 %, +102 %] | +14.7 % | 0.242 | 2 | 3,053 | 14.1 M | liquidation | capital_limited |
+| 10 | conservative | 10 | balanced | −3.6 % | [−33 %, +26 %] | −7.1 % | 0.163 | 9 | 2,942 | 12.5 M | liquidation | uneconomic |
+| 10 | conservative | 10 | call_heavy | +2.9 % | [−77 %, +83 %] | −1.0 % | 0.055 | 2 | 2,584 | 10.1 M | liquidation | uneconomic |
+| 10 | conservative | 10 | put_heavy | −6.2 % | [−59 %, +46 %] | −9.6 % | 0.242 | 10 | 3,018 | 14.0 M | liquidation | uneconomic |
+| 20 | taker | 3 | balanced | +14.2 % | [−97 %, +126 %] | +10.2 % | 0.072 | 1 | 2,927 | 12.5 M | liquidation | demand_limited |
+| 20 | taker | 3 | call_heavy | +5.2 % | [−32 %, +42 %] | +1.3 % | 0.064 | **0** | 2,573 | 10.1 M | median < hurdle | uneconomic |
+| 20 | taker | 3 | put_heavy | +16.0 % | [−132 %, +164 %] | +12.2 % | 0.196 | 3 | 3,045 | 14.1 M | liquidation | demand_limited |
+| 20 | taker | 10 | balanced | +19.6 % | [+11 %, +28 %] | +15.3 % | 0.061 | 5 | 2,926 | 12.5 M | liquidation | demand_limited |
+| 20 | taker | 10 | call_heavy | +5.2 % | [−31 %, +42 %] | +1.3 % | 0.064 | 1 | 2,573 | 10.1 M | liquidation | uneconomic |
+| 20 | taker | 10 | put_heavy | +13.3 % | [−33 %, +60 %] | +9.3 % | 0.163 | 11 | 3,055 | 14.1 M | liquidation | demand_limited |
+| 20 | conservative | 3 | balanced | +8.2 % | [−37 %, +54 %] | +4.3 % | 0.085 | 1 | 2,925 | 12.5 M | liquidation | uneconomic |
+| 20 | conservative | 3 | call_heavy | +4.8 % | [−30 %, +39 %] | +1.0 % | 0.048 | **0** | 2,571 | 10.1 M | median < hurdle | uneconomic |
+| 20 | conservative | 3 | put_heavy | +7.7 % | [−171 %, +186 %] | +4.2 % | 0.190 | 3 | 3,016 | 14.0 M | liquidation | uneconomic |
+| 20 | conservative | 10 | balanced | +12.0 % | [−36 %, +60 %] | +8.0 % | 0.064 | 4 | 2,926 | 12.5 M | liquidation | demand_limited |
+| 20 | conservative | 10 | call_heavy | +4.8 % | [−30 %, +39 %] | +0.9 % | 0.048 | **0** | 2,571 | 10.1 M | median < hurdle | uneconomic |
+| 20 | conservative | 10 | put_heavy | −8.2 % | [−20 %, +3 %] | −11.5 % | 0.212 | 8 | 3,002 | 13.9 M | liquidation | uneconomic |
+
+Sensitivity (other axes at their base value — band 10, taker, 3×,
+balanced):
+
+| axis | values | median net | range |
+|---|---|---|---:|
+| hedge band | 10 → 20 % NAV | +12.4 % → +14.2 % | 1.8 pts |
+| execution assumption | taker (central) → conservative | +12.4 % → −6.4 % | **18.8 pts** |
+| hedge leverage | 3× → 10× | +12.4 % → +6.3 % | 6.1 pts |
+| mix | balanced / call-heavy / put-heavy | +12.4 % / +5.0 % / +17.4 % | 12.4 pts |
+
+Reading:
+
+- **Nothing on this window survives the zero-liquidation policy at any
+  leverage** with the doc 08 §0.4 top-up cap; the only liquidation-free
+  points are the call-heavy books at band 20, and they earn +5 %. The
+  put-heavy books earn the most (+13 to +21 % median) and liquidate the
+  most (long hedge into the October cascade).
+- The two-seed intervals are enormous (n = 2, Student-t 12.7 × sd/√2):
+  the seeds differ by which side of the cascade the book's herded expiry
+  sits on. This is the honest width of a two-seed study; doc 08 §9.6's
+  distributions need eight seeds and the runtime that implies.
+- The execution assumption is the largest single sensitivity: the
+  `conservative` passive assumption (orders must be traded through, else
+  they time out and escalate to takers) costs 10× the fee line (122 k vs
+  11 k on the balanced 10 %/3× point) and flips the sign. Central and
+  conservative are both published, as the P5 gate asks; neither is
+  calibrated (proxy-BBO era, doc 08 §7.2).
+- Band width barely matters on the mixed book (1.8 pts), the doc 07 §5
+  saturation shape again; leverage matters through the liquidation count
+  (2 at 3× vs 11 at 10× on the balanced point) more than through the
+  median.
+- Depositor-net profit per accepted notional at the best liquidation-free
+  point (band 20, taker, 3×, call-heavy): +0.3 % of accepted notional over
+  six months on 10.1 M accepted; return on peak capital deployed is in
+  every `summary.json`.
 
 ## 7. Capacity frontier (doc 08 §8.6)
 
