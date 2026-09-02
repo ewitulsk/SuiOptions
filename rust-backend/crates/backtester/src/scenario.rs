@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::gaps::GapConfig;
 use crate::latency::LatencyConfig;
+use crate::margin::MarginConfig;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -54,6 +55,8 @@ pub struct Scenario {
     pub latency: LatencyConfig,
     /// Required feeds and the gap policy (doc 08 §6.4).
     pub gaps: GapConfig,
+    /// Bluefin isolated-margin rules (doc 08 §7.3).
+    pub margin: MarginConfig,
 }
 
 impl Default for Scenario {
@@ -88,6 +91,7 @@ impl Default for Scenario {
             venue: VenueConfig::default(),
             latency: LatencyConfig::default(),
             gaps: GapConfig::default(),
+            margin: MarginConfig::default(),
         }
     }
 }
@@ -623,6 +627,65 @@ pub struct VenueConfig {
     pub external_budget_fraction: f64,
     pub external_daily_release_fraction: f64,
     pub maintenance_margin_fraction: f64,
+    // ── execution lifecycle (doc 08 §7.2, PR L) ─────────────────────
+    /// `taker_only | optimistic | central | conservative`.
+    pub execution_assumption: String,
+    /// Maker fee, bps (Bluefin SUI-PERP: 1 bp).
+    pub maker_fee_bps: f64,
+    /// Base step size (SUI-PERP: 1 SUI); sizes round toward zero.
+    pub contract_size: f64,
+    /// Minimum order (SUI-PERP: 1 SUI); smaller orders are rejected.
+    pub min_order_units: f64,
+    /// Bluefin market take protection: taker fills never cross the
+    /// oracle by more than this, bps (SUI-PERP: 2%).
+    pub take_protection_bps: f64,
+    /// Taker depth per bar, units (0 = unlimited): larger orders fill
+    /// across bars (partial fills, consumed depth).
+    pub max_taker_units_per_bar: f64,
+    /// Persistent own-order impact: bps added per $1m of taker notional,
+    /// decaying with `impact_half_life_ms` (config until L2 exists).
+    pub impact_bps_per_million: f64,
+    pub impact_half_life_ms: i64,
+    /// Passive: fraction of the bar volume eligible at the limit that a
+    /// resting order can take (`central`/`conservative`).
+    pub passive_participation: f64,
+    /// Passive: queue ahead of the order, units, scaled by the assumption
+    /// (`optimistic` 0×, `central` 0.5×, `conservative` 1×).
+    pub queue_depth_units: f64,
+    /// Passive `conservative`: the bar must trade THROUGH the limit by
+    /// this many bps before anything fills.
+    pub through_bps: f64,
+    /// Cancel a working order after this long (mm-bot `order_timeout_secs`).
+    pub order_timeout_secs: i64,
+    /// After a timeout, re-submit the remainder as a taker.
+    pub passive_timeout_to_taker: bool,
+    /// Mark basis over spot, step series `(from_ms, bps)` (doc 08 §7.4).
+    pub basis: Vec<BasisPoint>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct BasisPoint {
+    pub from_ms: i64,
+    pub bps: f64,
+}
+
+impl VenueConfig {
+    pub fn is_passive(&self) -> bool {
+        self.execution_assumption != "taker_only"
+    }
+
+    /// Queue-ahead multiple of `queue_depth_units` for the assumption.
+    pub fn queue_ahead_mult(&self) -> f64 {
+        match self.execution_assumption.as_str() {
+            "optimistic" => 0.0,
+            "central" => 0.5,
+            _ => 1.0,
+        }
+    }
+
+    pub fn basis_bps_at(&self, ts_ms: i64) -> f64 {
+        self.basis.iter().rfind(|b| b.from_ms <= ts_ms).map(|b| b.bps).unwrap_or(0.0)
+    }
 }
 
 impl Default for VenueConfig {
@@ -634,6 +697,20 @@ impl Default for VenueConfig {
             external_budget_fraction: 0.20,
             external_daily_release_fraction: 0.10,
             maintenance_margin_fraction: 0.05,
+            execution_assumption: "taker_only".into(),
+            maker_fee_bps: 1.0,
+            contract_size: 1.0,
+            min_order_units: 1.0,
+            take_protection_bps: 200.0,
+            max_taker_units_per_bar: 0.0,
+            impact_bps_per_million: 0.0,
+            impact_half_life_ms: 300_000,
+            passive_participation: 0.1,
+            queue_depth_units: 0.0,
+            through_bps: 1.0,
+            order_timeout_secs: 60,
+            passive_timeout_to_taker: true,
+            basis: Vec::new(),
         }
     }
 }
