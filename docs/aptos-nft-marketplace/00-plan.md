@@ -476,6 +476,66 @@ docs/aptos-nft-marketplace/
 Frontend: a new `aptos-frontend/` Vite app (or a route tree inside
 `frontend/`) using `@aptos-labs/wallet-adapter-react`; decided in chapter 01.
 
+## 7. Quote tokens: list in any allowlisted Fungible Asset
+
+Decision: the seller picks the quote token per listing; the contract accepts
+any token on an admin-managed allowlist; every price, offer, fee and royalty
+is denominated in that listing's quote token.
+
+Why not literally "any token":
+
+- The reference marketplace is `Coin<CoinType>`-generic
+  (`coin::withdraw<CoinType>`, `aptos_account::deposit_coins`). Native USDC
+  (`0xbae2...46f3b`) and USDt (`0x357b...dc2b`) on Aptos are Fungible
+  Assets with **no Coin type at all**, so the reference contract cannot
+  price a listing in either. Aptos has also migrated every CoinStore to a
+  FungibleStore, so FA is the one payment primitive that reaches everything.
+  Our fork replaces the Coin leg with `primary_fungible_store::withdraw` /
+  `deposit` against an `Object<Metadata>` stored in the listing.
+- The quote token becomes a **data field, not a type parameter**. One
+  `list(seller, token, quote: Object<Metadata>, price)` entry, one event
+  shape, one indexer path, instead of an event type per `CoinType`.
+- USDC and USDt both carry dispatchable transfer hooks
+  (`0x1::fungible_asset::DispatchFunctionStore` exists on both). A
+  permissionless quote token means a malicious FA's hook can abort selectively
+  (grief a specific buyer or our fee address), skim a transfer tax so the
+  seller receives less than `price`, or freeze the store that escrows
+  collection-offer funds. Allowlisting is the only cheap defence.
+- Floor price and volume need a common denominator. A listing in a token the
+  UI cannot price is invisible to the stats and useless to buyers.
+
+Allowlist shape (admin-editable object, mirrors `exchange-listing`'s
+per-quote-coin economics on the Sui side):
+
+```
+struct QuoteToken has store { metadata: Object<Metadata>, enabled: bool, min_fee: u64 }
+```
+
+Seed: APT (`0xa`), USDC, USDt. Add others on request. Offers and collection
+offers escrow the quote FA in an object-owned fungible store, so they work
+in any allowlisted token too. Foreign venues stay `Coin<T>`-generic, which is
+APT in practice; the router does not change that.
+
+## 8. Fees
+
+| Where | Who pays | Mechanism | Level |
+|---|---|---|---|
+| Fill on our venue (listing bought, or our-venue offer accepted) | Seller, deducted from proceeds after royalty | `fee_schedule::commission` (percentage) in the listing's quote token, paid to the treasury at fill | P0 |
+| Buy on a foreign venue through our router | Buyer, added on top of the venue's price | `router::buy_many` withdraws `price + fee` and pays the fee before calling the venue; the venue's own commission still goes to that venue | P0 |
+| Instant-sell into a foreign bid through our router | Seller, from proceeds | Same adapter, fee taken from what the foreign contract pays out | P1 |
+| Listing fee, bidding fee | nobody | Reference supports fixed fees at list and bid time; set to zero, they only suppress supply | never |
+| Launchpad mints, featured placement, API keys, gas sponsorship markup | | Non-trading revenue; not in scope now | P2 |
+
+Mechanics worth copying from Tradeport: a `min_fee` floor per quote token so
+dust trades do not produce dust fees (`update_min_fee_amount`), per-collection
+overrides for partner and zero-fee deals (`fees::upsert_collection_numerator`),
+and per-wallet loyalty discounts (`loyalty::add_per_wallet_numerators`). In
+the reference design a listing references a `FeeSchedule` object at list
+time, so rate changes are made by mutating that shared object rather than by
+relisting. Fees accrue in whatever quote token the trade used; the treasury
+holds a basket, and there is no on-chain swap.
+
 ## Revision history
 
 - 2026-09-02: initial landscape, feature cut, and cross-venue design.
+- 2026-09-02: added quote-token allowlist decision (§7) and fee placement (§8).
