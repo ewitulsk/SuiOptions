@@ -99,7 +99,10 @@ async fn main() -> Result<()> {
 
 async fn load(store: &data::Store, s: &Scenario) -> Result<(Vec<data::Bar>, Vec<data::FundingRow>, Vec<(i64, f64)>)> {
     // Warm the estimator: read the long window before `from`.
-    let warm_days = (s.estimator.long_window_hours / 24.0).ceil() as i64 + 1;
+    let mut warm_days = (s.estimator.long_window_hours / 24.0).ceil() as i64 + 1;
+    if s.estimator.kind == "har" {
+        warm_days = warm_days.max(s.estimator.calibration_days as i64 + 2);
+    }
     let from = (chrono::NaiveDate::parse_from_str(&s.from, "%Y-%m-%d")? - chrono::Duration::days(warm_days)).format("%Y-%m-%d").to_string();
     let bars = data::load_bars(store, &s.spot_exchange, &s.spot_symbol, &from, &s.to).await?;
     let funding = data::load_funding(store, &s.funding_exchange, &s.funding_symbol, &s.from, &s.to).await?;

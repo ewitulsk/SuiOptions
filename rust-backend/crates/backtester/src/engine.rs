@@ -123,7 +123,7 @@ pub fn run(s: &Scenario, bars: &[Bar], funding: &[FundingRow], vol_index: &[(i64
     let by_minute: BTreeMap<i64, Bar> = bars.iter().map(|b| (b.ts_ms - b.ts_ms.rem_euclid(60_000), *b)).collect();
 
     let mut book = Book {
-        est: WindowsEstimator::new(s.estimator.clone()),
+        est: WindowsEstimator::new(s.estimator.clone(), s.flow.tenor_days),
         oracle: OracleProxy::new(s.oracle.clone()),
         ledger: Ledger::new(s.nav0),
         v1: v1_params(s),

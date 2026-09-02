@@ -95,8 +95,17 @@ impl Default for OracleModel {
 pub struct EstimatorConfig {
     /// `windows` = the live desk's two-window blend (pricing::surface);
     /// `vol_index` = the scenario's vol index (percent, e.g. DVOL) as the
-    /// base ATM sigma, same risk premium / shape / clamp path.
+    /// base ATM sigma, same risk premium / shape / clamp path;
+    /// `har` = the G5 forecaster (`vol-forecast`) at `q_bid`, no max-lean.
     pub kind: String,
+    /// `har`: bid quantile of the forecast distribution (doc 09 §2.2 #5).
+    pub q_bid: f64,
+    /// `har`: refit cadence, seconds.
+    pub refit_secs: i64,
+    /// `har`: calibration window, days (history the fit sees).
+    pub calibration_days: u32,
+    /// `har`: derive smile convexity from the forecast's kurtosis.
+    pub convexity_from_kurtosis: bool,
     /// Realized-vol sampling interval, seconds. Doc 07 §4: SUI ≥ 900.
     pub sample_interval_s: i64,
     pub short_window_hours: f64,
@@ -121,6 +130,10 @@ impl Default for EstimatorConfig {
     fn default() -> Self {
         Self {
             kind: "windows".into(),
+            q_bid: 0.35,
+            refit_secs: 86_400,
+            calibration_days: 365,
+            convexity_from_kurtosis: false,
             sample_interval_s: 900,
             short_window_hours: 24.0,
             long_window_hours: 168.0,
