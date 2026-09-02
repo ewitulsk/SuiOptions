@@ -112,7 +112,11 @@ pub struct Cli {
     #[arg(short = 's', long, default_value = "services/mm-bot/config/secrets.toml")]
     pub secrets: PathBuf,
 
-    #[arg(long, default_value_t = 200_000_000)]
+    /// Gas budget (MIST) for every transaction the bot submits itself
+    /// (signer bootstrap, collateral, exercise). Gas is paid from coin
+    /// objects OR the address balance, never both, so on a thin testnet
+    /// wallet this must fit the larger single source.
+    #[arg(long, env = "MM_BOT_GAS_BUDGET", default_value_t = 200_000_000)]
     pub gas_budget: u64,
 
     /// Optional subcommand. Absent → run the bot (serve mode).
