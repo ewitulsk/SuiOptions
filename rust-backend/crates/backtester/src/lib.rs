@@ -23,6 +23,7 @@ pub mod clock;
 pub mod data;
 pub mod engine;
 pub mod estimator;
+pub mod exercise;
 pub mod flow;
 pub mod flow_gen;
 pub mod gaps;

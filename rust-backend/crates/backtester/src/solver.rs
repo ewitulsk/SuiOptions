@@ -424,7 +424,7 @@ fn aggregate(s: &Scenario, outs: &[RunOutput], nav: f64) -> Aggregate {
         exercise: ExerciseUsage {
             calls_exercised: st(&|x| x.exercised_call as f64) as u64,
             puts_exercised: st(&|x| x.exercised_put as f64) as u64,
-            path: "at_expiry_cash_settled(assumed until PR M)",
+            path: "american_sweep(cash|quote_flash|vault_underlying|base_flash; route modeled)",
             flash_utilization: if flash_cap > 0.0 { Some(peak_exercise / flash_cap) } else { None },
             router_utilization: if router_cap > 0.0 { Some(peak_exercise / router_cap) } else { None },
             laddered: st(&|x| x.exercise_laddered as f64) as u64,
@@ -497,7 +497,7 @@ pub fn capacity_point(base: &Scenario, data: &Data, volume_per_day: f64, mix: Mi
         "acceptance=instant",
         "venue_capacity=assumed",
         "flash_capacity=assumed(PR M)",
-        "exercise_path=at_expiry(assumed)",
+        "exercise_path=american_sweep(modeled_route, flash_capacity_assumed)",
         "liquidation=detected_not_applied",
     ];
     let mut solved: Vec<f64> = per_seed.iter().flatten().copied().collect();

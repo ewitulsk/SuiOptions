@@ -1,0 +1,98 @@
+{
+  "_doc": "Shared put-exercise route goldens (doc 08 §7.6 / SO-455). Asserted by services/mm-bot/src/desk/exits/put.rs (live policy) and crates/backtester/src/exercise.rs (mirror). Units: 9-decimal underlying, 6-decimal settlement, strike at scale 6 ($4.00/unit = 4000), DeepBook price_raw = quote-atomic per base-atomic × 1e9.",
+  "plan": [
+    {
+      "name": "vault underlying first when held",
+      "cfg": {},
+      "amount": 250000000000, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 250000000000, "base_balance": 250000000000, "quote_balance": 1000000000,
+      "lot_size": 1000, "min_size": 10000, "asks": [[3500000, 1000000000000]],
+      "expect": { "path": "vault_underlying", "payout": 1000000000, "max_quote_in": 877000000, "min_profit": 10000000 }
+    },
+    {
+      "name": "no own underlying, base capacity → base flash",
+      "cfg": {},
+      "amount": 250000000000, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 0, "base_balance": 250000000000, "quote_balance": 0,
+      "lot_size": 1000, "min_size": 10000, "asks": [[3500000, 1000000000000]],
+      "expect": { "path": "base_flash", "payout": 1000000000, "max_quote_in": 877000000, "min_profit": 10000000 }
+    },
+    {
+      "name": "base short, quote covers max_quote_in → quote flash",
+      "cfg": {},
+      "amount": 250000000000, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 0, "base_balance": 249999999999, "quote_balance": 877000000,
+      "lot_size": 1000, "min_size": 10000, "asks": [[3500000, 1000000000000]],
+      "expect": { "path": "quote_flash", "payout": 1000000000, "max_quote_in": 877000000, "min_profit": 10000000 }
+    },
+    {
+      "name": "neither flash side has capacity",
+      "cfg": {},
+      "amount": 250000000000, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 0, "base_balance": 249999999999, "quote_balance": 876999999,
+      "lot_size": 1000, "min_size": 10000, "asks": [[3500000, 1000000000000]],
+      "expect": { "reject": "capacity" }
+    },
+    {
+      "name": "5 units: net $2.45 below the $10 minimum",
+      "cfg": {},
+      "amount": 5000000000, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 5000000000, "base_balance": 5000000000, "quote_balance": 1000000000,
+      "lot_size": 1000, "min_size": 10000, "asks": [[3500000, 1000000000000]],
+      "expect": { "reject": "profit", "net": 2450000, "min_profit": 10000000 }
+    },
+    {
+      "name": "asks above strike: negative net on every route",
+      "cfg": {},
+      "amount": 250000000000, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 250000000000, "base_balance": 250000000000, "quote_balance": 0,
+      "lot_size": 1000, "min_size": 10000, "asks": [[4500000, 4000000000000]],
+      "expect": { "reject": "profit", "net_negative": true }
+    },
+    {
+      "name": "shallow ladder is no route",
+      "cfg": {},
+      "amount": 250000000000, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 250000000000, "base_balance": 250000000000, "quote_balance": 0,
+      "lot_size": 1000, "min_size": 10000, "asks": [[3500000, 1000]],
+      "expect": { "reject": "no_route" }
+    },
+    {
+      "name": "below min size is no route",
+      "cfg": {},
+      "amount": 1, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 1, "base_balance": 1, "quote_balance": 1,
+      "lot_size": 1000, "min_size": 10000, "asks": [[3500000, 1000000000000]],
+      "expect": { "reject": "no_route" }
+    },
+    {
+      "name": "swap and flash fees are charged on the flash routes",
+      "cfg": { "swap_fee_bps": 10.0, "flash_fee_bps": 5.0 },
+      "amount": 250000000000, "strike": 4000, "strike_scale": 6, "settlement_decimals": 6,
+      "own_underlying": 0, "base_balance": 250000000000, "quote_balance": 0,
+      "lot_size": 1000, "min_size": 10000, "asks": [[3500000, 1000000000000]],
+      "expect": { "path": "base_flash", "payout": 1000000000, "max_quote_in": 877875000, "min_profit": 10000000 }
+    }
+  ],
+  "ladder": [
+    { "name": "10 chunks fit", "amount": 10000000000, "max_slice": 1000000000, "remaining_ms": 600000, "tx_ms": 30000, "margin_ms": 120000,
+      "expect": [1000000000, 1000000000, 1000000000, 1000000000, 1000000000, 1000000000, 1000000000, 1000000000, 1000000000, 1000000000] },
+    { "name": "only 4 tx fit: bigger slices", "amount": 10000000000, "max_slice": 1000000000, "remaining_ms": 240000, "tx_ms": 30000, "margin_ms": 120000,
+      "expect": [2500000000, 2500000000, 2500000000, 2500000000] },
+    { "name": "uneven remainder", "amount": 7, "max_slice": 3, "remaining_ms": 1000000, "tx_ms": 1, "margin_ms": 0, "expect": [3, 3, 1] },
+    { "name": "inside the expiry margin", "amount": 7, "max_slice": 3, "remaining_ms": 100000, "tx_ms": 30000, "margin_ms": 120000, "expect": [] },
+    { "name": "zero amount", "amount": 0, "max_slice": 3, "remaining_ms": 1000000, "tx_ms": 30000, "margin_ms": 0, "expect": [] }
+  ],
+  "min_profit": [
+    { "name": "$10 dominates a $20 payout", "cfg": {}, "payout": 20000000, "expect": 10000000 },
+    { "name": "$1m payout: uncertainty term", "cfg": {}, "payout": 1000000000000, "expect": 4000000000 },
+    { "name": "uncertainty off: bps term", "cfg": { "route_uncertainty_bps": 0.0 }, "payout": 1000000000000, "expect": 500000000 }
+  ],
+  "put_wanted": [
+    { "name": "ITM near expiry, lots of TV", "spot": 3.0, "strike": 4.0, "hours": 1.0, "carry": 0.0, "time_value": 0.5, "expect": true },
+    { "name": "ITM just inside the window", "spot": 3.9, "strike": 4.0, "hours": 23.9, "carry": 0.0, "time_value": 0.01, "expect": true },
+    { "name": "ITM far, TV beats carry", "spot": 3.0, "strike": 4.0, "hours": 48.0, "carry": 0.0, "time_value": 0.5, "expect": false },
+    { "name": "ITM far, carry beats TV", "spot": 3.0, "strike": 4.0, "hours": 48.0, "carry": 0.6, "time_value": 0.5, "expect": true },
+    { "name": "OTM near expiry", "spot": 5.0, "strike": 4.0, "hours": 1.0, "carry": 0.0, "time_value": 0.0, "expect": false }
+  ]
+}

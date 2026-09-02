@@ -70,3 +70,21 @@ leverage = 10.0
 topup_trigger_mr = 0.035
 topup_transfer_ms = 30_000
 max_topup_24h_pct_nav = 0.10
+
+# Doc 08 §7.5/§7.6 (PR M): the live exit policy on the exits cadence
+# (daily check + 5-minute near-expiry sweep), routed through a modeled
+# DeepBook ladder; pool balances (flash capacity) are an ASSUMPTION
+# until a pool-balance poller exists (doc 08 §4.6).
+[exercise]
+check_interval_secs = 86_400
+sweep_interval_secs = 300
+near_expiry_hours = 24.0
+min_profit_usd = 10.0
+min_profit_bps = 5.0
+route_uncertainty_bps = 20.0
+route_uncertainty_mult = 2.0
+max_slice_units = 100_000.0
+route_depth_units_per_bps = 2_000.0
+pool_base_balance_units = 5_000_000.0
+pool_quote_balance = 10_000_000.0
+ptb_failure_prob = 0.0

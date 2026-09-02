@@ -27,6 +27,15 @@ pub struct Position {
     /// base) — doc 09 G7.
     pub writer_net_premium: f64,
     pub mark: f64,
+    /// Units at entry (exercise slices reduce `qty`).
+    pub qty_open: f64,
+    /// Units whose exercise PTB is in flight (doc 08 §7.5/§7.6).
+    pub pending_units: f64,
+    /// Last exits-cadence check (the daily check; the near-expiry sweep
+    /// ignores it).
+    pub last_check_ms: i64,
+    /// Settlement realized by exercise slices so far.
+    pub exercise_net: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -180,7 +189,7 @@ mod tests {
         l.positions.push(Position {
             id: 0, is_put: false, strike: 1.0, expiry_ms: 0, qty: 10.0, premium_paid: 100.0, sigma_paid: 0.5,
             sigma_surface: 0.55, opened_ms: 0, spot_open: 1.0, delta_open: 0.5, gamma_open: 0.0, vega_open: 0.0,
-            writer_net_premium: 100.0, mark: 9.0,
+            writer_net_premium: 100.0, mark: 9.0, qty_open: 10.0, pending_units: 0.0, last_check_ms: 0, exercise_net: 0.0,
         });
         l.perp.fill(-5.0, 1.0);
         // cash 900 + marks 90 + perp short 5 @1 marked 1.1 → −0.5

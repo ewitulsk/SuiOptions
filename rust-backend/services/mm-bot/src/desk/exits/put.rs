@@ -880,4 +880,107 @@ mod tests {
             assert!(put_exercise_wanted(&c, 3.0, 4.0, 0.5, 0.0, tv));
         }
     }
+
+    /// Parity with the backtester's mirror of this policy (doc 08 P3
+    /// gate, SO-455): both crates assert the same route goldens.
+    #[test]
+    fn put_route_goldens_match_the_shared_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/backtester/fixtures/put_route_goldens.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let g: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let cfg_of = |v: &serde_json::Value| -> PutExerciseConfig {
+            let mut c = PutExerciseConfig::default();
+            if let Some(x) = v["swap_fee_bps"].as_f64() {
+                c.swap_fee_bps = x;
+            }
+            if let Some(x) = v["flash_fee_bps"].as_f64() {
+                c.flash_fee_bps = x;
+            }
+            if let Some(x) = v["route_uncertainty_bps"].as_f64() {
+                c.route_uncertainty_bps = x;
+            }
+            c
+        };
+        for case in g["plan"].as_array().unwrap() {
+            let c = cfg_of(&case["cfg"]);
+            let liq = PutLiquidity {
+                own_underlying: case["own_underlying"].as_u64().unwrap(),
+                pool: PoolLiquidity {
+                    base_balance: case["base_balance"].as_u64().unwrap(),
+                    quote_balance: case["quote_balance"].as_u64().unwrap(),
+                    lot_size: case["lot_size"].as_u64().unwrap(),
+                    min_size: case["min_size"].as_u64().unwrap(),
+                    asks: case["asks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|a| (a[0].as_u64().unwrap(), a[1].as_u64().unwrap()))
+                        .collect(),
+                },
+            };
+            let got = plan_slice(
+                &c,
+                case["amount"].as_u64().unwrap(),
+                case["strike"].as_u64().unwrap() as u128,
+                case["strike_scale"].as_u64().unwrap() as u8,
+                case["settlement_decimals"].as_u64().unwrap() as u8,
+                &liq,
+            );
+            let name = case["name"].as_str().unwrap();
+            let exp = &case["expect"];
+            match got {
+                Ok(plan) => {
+                    assert_eq!(plan.path.label(), exp["path"].as_str().unwrap(), "{name}");
+                    assert_eq!(plan.payout, exp["payout"].as_u64().unwrap(), "{name}");
+                    assert_eq!(plan.max_quote_in, exp["max_quote_in"].as_u64().unwrap(), "{name}");
+                    assert_eq!(plan.min_profit, exp["min_profit"].as_u64().unwrap(), "{name}");
+                }
+                Err(r) => {
+                    let label = match &r {
+                        PlanReject::NoRoute => "no_route",
+                        PlanReject::Profit { .. } => "profit",
+                        PlanReject::Capacity => "capacity",
+                    };
+                    assert_eq!(label, exp["reject"].as_str().unwrap(), "{name}: {r:?}");
+                    if let PlanReject::Profit { net, min_profit } = r {
+                        if let Some(n) = exp["net"].as_i64() {
+                            assert_eq!(net, n as i128, "{name}");
+                        }
+                        if let Some(m) = exp["min_profit"].as_u64() {
+                            assert_eq!(min_profit, m, "{name}");
+                        }
+                        if exp["net_negative"].as_bool() == Some(true) {
+                            assert!(net < 0, "{name}");
+                        }
+                    }
+                }
+            }
+        }
+        for case in g["ladder"].as_array().unwrap() {
+            let got = ladder(
+                case["amount"].as_u64().unwrap(),
+                case["max_slice"].as_u64().unwrap(),
+                case["remaining_ms"].as_u64().unwrap(),
+                case["tx_ms"].as_u64().unwrap(),
+                case["margin_ms"].as_u64().unwrap(),
+            );
+            let exp: Vec<u64> = case["expect"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+            assert_eq!(got, exp, "{}", case["name"]);
+        }
+        for case in g["min_profit"].as_array().unwrap() {
+            let c = cfg_of(&case["cfg"]);
+            assert_eq!(min_profit(&c, case["payout"].as_u64().unwrap(), DEC), case["expect"].as_u64().unwrap(), "{}", case["name"]);
+        }
+        let exits = ExitsConfig::default();
+        for case in g["put_wanted"].as_array().unwrap() {
+            let f = |k: &str| case[k].as_f64().unwrap();
+            assert_eq!(
+                put_exercise_wanted(&exits, f("spot"), f("strike"), f("hours"), f("carry"), f("time_value")),
+                case["expect"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
 }
