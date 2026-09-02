@@ -18,13 +18,16 @@ pub mod hedge;
 pub mod history;
 pub mod limits;
 pub mod listings;
-pub mod model;
 pub mod monitors;
 pub mod positions;
 pub mod provision;
-pub mod quote;
 pub mod rfq;
 pub mod state;
+
+// Pure policy modules re-exported from the strategy kernel (SO-450) so
+// every `desk::model` / `desk::quote` path keeps resolving.
+pub use desk_core::exposure::{MarkSnapshot, SpotSnapshot};
+pub use desk_core::{model, quote};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 
 use protocol_types::sides::Side;
-use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
+use pyth_client::{PriceCache, PriceFeedId};
 use sui_tx::sui_client::Network;
 use sui_tx::tx::deepbook::DeepBookHandles;
 
@@ -46,8 +49,8 @@ use crate::pricing::{compute_spot_from_cache, Staleness};
 use book::{Book, PnlLine};
 use limits::{BookExposure, LimitsConfig};
 use model::{EstimatorConfig, EstimatorKind, MarketModel, SurfaceConfig, V1BidParams};
-use vol_forecast::PriceHistory;
 use quote::{Decision, FlowContext, RfqInputs};
+use vol_forecast::{PriceHistory, RollingVolBuffer};
 
 // ── config ─────────────────────────────────────────────────────────────
 
@@ -246,25 +249,6 @@ impl From<V1Config> for V1BidParams {
 }
 
 // ── shared runtime state ───────────────────────────────────────────────
-
-/// Per-bucket mark snapshot written by the book refresher: model fair,
-/// the sigma/spot it was computed at, and per-unit greeks. Read by the
-/// `/desk/state` endpoint (SO-348) so serving a snapshot never re-prices.
-#[derive(Clone, Copy, Debug)]
-pub struct MarkSnapshot {
-    pub mark_per_unit: f64,
-    pub sigma: f64,
-    pub spot: f64,
-    pub greeks: model::Greeks,
-    pub at_ms: u64,
-}
-
-/// Per-symbol spot written each refresher tick.
-#[derive(Clone, Copy, Debug)]
-pub struct SpotSnapshot {
-    pub spot: f64,
-    pub at_ms: u64,
-}
 
 /// Last nightly-stress result (written by `monitors::stress_tick`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -666,7 +650,6 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         trading_vault_package: p.trading_vault_package,
         vault_id,
         settlement_coin_type: p.settlement_coin_type.clone(),
-        pnl_path: Some(std::path::PathBuf::from(&p.cfg.pnl_jsonl_path)),
         options_package: Some(p.core_package.to_hex_literal()),
     })
     .await
@@ -838,6 +821,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     for (i, m) in p.markets.iter().enumerate() {
         spawn_rebalancer(RebalancerParams {
             hedge_cfg: p.cfg.hedge.clone(),
+            pnl_path: std::path::PathBuf::from(&p.cfg.pnl_jsonl_path),
             venue: Arc::clone(&primary_venues[i]),
             shared: Arc::clone(&shared),
             book: Arc::clone(&book),
@@ -1159,143 +1143,33 @@ fn spawn_book_refresher(p: RefresherParams) {
                 }
             }
 
-            // Marks + greeks per holding/written line.
-            let (holdings, written) = {
+            // Marks + greeks per holding/written line: the kernel's mark
+            // pass (`desk_core::exposure`, SO-450) over the book.
+            let pass = {
                 let b = p.book.read();
-                (b.holdings.clone(), b.written.clone())
+                desk_core::exposure::mark_book(desk_core::exposure::MarkInputs {
+                    models: &p.models,
+                    holdings: &b.holdings,
+                    written: &b.written,
+                    spot_by_model: &spot_by_model,
+                    now_ms: now,
+                    stress_gap_down: p.cfg.monitors.stress_gap_down.abs(),
+                    stress_gap_up: p.cfg.monitors.stress_gap_up.abs(),
+                    quote_flash_capacity: p.cfg.capital.quote_flash_capacity,
+                    base_flash_capacity: p.cfg.capital.base_flash_capacity,
+                })
             };
-            let mut exposure = BookExposure::default();
-            let mut marks: HashMap<protocol_types::ids::ObjectId, MarkSnapshot> = HashMap::new();
-            let mut delta_by_coin: HashMap<String, f64> = HashMap::new();
-            let mut deployed = 0.0f64;
-            // Capital-snapshot demands of the marked book (SO-444):
-            // strike cash calls need / underlying value puts deliver at
-            // exercise, and the hedge notional each line needs.
-            let mut call_strike_cash = 0.0f64;
-            let mut put_underlying_value = 0.0f64;
-            let mut exercise_demand_by_expiry: HashMap<u64, f64> = HashMap::new();
-            let mut hedge_notional = 0.0f64;
-            let mut hedge_notional_by_expiry: HashMap<u64, f64> = HashMap::new();
-            for h in &holdings {
-                let Some(mi) = p.models.iter().position(|m| m.coin_type == h.asset_coin_type)
-                else {
-                    continue;
-                };
-                let Some(spot) = spot_by_model[mi] else {
-                    continue;
-                };
-                let t = h.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
-                let k = h.strike_scaled();
-                let (sigma, _) = p.models[mi].sigma(spot, k, t);
-                let mark = p.models[mi].fair_per_unit(h.is_put, spot, k, t, sigma);
-                let g = p.models[mi].greeks_per_unit(h.is_put, spot, k, t, sigma);
-                marks.insert(
-                    h.bucket_id.clone(),
-                    MarkSnapshot { mark_per_unit: mark, sigma, spot, greeks: g, at_ms: now },
-                );
-                let amt = h.amount() as f64;
-                deployed += mark * amt;
-                exposure.net_vega_per_volpt += g.vega * amt / 100.0;
-                exposure.theta_cost_per_day += (-g.theta * amt).max(0.0);
-                *exposure.premium_by_expiry.entry(h.expiry_ms).or_default() += mark * amt;
-                exposure.premium_by_strike_bucket[limits::strike_bucket(k, spot)] += mark * amt;
-                // Composition surfaces (doc 08 §4.5, SO-431).
-                if h.is_put {
-                    exposure.put_premium += mark * amt;
-                    exposure.gamma_units_puts += g.gamma * amt;
-                } else {
-                    exposure.call_premium += mark * amt;
-                    exposure.gamma_units_calls += g.gamma * amt;
-                }
-                let line_delta = g.delta * amt;
-                if line_delta >= 0.0 {
-                    exposure.delta_units_positive += line_delta;
-                } else {
-                    exposure.delta_units_negative += line_delta;
-                }
-                *delta_by_coin.entry(h.asset_coin_type.clone()).or_default() += g.delta * amt;
-                let demand = if h.is_put { spot } else { k } * amt;
-                let line_hedge = line_delta.abs() * spot;
-                let gamma_by_type = exposure.gamma_by_expiry.entry(h.expiry_ms).or_default();
-                let gamma_notional_per_pct = g.gamma * amt * 0.01 * spot * spot;
-                // Composition surfaces per side (doc 08 §4.5, SO-445):
-                // puts need underlying and their LONG hedge loses in a
-                // crash; calls need strike cash and their SHORT hedge
-                // loses in a rally.
-                if h.is_put {
-                    put_underlying_value += demand;
-                    *exposure.put_underlying_value_by_expiry.entry(h.expiry_ms).or_default() +=
-                        demand;
-                    gamma_by_type.puts_units += g.gamma * amt;
-                    gamma_by_type.puts_notional_per_pct += gamma_notional_per_pct;
-                    exposure.crash_loss_put_hedges +=
-                        line_hedge * p.cfg.monitors.stress_gap_down.abs();
-                } else {
-                    call_strike_cash += demand;
-                    *exposure.call_settlement_cash_by_expiry.entry(h.expiry_ms).or_default() +=
-                        demand;
-                    gamma_by_type.calls_units += g.gamma * amt;
-                    gamma_by_type.calls_notional_per_pct += gamma_notional_per_pct;
-                    exposure.rally_loss_call_hedges +=
-                        line_hedge * p.cfg.monitors.stress_gap_up.abs();
-                }
-                *exercise_demand_by_expiry.entry(h.expiry_ms).or_default() += demand;
-                hedge_notional += line_hedge;
-                *hedge_notional_by_expiry.entry(h.expiry_ms).or_default() += line_hedge;
-            }
-            exposure.stress_gap_down = p.cfg.monitors.stress_gap_down.abs();
-            exposure.stress_gap_up = p.cfg.monitors.stress_gap_up.abs();
-            exposure.concurrent_demand = limits::concurrent_demand(
-                &exposure.call_settlement_cash_by_expiry,
-                &exposure.put_underlying_value_by_expiry,
-                exposure.crash_loss_put_hedges,
-                exposure.rally_loss_call_hedges,
-            );
-            for (e, cash) in &exposure.call_settlement_cash_by_expiry {
-                exposure.quote_flash_util_by_expiry.insert(
-                    *e,
-                    limits::flash_utilization(*cash, p.cfg.capital.quote_flash_capacity),
-                );
-            }
-            for (e, value) in &exposure.put_underlying_value_by_expiry {
-                exposure.base_flash_util_by_expiry.insert(
-                    *e,
-                    limits::flash_utilization(*value, p.cfg.capital.base_flash_capacity),
-                );
-            }
-            // Written lines subtract their full greeks so quoting sees
-            // TRUE nets (net vega = held − written, same for delta/
-            // gamma/theta). A written bucket with no held coin still
-            // needs per-unit marks computed here.
-            for w in &written {
-                let Some(mi) = p.models.iter().position(|m| m.coin_type == w.asset_coin_type)
-                else {
-                    continue;
-                };
-                let g = match marks.get(&w.bucket_id) {
-                    Some(m) => m.greeks,
-                    None => {
-                        let Some(spot) = spot_by_model[mi] else {
-                            continue;
-                        };
-                        let t =
-                            w.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
-                        let k = w.strike_scaled();
-                        let (sigma, _) = p.models[mi].sigma(spot, k, t);
-                        let mark = p.models[mi].fair_per_unit(w.is_put, spot, k, t, sigma);
-                        let g = p.models[mi].greeks_per_unit(w.is_put, spot, k, t, sigma);
-                        marks.insert(
-                            w.bucket_id,
-                            MarkSnapshot { mark_per_unit: mark, sigma, spot, greeks: g, at_ms: now },
-                        );
-                        g
-                    }
-                };
-                let amt = w.amount as f64;
-                exposure.net_vega_per_volpt -= g.vega * amt / 100.0;
-                exposure.theta_cost_per_day -= (-g.theta * amt).max(0.0);
-                *delta_by_coin.entry(w.asset_coin_type.clone()).or_default() -= g.delta * amt;
-            }
+            let desk_core::exposure::MarkPass {
+                mut exposure,
+                marks,
+                delta_by_coin,
+                deployed,
+                call_strike_cash,
+                put_underlying_value,
+                exercise_demand_by_expiry,
+                hedge_notional,
+                hedge_notional_by_expiry,
+            } = pass;
             *p.shared.marks.write() = marks;
 
             // Capital snapshot inputs read from chain (SO-444): the
@@ -1398,6 +1272,10 @@ fn spawn_book_refresher(p: RefresherParams) {
                         -exposure.theta_cost_per_day * dt_days,
                         "accrual",
                         now,
+                    );
+                    book::flush_pnl(
+                        &mut b,
+                        Some(std::path::Path::new(&p.cfg.pnl_jsonl_path)),
                     );
                 }
                 exposure.nav = b.nav as f64;
@@ -1630,7 +1508,14 @@ fn spawn_fill_poller(p: FillPollerParams) {
             }
             let (applied, transitions) = {
                 let mut b = p.book.write();
-                let applied = book::apply_fills(&mut b, &mut cur, &cursor_path, &priced, now);
+                let applied = book::apply_fills(
+                    &mut b,
+                    &mut cur,
+                    &cursor_path,
+                    Some(std::path::Path::new(&p.cfg.pnl_jsonl_path)),
+                    &priced,
+                    now,
+                );
                 // A chain fill closes the quote's reservation (SO-444):
                 // ground truth, idempotent when it is already closed.
                 for (f, _) in &priced {
@@ -1711,6 +1596,8 @@ async fn fill_fair_total(
 
 struct RebalancerParams {
     hedge_cfg: hedge::HedgeConfig,
+    /// P&L attribution JSONL sink (scalp + funding lines).
+    pnl_path: std::path::PathBuf,
     venue: Arc<dyn hedge::HedgeVenue>,
     shared: Arc<DeskShared>,
     book: Arc<RwLock<Book>>,
@@ -1744,6 +1631,9 @@ pub(crate) struct Rebalancer {
     /// through `poll_events`; unfilled size counts toward the net so a
     /// slow fill is never re-submitted, and stale orders are cancelled.
     open: hedge::OpenOrders,
+    /// P&L attribution JSONL sink (scalp + funding lines); `None` in
+    /// tests.
+    pnl_path: Option<std::path::PathBuf>,
 }
 
 impl Rebalancer {
@@ -1754,6 +1644,7 @@ impl Rebalancer {
         book: Arc<RwLock<Book>>,
         coin_type: String,
         symbol: String,
+        pnl_path: Option<std::path::PathBuf>,
     ) -> Self {
         // Seed from the venue so a restart doesn't re-attribute the whole
         // persisted realized P&L as fresh scalp.
@@ -1768,6 +1659,7 @@ impl Rebalancer {
             last_realized,
             next_order_id: 0,
             open: hedge::OpenOrders::default(),
+            pnl_path,
         }
     }
 
@@ -1828,7 +1720,9 @@ impl Rebalancer {
         // own P&L line — never through the fills-only realized figure.
         match self.venue.accrue_funding(now, spot).await {
             Ok(paid) if paid != 0.0 => {
-                self.book.write().record_pnl(PnlLine::Funding, -paid, "hedge funding accrual", now);
+                let mut b = self.book.write();
+                b.record_pnl(PnlLine::Funding, -paid, "hedge funding accrual", now);
+                book::flush_pnl(&mut b, self.pnl_path.as_deref());
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "hedge funding accrual failed"),
@@ -1871,9 +1765,9 @@ impl Rebalancer {
             let scalp = realized - self.last_realized;
             self.last_realized = realized;
             if scalp != 0.0 {
-                self.book
-                    .write()
-                    .record_pnl(PnlLine::Scalp, scalp, "hedge rebalance", auctions::now_ms());
+                let mut b = self.book.write();
+                b.record_pnl(PnlLine::Scalp, scalp, "hedge rebalance", auctions::now_ms());
+                book::flush_pnl(&mut b, self.pnl_path.as_deref());
             }
         }
     }
@@ -1891,6 +1785,7 @@ fn spawn_rebalancer(p: RebalancerParams) {
             p.book,
             p.coin_type,
             p.symbol,
+            Some(p.pnl_path),
         )
         .await;
         loop {
@@ -1960,7 +1855,7 @@ mod tests {
     }
 
     fn desk_with(shared: Arc<DeskShared>, venue: Arc<dyn hedge::HedgeVenue>) -> Desk {
-        testkit::desk(shared, Arc::new(RwLock::new(Book::new(1_000_000_000, None))), venue)
+        testkit::desk(shared, Arc::new(RwLock::new(Book::new(1_000_000_000))), venue)
     }
 
     /// Doc 08 §4.1 gate 1, through `Desk::price_ws_rfq`: a trader-side
@@ -2029,12 +1924,13 @@ mod tests {
             hedge_cfg: hedge::HedgeConfig::default(),
             venue,
             shared: Arc::clone(shared),
-            book: Arc::new(RwLock::new(Book::new(NAV as u64, None))),
+            book: Arc::new(RwLock::new(Book::new(NAV as u64))),
             coin_type: COIN.into(),
             symbol: "TSUI".into(),
             last_realized: 0.0,
             next_order_id: 0,
             open: hedge::OpenOrders::default(),
+            pnl_path: None,
         }
     }
 

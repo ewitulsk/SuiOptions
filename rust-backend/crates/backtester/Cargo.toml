@@ -11,6 +11,11 @@ path = "src/main.rs"
 [dependencies]
 pricing = { path = "../pricing" }
 vol-forecast = { path = "../vol-forecast" }
+# The shared strategy kernel (SO-450): constructed from a scenario and
+# driven by the sim adapters.
+desk-core = { workspace = true }
+protocol-types = { workspace = true }
+parking_lot = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

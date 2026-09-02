@@ -7,7 +7,7 @@
 //!     a tokio task that reconnects on failure.
 //!   - [`cache`] — `PriceCache` that the stream task writes into and
 //!     hot-path code reads from.
-//!   - [`vol`] — realized-vol math + `RollingVolBuffer`.
+//!   - [`vol`] — realized-vol math for evenly spaced samples.
 //!
 //! Typical wiring (see `services/mm-bot/src/main.rs` for the full thing):
 //!
@@ -59,4 +59,4 @@ pub use spot::{compute_spot_from_cache, compute_spot_from_prices, SpotError, Sta
 pub use http::{benchmark_at, benchmarks_at, latest, latest_with_update_data};
 pub use stream::{spawn_subscriber, StreamEvent};
 pub use types::{HermesEnvelope, PriceFeedId, PriceUpdate, PythPrice};
-pub use vol::{log_returns, realized_vol, RollingVolBuffer};
+pub use vol::{log_returns, realized_vol};

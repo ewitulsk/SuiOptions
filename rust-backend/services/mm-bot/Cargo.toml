@@ -21,6 +21,8 @@ pyth-client    = { workspace = true }
 oracle-client  = { workspace = true }
 pricing        = { workspace = true }
 vol-forecast   = { workspace = true }
+# The desk strategy kernel (SO-450): pure state + policy.
+desk-core      = { workspace = true }
 token-info-client = { workspace = true }
 api-service-client = { workspace = true }
 indexer-graphql = { workspace = true }
