@@ -519,7 +519,9 @@ pub fn by_boundaries(daily: &[DailyAttr], fixed_fee: f64, boundaries_ms: &[i64],
     if daily.len() < 2 {
         return out;
     }
-    let idx = |ms: i64| daily.iter().position(|d| d.ts_ms >= ms).unwrap_or(daily.len() - 1);
+    // A boundary lands on the last snapshot at or before it, so the fill
+    // that opens a turn is inside that turn.
+    let idx = |ms: i64| daily.iter().rposition(|d| d.ts_ms <= ms).unwrap_or(0);
     let mut cuts: Vec<usize> = boundaries_ms.iter().map(|&b| idx(b)).collect();
     cuts.push(daily.len() - 1);
     cuts.sort_unstable();

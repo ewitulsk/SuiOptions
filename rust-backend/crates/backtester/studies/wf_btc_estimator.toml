@@ -9,6 +9,10 @@ holdout = ["2025-01-01", "2026-07-31"]
 objective = "depositor_net_return_annualized"
 gate_max_drawdown = 0.15
 
+# Doc 10 §4 framing: no margin model, 3x NAV per turn.
+[overrides]
+"margin.enabled" = false
+
 [[candidates]]
 name = "windows"
 [candidates.overrides]

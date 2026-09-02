@@ -40,6 +40,9 @@ pub struct WalkForwardConfig {
     /// Selection gate (predeclared): a candidate with a liquidation, a
     /// bankruptcy, or a training-fold drawdown above this is not eligible.
     pub gate_max_drawdown: f64,
+    /// Base-scenario overrides applied before every candidate (the study's
+    /// framing, e.g. the doc 07 assumption `margin.enabled = false`).
+    pub overrides: BTreeMap<String, toml::Value>,
     pub candidates: Vec<Candidate>,
 }
 
@@ -54,6 +57,7 @@ impl Default for WalkForwardConfig {
             holdout: None,
             objective: "depositor_net_return_annualized".into(),
             gate_max_drawdown: 0.15,
+            overrides: BTreeMap::new(),
             candidates: Vec::new(),
         }
     }
@@ -162,11 +166,18 @@ fn shift_date(date: &str, days: i64) -> Result<String> {
 }
 
 fn folds(cfg: &WalkForwardConfig, base: &Scenario) -> Result<Vec<Fold>> {
+    // Every candidate sees the same window: the longest warm-up any of
+    // them needs (HAR calibration is a year; the windows blend a week).
+    let mut warm = 0i64;
+    for c in &cfg.candidates {
+        let s = base
+            .with_overrides(&cfg.overrides.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())?
+            .with_overrides(&c.overrides.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())?;
+        warm = warm.max(warm_days(&s));
+    }
     let mut v = Vec::new();
     let mut push = |kind: FoldKind, idx: usize, f: &[String; 2]| -> Result<()> {
-        let mut s = base.clone();
-        s.from = f[0].clone();
-        let mut data_from = shift_date(&f[0], warm_days(&s))?;
+        let mut data_from = shift_date(&f[0], warm)?;
         if !cfg.calibration_from.is_empty() && data_from < cfg.calibration_from {
             data_from = cfg.calibration_from.clone();
         }
@@ -190,8 +201,10 @@ fn folds(cfg: &WalkForwardConfig, base: &Scenario) -> Result<Vec<Fold>> {
     Ok(v)
 }
 
-fn scenario_for(base: &Scenario, c: &Candidate, fold: &Fold) -> Result<Scenario> {
-    let mut s = base.with_overrides(&c.overrides.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())?;
+fn scenario_for(cfg: &WalkForwardConfig, base: &Scenario, c: &Candidate, fold: &Fold) -> Result<Scenario> {
+    let mut s = base
+        .with_overrides(&cfg.overrides.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())?
+        .with_overrides(&c.overrides.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())?;
     s.from = fold.from.clone();
     s.to = fold.to.clone();
     s.name = format!("{}-{}-{}", base.name, c.name, fold.id);
@@ -217,7 +230,7 @@ pub fn run(cfg: &WalkForwardConfig, base: &Scenario, open_holdout: bool, threads
     let phase = |kind: FoldKind, cands: &[Candidate], runs: &mut Vec<RunRecord>, seq: &mut usize| -> Result<()> {
         let jobs: Vec<(Candidate, Fold)> = cands.iter().flat_map(|c| all.iter().filter(|f| f.kind == kind).map(move |f| (c.clone(), f.clone()))).collect();
         let outs = study::par_map(jobs, threads, |(c, f)| -> Result<(Candidate, Fold, Metric)> {
-            let s = scenario_for(base, &c, &f)?;
+            let s = scenario_for(cfg, base, &c, &f)?;
             let m = run_fn(&s, &f)?;
             eprintln!("walkforward {} {:14} {:16} net {:+.4} dd {:.3} liq {} fills {}", cfg.name, c.name, f.id, m.depositor_net_return_annualized, m.max_drawdown, m.liquidations, m.fills);
             Ok((c, f, m))
@@ -332,7 +345,7 @@ mod tests {
             validation: vec![["2025-06-01".into(), "2025-11-30".into()]],
             holdout: Some(["2025-12-01".into(), "2026-06-30".into()]),
             candidates: vec![
-                Candidate { name: "a".into(), overrides: [("estimator.q_bid".to_string(), toml::Value::Float(0.25))].into_iter().collect() },
+                Candidate { name: "a".into(), overrides: [("estimator.q_bid".to_string(), toml::Value::Float(0.25)), ("estimator.kind".to_string(), toml::Value::String("har".into()))].into_iter().collect() },
                 Candidate { name: "b".into(), overrides: [("estimator.q_bid".to_string(), toml::Value::Float(0.45))].into_iter().collect() },
             ],
             ..Default::default()
@@ -383,6 +396,11 @@ mod tests {
         for f in &m.folds {
             assert!(f.data_from >= c.calibration_from && f.data_from <= f.from && f.from <= f.to);
         }
+        // The HAR candidate needs a year of history: every fold's window
+        // opens a year (plus two days) before the fold, never before
+        // `calibration_from`.
+        assert_eq!(m.folds[0].data_from, "2024-01-01", "{:?}", m.folds[0]);
+        assert_eq!(m.folds[2].data_from, "2024-05-30", "{:?}", m.folds[2]);
         drop(t);
         // Opened: only the SELECTED candidate runs on the holdout, once,
         // and the selection is unchanged even though b "wins" there.

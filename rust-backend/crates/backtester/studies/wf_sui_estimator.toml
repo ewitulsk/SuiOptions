@@ -11,6 +11,14 @@ holdout = ["2025-11-01", "2026-07-31"]
 objective = "depositor_net_return_annualized"
 gate_max_drawdown = 0.15
 
+# Doc 07 / doc 10 framing: no margin model (the margin question is
+# answered by the stress suite and the grid, where leverage is an axis),
+# and 2x NAV of notional per turn so the high-vol turns fit inside the
+# 30% premium cap instead of being declined outright.
+[overrides]
+"margin.enabled" = false
+"flow.notional_nav_multiple" = 2.0
+
 [[candidates]]
 name = "windows"
 [candidates.overrides]

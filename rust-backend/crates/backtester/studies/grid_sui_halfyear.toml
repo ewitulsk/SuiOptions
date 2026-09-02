@@ -21,3 +21,8 @@ values = [10.0, 20.0]
 [[axes]]
 path = "venue.execution_assumption"
 values = ["taker_only", "conservative"]
+
+# Hedge leverage: the isolated-margin survivability question (doc 08 §7.3).
+[[axes]]
+path = "margin.leverage"
+values = [3.0, 10.0]
