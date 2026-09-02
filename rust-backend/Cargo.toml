@@ -51,6 +51,18 @@ members = [
     "tools/trading-vault-smoke",
     "tools/trading-vault-close",
     "tests",
+    # data-room (SO-449): market-data lake crates + batch/collector binaries.
+    # Workspace members so the backtester can reuse the lake readers, but
+    # deliberately OUTSIDE every protocol compose/deploy set — they ship via
+    # deploy-data-room.yml from the data-room/ Dockerfiles, and
+    # deployment/affected.py never selects a protocol service for them.
+    "data-room/crates/schema",
+    "data-room/crates/adapters",
+    "data-room/crates/store",
+    "data-room/collector",
+    "data-room/vision-sync",
+    "data-room/normalizer",
+    "data-room/gold",
 ]
 
 [workspace.package]
@@ -82,6 +94,13 @@ exchange-types   = { path = "crates/exchange-types" }
 exchange-signing = { path = "crates/exchange-signing" }
 exchange-book    = { path = "crates/exchange-book" }
 exchange-router  = { path = "crates/exchange-router" }
+# data-room lake crates (SO-449). Prefixed because `schema`/`store`/
+# `adapters` are too generic for a shared workspace. The `data-room/` path
+# (not `crates/`) is load-bearing: affected.py derives protocol crate
+# coverage from `crates/*` entries only, so these never roll a service.
+data-room-schema   = { path = "data-room/crates/schema" }
+data-room-adapters = { path = "data-room/crates/adapters" }
+data-room-store    = { path = "data-room/crates/store" }
 
 # Pinned to match sui-keys's exact requirement on the framework/mainnet branch.
 tokio = { version = "=1.49.0", features = ["full"] }
@@ -98,6 +117,13 @@ serde_json = "1"
 bcs = "0.1"
 
 toml = "0.8"
+# data-room: CSV adapters (Binance Vision), zips, gzip bronze spool, Parquet
+# byte buffers, scratch dirs in tests.
+csv = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
+bytes = "1"
+tempfile = "3"
 
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 # hedge-signer: FROST 2-of-2 threshold-ed25519 (ZF frost project). Pinned
@@ -181,3 +207,10 @@ diesel = { version = "2.2", features = ["postgres", "r2d2", "chrono", "numeric",
 diesel_migrations = { version = "2", features = ["postgres"] }
 r2d2 = "0.8"
 bigdecimal = { version = "0.4", features = ["serde"] }
+
+# data-room images only (Dockerfile.collector / Dockerfile.batch build with
+# `--profile release-dataroom`). Keeps data-room's thin-LTO release profile
+# without changing how any protocol service image is built.
+[profile.release-dataroom]
+inherits = "release"
+lto = "thin"

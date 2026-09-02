@@ -1,7 +1,14 @@
 name: Data Room CI
 
-# fmt + clippy + tests for the data-room/ Cargo workspace. It is a separate
-# workspace from rust-backend (spec §3), so rust-backend CI never covers it.
+# fmt + clippy + tests for the data-room members of the rust-backend Cargo
+# workspace (SO-449 folded the old data-room/ workspace in so the backtester
+# can share the lake crates). Every cargo step is scoped with `-p`: a bare
+# `--workspace` would compile the whole Sui dependency tree. Cargo still
+# RESOLVES the full workspace (that is what clones the Sui git deps on a
+# cold cache — Swatinem/rust-cache keeps ~/.cargo/git warm), but it only
+# builds the crates named here.
+#
+# rust-backend proper is not fmt-checked in CI; the data-room crates are.
 # Toolchain setup mirrors redeploy-contract.yml's build path
 # (dtolnay/rust-toolchain@stable + Swatinem/rust-cache).
 
@@ -9,22 +16,48 @@ on:
   push:
     branches: [staging, main]
     paths:
-      - 'data-room/**'
+      - 'rust-backend/data-room/**'
+      - 'rust-backend/Cargo.toml'
+      - 'rust-backend/Cargo.lock'
       - '.github/workflows/data-room-ci.yml'
   pull_request:
     paths:
-      - 'data-room/**'
+      - 'rust-backend/data-room/**'
+      - 'rust-backend/Cargo.toml'
+      - 'rust-backend/Cargo.lock'
       - '.github/workflows/data-room-ci.yml'
 
 permissions:
   contents: read
 
+env:
+  # Every data-room workspace member. Add here when a member joins
+  # rust-backend/Cargo.toml's `data-room/**` members.
+  DATA_ROOM_CRATES: >-
+    -p data-room-schema
+    -p data-room-adapters
+    -p data-room-store
+    -p collector
+    -p vision-sync
+    -p normalizer
+    -p gold
+
 jobs:
+  # Manifest-only guard (spec §3/§10 runtime isolation, doc 08 §5.1): no
+  # data-room crate may depend on a protocol crate, a Sui git dependency,
+  # or the diesel/RDS stack. Cheap, so it runs first and independently.
+  isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: data-room dependency isolation
+        run: python3 rust-backend/data-room/ci/check_isolation.py
+
   rust:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: data-room
+        working-directory: rust-backend
     steps:
       - uses: actions/checkout@v4
 
@@ -34,13 +67,43 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: data-room
+          workspaces: rust-backend
+          # Keep the (large) cached workspace separate from any protocol
+          # job's cache so a data-room-only build never evicts it.
+          shared-key: data-room
 
+      # $DATA_ROOM_CRATES is a deliberately unquoted `-p a -p b ...` list.
       - name: Format
-        run: cargo fmt --all --check
+        run: |
+          # shellcheck disable=SC2086
+          cargo fmt $DATA_ROOM_CRATES -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          # shellcheck disable=SC2086
+          cargo clippy $DATA_ROOM_CRATES --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: |
+          # shellcheck disable=SC2086
+          cargo test $DATA_ROOM_CRATES
+
+      # The image builds rewrite the workspace down to the data-room members
+      # (data-room/scope-workspace.sh); prove that rewrite still resolves
+      # without any git-sourced (Sui) package before deploy-data-room.yml
+      # finds out the slow way.
+      - name: Scoped image workspace resolves without git deps
+        run: |
+          set -euo pipefail
+          scoped=$(mktemp -d)
+          cp Cargo.toml Cargo.lock "$scoped/"
+          cp -R data-room "$scoped/data-room"
+          sh "$scoped/data-room/scope-workspace.sh"
+          (cd "$scoped" && cargo metadata --format-version 1 > metadata.json)
+          python3 - "$scoped/metadata.json" <<'EOF'
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          git = sorted(p["name"] for p in m["packages"] if "git+" in (p.get("source") or ""))
+          assert not git, f"scoped data-room workspace pulls git deps: {git}"
+          print("ok:", len(m["packages"]), "registry packages,", len(m["workspace_members"]), "members")
+          EOF

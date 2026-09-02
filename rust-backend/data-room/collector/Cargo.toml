@@ -1,0 +1,31 @@
+[package]
+name = "collector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+data-room-schema = { workspace = true }
+data-room-adapters = { workspace = true }
+data-room-store = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+reqwest = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }
+flate2 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

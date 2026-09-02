@@ -1,0 +1,188 @@
+# Copy to /opt/data-room/collector.toml. store_url comes from the
+# Terraform output `data_room_bucket`.
+#
+# NOTE: this file is NOT deployed by any workflow — deploy-data-room.yml
+# only moves TAG/ECR. Edit the real file on the host over SSM, then
+# `docker compose restart collector` (NOT `up -d`: the compose spec is
+# unchanged, so it will not reload a bind-mounted file), then mirror the
+# change back here. See rust-backend/data-room/docs/sui-collection-plan.md §0.2.
+store_url = "s3://REPLACE_WITH_DATA_ROOM_BUCKET"
+spool_dir = "/var/spool/data-room"
+metrics_listen = "0.0.0.0:9100"
+
+[[connections]]
+exchange = "coinbase"
+url = "wss://ws-feed.exchange.coinbase.com"
+products = ["BTC-USD", "SUI-USD"]
+channels = ["matches", "ticker", "heartbeat"]
+
+[[connections]]
+exchange = "hyperliquid"
+url = "wss://api.hyperliquid.xyz/ws"
+products = ["BTC", "SUI"]
+channels = ["trades", "bbo", "activeAssetCtx"]
+
+[[pollers]]
+exchange = "deribit"
+url = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option"
+stream = "chain.BTC"
+interval_secs = 60
+
+# --- SUI (SO-403) -----------------------------------------------------
+# DeepBook L2 depth. Both `level` and `depth` are required; depth=100 is
+# the practical max (50 levels/side) and depth=200 errors.
+[[pollers]]
+exchange = "deepbook"
+url = "https://deepbook-indexer.mainnet.mystenlabs.com/orderbook/SUI_USDC?level=2&depth=100"
+stream = "book.SUI_USDC"
+interval_secs = 30
+
+# DEEP_SUI: the DEEP-fee source.
+[[pollers]]
+exchange = "deepbook"
+url = "https://deepbook-indexer.mainnet.mystenlabs.com/orderbook/DEEP_SUI?level=2&depth=100"
+stream = "book.DEEP_SUI"
+interval_secs = 30
+
+# /ticker takes no pool argument — one poll returns all 26 pools, so this
+# single line covers venue-wide volume rather than one poller per pool.
+[[pollers]]
+exchange = "deepbook"
+url = "https://deepbook-indexer.mainnet.mystenlabs.com/ticker"
+stream = "ticker.all"
+interval_secs = 60
+
+# --- Aftermath router quote ladder (SO-403) ---------------------------
+# The series that actually binds: above ~$25k the router, not DeepBook,
+# is the realistic execution path (see sui-collection-plan.md §0.1).
+# POST with a JSON body, which is why `Poller` grew method/body.
+#
+# Amounts are FIXED SUI (9 decimals), not fixed USD — so the USD notional
+# of each rung drifts with spot. That is the right primitive for a depth
+# series (rescale at analysis time); do not read the stream names as
+# constant dollar sizes. At ~$0.68 they are ~$10k/$50k/$100k/$500k/$1M.
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"14700000000000"}'
+stream = "route.SUI-USDC.14700"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"73500000000000"}'
+stream = "route.SUI-USDC.73500"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"147000000000000"}'
+stream = "route.SUI-USDC.147000"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"735000000000000"}'
+stream = "route.SUI-USDC.735000"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinOutType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinInAmount":"1470000000000000"}'
+stream = "route.SUI-USDC.1470000"
+interval_secs = 300
+
+# --- Aftermath buy-base ladder, S1c (SO-446) --------------------------
+# The mirror image: USDC in, SUI out — what a put exercise or a long
+# hedge unwind pays. Same five USD-equivalent rungs, but here the input
+# is FIXED USDC (6 decimals), so these stream names ARE dollar sizes.
+# Silver `quote_ladder.direction` = `buy_base` for these, `sell_base`
+# for the SUI-in blocks above; both land in the same pair partition.
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinOutType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinInAmount":"10000000000"}'
+stream = "route.USDC-SUI.10000"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinOutType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinInAmount":"50000000000"}'
+stream = "route.USDC-SUI.50000"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinOutType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinInAmount":"100000000000"}'
+stream = "route.USDC-SUI.100000"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinOutType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinInAmount":"500000000000"}'
+stream = "route.USDC-SUI.500000"
+interval_secs = 300
+
+[[pollers]]
+exchange = "aftermath"
+url = "https://aftermath.finance/api/router/trade-route"
+method = "POST"
+body = '{"coinInType":"0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC","coinOutType":"0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI","coinInAmount":"1000000000000"}'
+stream = "route.USDC-SUI.1000000"
+interval_secs = 300
+
+# --- Bluefin SUI-PERP (SO-404) ----------------------------------------
+# Public market-data socket, no auth. `channels` are the SDK's
+# MarketDataStreamName values verbatim. 200ms diff depth over the 10ms
+# variant: ~20x the bronze for no gain at our horizon.
+# Capture only — L2 diffs need the P4 `book_deltas` table, which does not
+# exist yet; bronze accumulates until it does.
+[[connections]]
+exchange = "bluefin"
+url = "wss://stream.api.sui-prod.bluefin.io/ws/market"
+products = ["SUI-PERP"]
+channels = ["Diff_Depth_200_ms", "Recent_Trade", "Ticker"]
+
+# Full-book snapshots for book_l2 reconstruction (SO-446, S5). The WS
+# diff stream alone cannot seed a book — its Partial_Depth streams are
+# top-5/10/20 only — and /v1/exchange/depth is the venue's documented
+# sync point (snapshot lastUpdateId sits inside one diff's
+# firstUpdateId..lastUpdateId). limit=1000 is the max and returns the
+# whole visible book (~50 levels/side today); 60 s gives 1,440
+# snapshots/day, so a partition never has to be reconstructed from the
+# previous day. Stream name is `depth.`, not `book.`, so the WS and REST
+# lines never share a spool file.
+[[pollers]]
+exchange = "bluefin"
+url = "https://api.sui-prod.bluefin.io/v1/exchange/depth?symbol=SUI-PERP&limit=1000"
+stream = "depth.SUI-PERP"
+interval_secs = 60
+
+# Funding settlements (SO-446). Public, unauthenticated; newest first,
+# default 100 rows (max 1000) — settlements are hourly, so one poll
+# covers ~4 days and an hourly cadence gives every settlement several
+# captures. The endpoint also takes startTimeAtMillis/endTimeAtMillis, so
+# history is repairable if capture ever lapses. Normalized by
+# `normalizer bluefin` and cross-checked against the ticker stream's
+# nextFundingTimeAtMillis rollovers.
+[[pollers]]
+exchange = "bluefin"
+url = "https://api.sui-prod.bluefin.io/v1/exchange/fundingRateHistory?symbol=SUI-PERP&limit=100"
+stream = "funding.SUI-PERP"
+interval_secs = 3600

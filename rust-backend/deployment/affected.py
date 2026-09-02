@@ -77,6 +77,15 @@ REBUILD_ALL_GLOBS = [
     ".github/workflows/**",
 ]
 
+# data-room (SO-449) shares the workspace and its Cargo.lock but ships
+# through deploy-data-room.yml, never a protocol service image, and no
+# service manifest can reach a data-room crate (their workspace deps live
+# under `data-room/`, not `crates/`, so `crate_globs()` ignores them).
+# Without a carve-out every data-room dependency bump would roll the whole
+# protocol fleet via the lockfile glob above.
+LOCKFILE = "rust-backend/Cargo.lock"
+DATA_ROOM_GLOBS = ["rust-backend/data-room/**"]
+
 # Per-service path globs that cannot be derived from a Cargo manifest:
 # the service's own source directory, its Dockerfile, and genuine one-offs.
 # Crate coverage is NOT listed here — see `crate_globs()` below.
@@ -275,6 +284,27 @@ def _match_any(path: str, globs: Iterable[str]) -> bool:
     return False
 
 
+def _lockfile_is_data_room_only(files: list[str]) -> bool:
+    """True when a Cargo.lock change can only have come from data-room.
+
+    The lockfile is attributed to data-room when at least one data-room
+    path changed and every other rust-backend path in the change set is a
+    data-room path. Anything else keeps the fail-closed default: a lockfile
+    on its own (a bare `cargo update`), or alongside any protocol path,
+    still rebuilds every service. Paths outside rust-backend/ (docs,
+    frontend, ...) cannot change the lock and are ignored here.
+    """
+    if LOCKFILE not in files:
+        return False
+    others = [f for f in files if f != LOCKFILE]
+    data_room = [f for f in others if _match_any(f, DATA_ROOM_GLOBS)]
+    protocol = [
+        f for f in others
+        if f.startswith("rust-backend/") and f not in data_room
+    ]
+    return bool(data_room) and not protocol
+
+
 def service_globs(root: Path = REPO_ROOT) -> dict[str, list[str]]:
     """`SERVICE_GLOBS` plus the crate globs derived from the manifests."""
     derived = crate_globs(root)
@@ -297,6 +327,9 @@ def affected_services(
     files = [f for f in (l.strip() for l in changed_files) if f]
     if not files:
         return []
+
+    if _lockfile_is_data_room_only(files):
+        files = [f for f in files if f != LOCKFILE]
 
     for f in files:
         if _match_any(f, REBUILD_ALL_GLOBS):

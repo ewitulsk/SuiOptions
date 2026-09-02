@@ -1,0 +1,20 @@
+[package]
+name = "vision-sync"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+data-room-schema = { workspace = true }
+data-room-store = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+object_store = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }
+bytes = { workspace = true }

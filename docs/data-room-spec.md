@@ -56,17 +56,21 @@ Guiding rules, in priority order:
 
 ## 3. Repository & runtime layout
 
-New top-level directory, its own Cargo workspace, **not** part of `rust-backend/services` or the deploy/force lists:
+Lives at `rust-backend/data-room/` as members of the rust-backend Cargo workspace (merged in SO-449 so the backtester can share the lake crates; it started life as its own top-level workspace), but **not** part of `rust-backend/services` or the deploy/force lists. The data-room images build from scoped copies of the workspace (`scope-workspace.sh`), CI is scoped with `-p`, and `deployment/affected.py` never selects a protocol service for a data-room path — see doc 08 §5.1 for the merge mechanics.
 
 ```
-data-room/
-  Cargo.toml               # workspace
+rust-backend/data-room/
+  Dockerfile.collector     # image builds: context = rust-backend/, scoped to these members
+  Dockerfile.batch
+  scope-workspace.sh       # trims the copied workspace to the data-room members
+  ci/check_isolation.py    # CI guard: no protocol/Sui/diesel deps from here
   collector/               # binary: ws → bronze spool → S3
   vision-sync/             # binary: Binance flat-file dumps → bronze (§6.6)
   normalizer/              # binary: bronze → silver
   gold/                    # binary (subcommands): bars, rv, gaps
-  adapters/                # crate: per-exchange parse/normalize (binance, ...)
-  schema/                  # crate: canonical Arrow schemas + conventions (single source of truth)
+  crates/adapters/         # crate `data-room-adapters`: per-exchange parse/normalize (binance, ...)
+  crates/schema/           # crate `data-room-schema`: canonical Arrow schemas + conventions (single source of truth)
+  crates/store/            # crate `data-room-store`: object_store URL → store handle
   catalog/catalog.sql      # DuckDB views over S3
   notebooks/               # research; signature-plot notebook lives here
   docs/                    # runbook, adapter-authoring guide
@@ -293,7 +297,7 @@ New resources in the existing root (local state — plan/apply only from the can
 
 ### 10.3 Build & deploy pipeline
 
-- **CI:** the `data-room/` workspace builds and tests in GitHub Actions alongside the repo (fmt, clippy, unit + golden-file + determinism tests). On merge to `staging`, both images build and push to ECR tagged by commit SHA.
+- **CI:** the data-room members of the rust-backend workspace build and test in GitHub Actions (`data-room-ci.yml`: fmt, clippy, unit + golden-file + determinism tests, every step `-p`-scoped to the data-room crates, plus the dependency-isolation guard). On merge to `staging`, both images build and push to ECR tagged by commit SHA.
 - **Deploy:** a separate small workflow, `Deploy data-room` — SSM RunCommand to the host: update the image tag in the compose `.env`, `docker compose pull && up -d` (collector), done. Batch jobs pick up the new tag on their next timer firing. It is **not** part of Deploy staging / Deploy prod and has no health-check-gated rollback choreography — if the collector comes up sick, the alerts (§10.4) say so and redeploying the previous tag is the whole rollback.
 - **Scheduling on-host:** systemd timers (not container-internal cron) invoking `docker compose run --rm batch <subcommand>`: `normalizer` daily 00:30 UTC + catch-up scan, `instruments` daily, `vision-sync` monthly (+ daily during the pre-live-capture seam), `gold` daily after normalizer.
 - **No staging/prod split.** One environment; the bucket *is* the product. This is safe because of the layering: a bad deploy cannot corrupt bronze (append-only, verbatim, never rewritten), and silver/gold are versioned and regenerable from bronze. "Prod incident" degrades to "capture gap," which is a first-class, ledgered concept (§8) rather than an outage.
