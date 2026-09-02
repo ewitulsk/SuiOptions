@@ -46,9 +46,11 @@ plan are:
    funding as P&L; PR F ships three of nine metrics and no throttle; PR E
    and PR G do not exist.
 4. **Two protocol costs are missing.** The core protocol skims `fee_bps`
-   from gross premium on every write (desk pays gross). The trading vault
-   charges a curator performance fee and a protocol cut. The return hurdle
-   never says whether it is desk gross or depositor net.
+   from gross premium on every write — the desk pays gross and the writer
+   receives net, so this is a wedge on the displayed APY rather than a desk
+   cost (corrected 2026-09-02). The trading vault charges a curator
+   performance fee and a protocol cut. The return hurdle never says whether
+   it is desk gross or depositor net.
 5. **The surface's blend is biased the wrong way for a buyer.** See §2.3.
 6. **Put-side data is nearly empty.** No buy-base ladder, no funding
    settlement poller, S5 silver not started, Bluefin capture under three
@@ -282,7 +284,7 @@ first economic answers.
 | G4 | Thin-slice backtester `crates/backtester` v0: k-way merge over lake mids and Bluefin/Binance funding, oracle proxy model (§3), taker-only fills at configured spread, one net-delta book of calls and puts, signed hedge with bands, simple ledger (cash, options at model mark, perp P&L, funding, fees, gas). Reuses `pricing` and the estimator. Carries a minimal constant-flow injector (the capacity-mode subset of doc 08 §8: fixed accepted notional per day at a configured call/put mix and tenor) so the IV study and band sweep have positions to hedge; the full arrival and acceptance generator stays doc 08 PR N. Labels every run `proxy_oracle`, `taker_only`, `no_resale`, `constant_flow`. | Reproduces doc 07 §5 turnover and cost tables within tolerance; determinism gate; runs 2025-10-10 without freezing risk. |
 | G5 | IV estimator crate `crates/vol-forecast` per §2.2, wired into `pricing::surface` behind the same `VolSurface` interface; live desk switched over. | §2.5 gates. |
 | G6 | IV study per §2.4 and findings doc 10. | Recommended defaults adopted in config with the study's bias numbers attached. |
-| G7 | Cost lines: protocol `fee_bps` on gross premium in the bid and the ledger; curator performance fee and protocol cut in attribution; hurdle redefined as depositor net in doc 08 §0.4. | A run with `fee_bps` 50 and a 20 percent curator fee shows both lines and the net hurdle test. |
+| G7 | Cost lines: protocol `fee_bps` on gross premium as the writer-side wedge (desk pays gross, writer receives net — it sets the displayed APY, not a desk cost; corrected 2026-09-02); curator performance fee and protocol cut in attribution; hurdle redefined as depositor net in doc 08 §0.4. | A run with `fee_bps` 50 and a 20 percent curator fee shows both lines and the net hurdle test. |
 | G8 | PR E: put exercise policy and three PTB paths per doc 08 §4.4. | Atomic path, fallback, and failure tests; no stranded asset. |
 | G9 | PR G: durable reservations keyed by request id with explicit transitions, `CapitalSnapshot`, and `CapitalPolicy` per doc 08 §4.6. | Restart during live quotes preserves capacity; freshness gates block on stale NAV. |
 | G10 | PR F completion: rally and crash loss on hedges before monetization, settlement cash and underlying required per expiry, gamma by expiry, flash utilization; soft throttles and hard solvency declines wired into the quote path. | Call-heavy, put-heavy, and mixed fixtures trip the intended throttles. |
