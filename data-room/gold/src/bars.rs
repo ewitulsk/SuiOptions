@@ -87,7 +87,9 @@ impl BarMap {
     }
 }
 
-pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
+/// `symbols` restricts the pairs (any exchange) when non-empty — backfills
+/// of one underlying must not re-crunch every dense BTC day.
+pub async fn compute_day(store: &Store, date: &str, symbols: &[String]) -> anyhow::Result<usize> {
     let day = NaiveDate::parse_from_str(date, "%Y-%m-%d")?;
     let day_start_ns = day
         .and_hms_opt(0, 0, 0)
@@ -98,6 +100,9 @@ pub async fn compute_day(store: &Store, date: &str) -> anyhow::Result<usize> {
 
     let mut files = 0usize;
     for (exchange, symbol) in crate::pairs_for_date(store, date).await? {
+        if !symbols.is_empty() && !symbols.iter().any(|s| s.eq_ignore_ascii_case(&symbol)) {
+            continue;
+        }
         // One streaming pass fills all frequencies; memory = bucket maps
         // (≤ ~90k entries), never the day's rows.
         let mut maps: Vec<BarMap> = FREQS_S
