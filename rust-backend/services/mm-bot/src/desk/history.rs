@@ -54,11 +54,22 @@ pub struct HistoryConfig {
     pub db_pool_size: u32,
     /// Recorder cadence, seconds.
     pub sample_secs: u64,
+    /// Write the RFQ funnel (`desk_rfq_outcomes`) at all. Default OFF
+    /// (doc 08 §3.1, decided 2026-09-01, SO-447): testnet RFQ traffic is
+    /// operational telemetry at best and never calibration data, so
+    /// testnet deployments write no rows. State/P&L samples and the
+    /// durable reservations (SO-444) are unaffected by this flag.
+    pub record_rfq_outcomes: bool,
 }
 
 impl Default for HistoryConfig {
     fn default() -> Self {
-        Self { database_url: String::new(), db_pool_size: 2, sample_secs: 60 }
+        Self {
+            database_url: String::new(),
+            db_pool_size: 2,
+            sample_secs: 60,
+            record_rfq_outcomes: false,
+        }
     }
 }
 
@@ -436,6 +447,31 @@ pub enum RfqFillKey {
     Request(String),
 }
 
+/// The RFQ-funnel sink (SO-425). [`History`] is the DB implementation;
+/// tests drive the wired decision paths through an in-memory one
+/// (SO-447). Every funnel write goes through [`History::rfq_recorder`],
+/// which is `None` unless `[desk.history] record_rfq_outcomes = true`.
+pub trait RfqRecorder: Send + Sync {
+    /// Insert one funnel row (`declined` terminal, or `quoted` pending).
+    fn record_rfq(&self, row: RfqOutcomeRow);
+    /// Upgrade a `quoted` (or already swept `expired`) row to `filled`.
+    fn record_rfq_filled(&self, key: RfqFillKey, fill_sequence: u64, at_ms: u64);
+}
+
+impl RfqRecorder for Arc<History> {
+    fn record_rfq(&self, row: RfqOutcomeRow) {
+        History::record_rfq(self, row)
+    }
+
+    fn record_rfq_filled(&self, key: RfqFillKey, fill_sequence: u64, at_ms: u64) {
+        History::record_rfq_filled(self, key, fill_sequence, at_ms)
+    }
+}
+
+/// Fill-poller/indexer lag allowance before a live quote is declared
+/// expired by the funnel sweep.
+pub(crate) const RFQ_EXPIRY_GRACE_MS: i64 = 300_000;
+
 // ── the handle ─────────────────────────────────────────────────────────
 
 pub struct History {
@@ -459,6 +495,16 @@ impl History {
 
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::SeqCst)
+    }
+
+    /// The funnel sink behind the `record_rfq_outcomes` flag: `None`
+    /// when the flag is off, so no decision path can write a row.
+    pub fn rfq_recorder(self: &Arc<Self>) -> Option<Arc<dyn RfqRecorder>> {
+        if self.cfg.record_rfq_outcomes {
+            Some(Arc::new(Arc::clone(self)))
+        } else {
+            None
+        }
     }
 
     fn conn(&self) -> Result<diesel::r2d2::PooledConnection<ConnectionManager<PgConnection>>> {
@@ -660,16 +706,13 @@ impl History {
     /// fill-detection lag) to `expired`. A late-detected fill still
     /// upgrades a swept row — see `mark_rfq_filled`.
     fn sweep_expired_rfqs(&self, now_ms: i64) -> Result<usize> {
-        /// Fill-poller/indexer lag allowance before a live quote is
-        /// declared expired.
-        const GRACE_MS: i64 = 300_000;
         use desk_rfq_outcomes::dsl as t;
         let mut conn = self.conn()?;
         let n = diesel::update(
             t::desk_rfq_outcomes
                 .filter(t::outcome.eq("quoted"))
                 .filter(t::valid_until_ms.is_not_null())
-                .filter(t::valid_until_ms.lt(Some(now_ms - GRACE_MS))),
+                .filter(t::valid_until_ms.lt(Some(now_ms - RFQ_EXPIRY_GRACE_MS))),
         )
         .set((
             t::outcome.eq("expired"),
@@ -1126,8 +1169,9 @@ pub fn spawn_recorder(history: Arc<History>, desk: Arc<Desk>, network: String) {
                 metrics::counter!("mm_desk_history_failures_total", "op" => "pnl").increment(1);
                 tracing::warn!(error = %format!("{e:#}"), "desk pnl jsonl ingest failed");
             }
-            // Sweep TTL-elapsed quotes in the RFQ funnel to `expired`.
-            {
+            // Sweep TTL-elapsed quotes in the RFQ funnel to `expired`
+            // (only while the funnel is being written at all).
+            if history.cfg.record_rfq_outcomes {
                 let h = Arc::clone(&history);
                 let now_ms = Utc::now().timestamp_millis();
                 let res =
@@ -1283,9 +1327,85 @@ fn parse_pnl_lines(buf: &str) -> (Vec<PnlLineRow>, usize) {
     (rows, consumed)
 }
 
+/// In-memory funnel sink for the runtime-path tests (SO-447): the same
+/// one-row-per-RFQ semantics as the DB, including the recorder's TTL
+/// sweep, without a database.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MemoryRfqRecorder {
+    pub rows: parking_lot::Mutex<Vec<RfqOutcomeRow>>,
+}
+
+#[cfg(test)]
+impl MemoryRfqRecorder {
+    /// Mirror of `History::sweep_expired_rfqs`.
+    pub fn sweep_expired(&self, now_ms: u64) -> usize {
+        let mut n = 0;
+        for r in self.rows.lock().iter_mut() {
+            if r.outcome == "quoted"
+                && r.valid_until_ms.is_some_and(|v| v < now_ms as i64 - RFQ_EXPIRY_GRACE_MS)
+            {
+                r.outcome = "expired".into();
+                r.outcome_at = Some(ms_to_dt(now_ms as i64));
+                r.reason = Some("quote TTL elapsed with no detected fill".into());
+                n += 1;
+            }
+        }
+        n
+    }
+
+    pub fn outcomes(&self) -> Vec<(String, String)> {
+        self.rows.lock().iter().map(|r| (r.request_id.clone(), r.outcome.clone())).collect()
+    }
+}
+
+#[cfg(test)]
+impl RfqRecorder for MemoryRfqRecorder {
+    fn record_rfq(&self, row: RfqOutcomeRow) {
+        self.rows.lock().push(row);
+    }
+
+    /// Mirror of `History::mark_rfq_filled`: a detected fill always wins
+    /// over `quoted`/`expired`, never over `declined`.
+    fn record_rfq_filled(&self, key: RfqFillKey, fill_sequence: u64, at_ms: u64) {
+        for r in self.rows.lock().iter_mut() {
+            let hit = match &key {
+                RfqFillKey::Nonce(n) => r.nonce == Some(*n as i64),
+                RfqFillKey::Request(id) => &r.request_id == id,
+            };
+            if hit && r.outcome != "declined" {
+                r.outcome = "filled".into();
+                r.outcome_at = Some(ms_to_dt(at_ms as i64));
+                r.fill_sequence = Some(fill_sequence as i64);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[desk.history] record_rfq_outcomes` (SO-447): off by default and
+    /// then no sink exists at all; on ⇒ the DB handle is the sink. The
+    /// pool is lazy, so no database is touched here.
+    #[test]
+    fn rfq_recorder_is_none_unless_the_flag_is_on() {
+        let cfg = HistoryConfig::default();
+        assert!(!cfg.record_rfq_outcomes, "flag must default OFF");
+        let off = History::connect(&cfg, "postgres://nobody@127.0.0.1:1/none");
+        assert!(off.rfq_recorder().is_none());
+        let on = History::connect(
+            &HistoryConfig { record_rfq_outcomes: true, ..cfg },
+            "postgres://nobody@127.0.0.1:1/none",
+        );
+        assert!(on.rfq_recorder().is_some());
+        // The TOML spelling round-trips, and omitting it keeps it off.
+        let parsed: HistoryConfig = toml::from_str("record_rfq_outcomes = true\n").unwrap();
+        assert!(parsed.record_rfq_outcomes);
+        let parsed: HistoryConfig = toml::from_str("sample_secs = 30\n").unwrap();
+        assert!(!parsed.record_rfq_outcomes);
+    }
 
     #[test]
     fn parse_pnl_lines_handles_partials_and_junk() {
