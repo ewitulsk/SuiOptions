@@ -120,6 +120,102 @@ pub struct PackageInfo {
     /// is package-bound, so a signer never survives a republish.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quote_signer_id: Option<String>,
+    /// LayerZero transport package (contracts/endpoint-layerzero, via
+    /// `--deploy-endpoints`); carried forward on protocol-only redeploys
+    /// like `cctp_bridge`. Typed access: `deployments::EndpointLzInfo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_layerzero: Option<EndpointLzRecord>,
+    /// CCIP transport package (contracts/endpoint-ccip, via
+    /// `--deploy-endpoints`); same carry-forward discipline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_ccip: Option<EndpointCcipRecord>,
+    /// Multichain hub wiring + EVM spoke deployments (multichain-vault-plan
+    /// §9). `endpointRegistryId`/`hubChainId` refresh on every protocol
+    /// publish (the registry is created by trading-vault-v2's `endpoint`
+    /// module init); `spokes` is written by `--record-evm-spoke` and
+    /// preserved across rewrites. Typed access: `deployments::MultichainInfo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multichain: Option<MultichainRecord>,
+}
+
+/// `endpoint_lz` package plus the shared objects its `init` creates: the
+/// `LzTransport` and the LayerZero `OApp` object it registers
+/// (`LzTransport.oapp_address`, created in the same publish tx).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointLzRecord {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    /// Shared `endpoint_lz::LzTransport` object id.
+    pub transport_id: String,
+    /// The OApp object address (`LzTransport.oapp_address`).
+    pub oapp_id: String,
+}
+
+/// `endpoint_ccip` package plus its shared `CcipTransport` object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointCcipRecord {
+    pub package_id: String,
+    pub upgrade_cap_id: String,
+    pub publish_digest: String,
+    pub deployed_at: String,
+    /// Shared `endpoint_ccip::CcipTransport` object id.
+    pub transport_id: String,
+}
+
+/// Multichain vault wiring (writer side of `deployments::MultichainInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultichainRecord {
+    /// Shared `vault_v2::endpoint::EndpointRegistry` object id.
+    pub endpoint_registry_id: String,
+    /// Protocol chain id of the hub (envelope namespace, plan §2.1).
+    pub hub_chain_id: u64,
+    /// Deployed EVM spokes keyed by spoke name (e.g. "robinhood").
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub spokes: BTreeMap<String, EvmSpokeRecord>,
+}
+
+/// One deployed EVM spoke, merged from the forge deploy artifact by
+/// `--record-evm-spoke` (writer side of `deployments::EvmSpokeInfo`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmSpokeRecord {
+    /// Hub-side spoke id (`bind_spoke` key).
+    pub spoke_id: u64,
+    /// Protocol chain id (envelope namespace).
+    pub protocol_chain_id: u64,
+    /// The EVM network's chain id (eth_chainId).
+    pub evm_chain_id: u64,
+    /// `SpokeVault` contract address.
+    pub spoke_vault: String,
+    /// Endpoint contracts actually deployed on this spoke; absent ones
+    /// were not deployed for this network set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relayer_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layerzero_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ccip_endpoint: Option<String>,
+    /// The spoke deposit asset (USDG mainnet / TUSDG testnet).
+    pub usdg: EvmTokenRecord,
+    /// Block the deployment landed in (log-scan lower bound).
+    pub deploy_block: u64,
+    pub deployer: String,
+    pub deployed_at: String,
+}
+
+/// One EVM token as the spoke vault knows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmTokenRecord {
+    pub address: String,
+    pub decimals: u8,
+    /// Spoke-local asset code carried on the wire (plan §2.1).
+    pub asset_code: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,6 +390,40 @@ impl TokenSpec {
             protocol_types::OracleProvider::Pyth => self.pyth_feed_id.as_deref(),
             protocol_types::OracleProvider::Switchboard => self.switchboard_feed_id.as_deref(),
         }
+    }
+}
+
+#[cfg(test)]
+mod endpoint_record_tests {
+    use super::*;
+
+    /// The writer-side endpoint records serialize to the exact camelCase
+    /// shape the READER (`crates/deployments`) parses.
+    #[test]
+    fn endpoint_records_round_trip_through_the_reader_schema() {
+        let lz = EndpointLzRecord {
+            package_id: "0x1".into(),
+            upgrade_cap_id: "0x2".into(),
+            publish_digest: "d".into(),
+            deployed_at: "2026-08-30T00:00:00Z".into(),
+            transport_id: "0x3".into(),
+            oapp_id: "0x4".into(),
+        };
+        let reader: deployments::EndpointLzInfo =
+            serde_json::from_str(&serde_json::to_string(&lz).unwrap()).unwrap();
+        assert_eq!(reader.transport_id, "0x3");
+        assert_eq!(reader.oapp_id, "0x4");
+
+        let ccip = EndpointCcipRecord {
+            package_id: "0x1".into(),
+            upgrade_cap_id: "0x2".into(),
+            publish_digest: "d".into(),
+            deployed_at: "2026-08-30T00:00:00Z".into(),
+            transport_id: "0x5".into(),
+        };
+        let reader: deployments::EndpointCcipInfo =
+            serde_json::from_str(&serde_json::to_string(&ccip).unwrap()).unwrap();
+        assert_eq!(reader.transport_id, "0x5");
     }
 }
 

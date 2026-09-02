@@ -62,6 +62,11 @@ const PUBLISHABLE: &[&str] = &[
     // the exchange it links against.
     "exchange-listing",
     "exchange-adapter",
+    // Multichain transport packages (opt-in via --deploy-endpoints; they
+    // link core + vault_v2 by local path and pin the LayerZero / CCIP
+    // on-chain packages by git rev).
+    "endpoint-layerzero",
+    "endpoint-ccip",
 ];
 
 fn contracts_root() -> PathBuf {

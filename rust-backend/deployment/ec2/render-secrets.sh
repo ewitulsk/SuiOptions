@@ -22,6 +22,9 @@
 #                                "grpc_url": "..."} (grpc_url is REQUIRED and
 #                                must match the relay's configured [sui]
 #                                network — see the cctp-relay block below)
+#   options/<env>/vault-messenger -> {"sui_key": "...", "evm_key": "...",
+#                                "grpc_url": "..."} (grpc_url REQUIRED, same
+#                                posture — see the vault-messenger block)
 #
 # Outputs (consumed by docker-compose):
 #   /opt/options/<env>/secrets/mm-bot.toml       (read by mm-bot)
@@ -245,6 +248,44 @@ grpc_url = "$CCTP_RPC_URL"
 devnet = "$SOLANA_KEY"
 mainnet = "$SOLANA_KEY"
 CCTPEOF
+fi
+
+# ---- vault-messenger secret -> rendered TOML ------------------------------
+# Relayer keys for the multichain vault messenger: a Sui key (submits the
+# hub deliver/handler PTBs — must be endpoint::add_relayer-registered) and
+# an EVM key (delivers to the spoke RelayerEndpoint + cranks syncState).
+# Both must stay funded with gas. Absent secret -> vault-messenger isn't
+# deployed in this env.
+if VM_JSON=$(fetch vault-messenger 2>/dev/null); then
+  SUI_KEY=$(echo "$VM_JSON" | jq -r '.sui_key')
+  EVM_KEY=$(echo "$VM_JSON" | jq -r '.evm_key')
+  VM_GRPC_URL=$(echo "$VM_JSON" | jq -r '.grpc_url // empty')
+  if [ -z "$SUI_KEY" ] || [ "$SUI_KEY" = "null" ]; then
+    echo "missing sui_key in options/$ENV/vault-messenger" >&2
+    exit 1
+  fi
+  if [ -z "$EVM_KEY" ] || [ "$EVM_KEY" = "null" ]; then
+    echo "missing evm_key in options/$ENV/vault-messenger" >&2
+    exit 1
+  fi
+  # Same posture as cctp-relay (SO-320): a present secret must carry its
+  # own Sui endpoint — no silent fallback to public fullnodes.
+  if [ -z "$VM_GRPC_URL" ] || [ "$VM_GRPC_URL" = "REPLACE_ME" ]; then
+    echo "missing grpc_url in options/$ENV/vault-messenger — the messenger must not fall back to a public Sui fullnode (SO-320)" >&2
+    exit 1
+  fi
+  umask 077
+  # Both networks get the key (mirroring cctp-relay) — the messenger picks
+  # the one matching its configured hub network.
+  cat > "$DIR/vault-messenger.toml" <<VMEOF
+[sui]
+testnet = "$SUI_KEY"
+mainnet = "$SUI_KEY"
+grpc_url = "$VM_GRPC_URL"
+
+[evm]
+private_key = "$EVM_KEY"
+VMEOF
 fi
 
 # ---- auth-service secret -> rendered TOML --------------------------------

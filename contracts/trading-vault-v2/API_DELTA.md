@@ -83,3 +83,24 @@ CHANGES:
     `deposit_usdc(scenario, who, amount, tranche_code, clock)`,
     `new_default_vault(scenario, clock)`, `new_tranched_vault(...)`,
     `request_withdraw_all`, `run_fulfillment`, `crank_capital`.
+
+## Multichain additions (docs/multichain-vault-plan.md)
+
+New modules `wire`, `spoke`, `endpoint`, `endpoint_relayer`, `multichain`,
+`asset_markers`; sibling transport packages `contracts/endpoint-layerzero`
+(`endpoint_lz`) and `contracts/endpoint-ccip` (`endpoint_ccip`).
+
+LAYOUT-INCOMPATIBLE: `TradingVault` gains `spokes` and `Appraisal` gains
+`spokes_pending`/`spoke_liabilities` — this revision ships via a FRESH
+PUBLISH (the staging redeploy flow), not an in-place upgrade. `endpoint`
+adds an `init` creating the shared `EndpointRegistry`.
+
+Behavioral deltas for existing callers:
+- `begin_appraisal`/`consume_appraisal`: appraisals on a vault with bound
+  spokes additionally require one `multichain::record_spoke_state` leg per
+  spoke (fresh StateSync + marker price attestations) and NAV nets out
+  spoke `payables` (floored at zero). Vaults with no spokes: unchanged.
+- `initiate_close`/`initiate_close_admin` abort with `spoke_not_drained`
+  (151) while any spoke is bound.
+- New error codes 140–153; new events (see `events.move` tail); new
+  admin surface: `claim_spoke_protocol_fees`.

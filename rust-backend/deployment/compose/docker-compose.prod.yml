@@ -172,6 +172,12 @@ services:
   # render-secrets.sh skips an absent secret silently and the container would
   # crash-loop on the missing /run/secrets/cctp-relay.toml.
 
+  # NOTE: vault-messenger is likewise NOT declared in prod yet (same
+  # mechanism). The mainnet set needs the mainnet hub/spoke deployments, a
+  # production transport (LayerZero/CCIP — never the dev relayer), and
+  # `options/prod/vault-messenger` in Secrets Manager before a block is
+  # added here (mirror the staging one with APP_ENV: prod).
+
   # Gas station. Sponsors user transactions by paying their gas. Public port
   # (9009, proxied by nginx). Reads the sponsor key from /run/secrets.
   gas-station:

@@ -1,0 +1,17 @@
+[package]
+name = "endpoint_lz"
+version = "0.0.1"
+edition = "2024.beta"
+
+[dependencies]
+# LayerZero V2 Sui OApp package (pulls endpoint-v2 / call / zro / utils
+# transitively). Pinned to a reviewed commit; bumping the pin is a
+# republish, exactly like the oracle adapters (see their manifests).
+oapp = { git = "https://github.com/LayerZero-Labs/LayerZero-v2.git", subdir = "packages/layerzero-v2/sui/contracts/oapps/oapp", rev = "9c741e7f9790639537b1710a203bcdfd73b0b9ac" }
+# Direct deps on the packages whose named addresses this module uses
+# (`call`, `endpoint_v2`, `utils`) — same pin as `oapp`.
+call = { git = "https://github.com/LayerZero-Labs/LayerZero-v2.git", subdir = "packages/layerzero-v2/sui/contracts/dynamic-call/call", rev = "9c741e7f9790639537b1710a203bcdfd73b0b9ac" }
+endpoint_v2 = { git = "https://github.com/LayerZero-Labs/LayerZero-v2.git", subdir = "packages/layerzero-v2/sui/contracts/endpoint-v2", rev = "9c741e7f9790639537b1710a203bcdfd73b0b9ac" }
+utils = { git = "https://github.com/LayerZero-Labs/LayerZero-v2.git", subdir = "packages/layerzero-v2/sui/contracts/utils", rev = "9c741e7f9790639537b1710a203bcdfd73b0b9ac" }
+vault_v2 = { local = "../trading-vault-v2" }
+options_core = { local = "../core" }

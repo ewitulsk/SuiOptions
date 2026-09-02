@@ -16,6 +16,7 @@ members = [
     "crates/auth-client",
     "crates/switchboard-client",
     "crates/vault-sim",
+    "crates/vault-messages",
     "crates/observability",
     "crates/exchange-types",
     "crates/exchange-signing",
@@ -33,6 +34,7 @@ members = [
     "services/market-sim",
     "services/price-charting",
     "services/cctp-relay",
+    "services/vault-messenger",
     "services/balance-monitor",
     "services/oracle-service",
     "services/twitter-service",
@@ -74,6 +76,7 @@ move-publish   = { path = "crates/move-publish" }
 auth-client    = { path = "crates/auth-client" }
 switchboard-client = { path = "crates/switchboard-client" }
 vault-sim      = { path = "crates/vault-sim" }
+vault-messages = { path = "crates/vault-messages" }
 observability  = { path = "crates/observability" }
 # Hybrid exchange (SO: contracts/exchange + services/orderbook). The four
 # shared crates carry no Sui-SDK deps: types/signing are the consensus-

@@ -203,6 +203,24 @@ services:
     restart: unless-stopped
     networks: [net]
 
+  # Multichain vault messenger. Relays hub<->spoke trading-vault messages
+  # (Sui testnet hub <-> Robinhood testnet spoke, dev relayer transport),
+  # cranks syncState/ConfigSync, and alerts on stalls/fee pot. Public port
+  # (9021, proxied by nginx as /staging/vault-messenger). Reads its relayer
+  # keys ([sui] + [evm]) from /run/secrets/vault-messenger.toml — required.
+  vault-messenger:
+    image: ${ECR}/options/vault-messenger:${VAULT_MESSENGER_TAG}
+    environment:
+      APP_ENV: staging
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      RUST_LOG: info,vault_messenger=debug
+    volumes:
+      - /opt/options/staging/secrets:/run/secrets:ro
+    restart: unless-stopped
+    networks: [net]
+
   # Gas station. Sponsors user transactions by paying their gas. Public port
   # (9009, proxied by nginx). Reads the sponsor key from /run/secrets.
   gas-station:

@@ -16,7 +16,7 @@
 //! `vault` (options_vault) is deliberately absent: the covered-call vault
 //! product is deprecated (SO-332) and is no longer published.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use sui_tx::chain::ChainClient;
 use sui_tx::tx::admin::WhitelistDomain;
@@ -26,7 +26,8 @@ use deployment_manager::deploy::{
     publish_test_tokens, seed_whitelist,
 };
 use deployment_manager::json_store::{
-    CctpBridgeRecord, Deployments, ExchangeListingRecord, ExchangeRecord, NetworkDeployment,
+    CctpBridgeRecord, Deployments, EndpointCcipRecord, EndpointLzRecord, EvmSpokeRecord,
+    ExchangeListingRecord, ExchangeRecord, MultichainRecord, NetworkDeployment,
     PackageInfo,
     PackageRecord, TestTokenRecord, TestTokensRecord, TokenSpec, TradingVaultObjectsRecord,
     WhitelistRecord,
@@ -63,6 +64,34 @@ async fn main() -> Result<()> {
         None
     };
     let output_path = cli.output;
+
+    // --record-evm-spoke merges a forge deploy artifact into the env's
+    // `multichain.spokes` block — a pure file merge (no signer, no chain
+    // access), so it runs before secrets are even loaded.
+    if let Some(artifact_path) = &cli.record_evm_spoke {
+        let env_key = cli.env.to_ascii_lowercase();
+        let mut store = Deployments::load_or_default(&output_path)?;
+        let mut record = store.envs.get(&env_key).cloned().with_context(|| {
+            format!("env {env_key} not found in deployments.json — deploy the protocol first")
+        })?;
+        let multichain = record.package_info.multichain.as_mut().with_context(|| {
+            format!(
+                "env {env_key} has no multichain block — redeploy the protocol (it records \
+                 the EndpointRegistry + hubChainId) before recording spokes"
+            )
+        })?;
+        let artifact = deployment_manager::evm_spoke::SpokeArtifact::load(artifact_path)?;
+        let name = deployment_manager::evm_spoke::merge_spoke(multichain, &artifact);
+        store.upsert(&env_key, record);
+        store.save(&output_path)?;
+        tracing::info!(
+            path = %output_path.display(),
+            env = %env_key,
+            spoke = %name,
+            "multichain.spokes entry recorded"
+        );
+        return Ok(());
+    }
 
     let secrets = runtime_config::Secrets::load(&cli.secrets)
         .with_context(|| format!("loading secrets {}", cli.secrets.display()))?;
@@ -364,6 +393,24 @@ async fn main() -> Result<()> {
         .envs
         .get(&env_key)
         .and_then(|d| d.package_info.cctp_bridge.clone());
+    // Same carry-forward discipline for the transport packages (they only
+    // republish under --deploy-endpoints) and for the recorded EVM spokes
+    // (which only --record-evm-spoke writes — a protocol redeploy must
+    // never drop them).
+    let previous_endpoint_lz = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.endpoint_layerzero.clone());
+    let previous_endpoint_ccip = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.endpoint_ccip.clone());
+    let previous_spokes = store
+        .envs
+        .get(&env_key)
+        .and_then(|d| d.package_info.multichain.as_ref())
+        .map(|m| m.spokes.clone())
+        .unwrap_or_default();
     let record = deploy_one(
         network,
         &grpc_url,
@@ -374,6 +421,11 @@ async fn main() -> Result<()> {
         previous_token_info,
         previous_deepbook,
         previous_cctp,
+        previous_endpoint_lz,
+        previous_endpoint_ccip,
+        previous_spokes,
+        cli.deploy_endpoints,
+        cli.hub_chain_id,
         deployment_manager::trading_vault_init::registrar_pubkey_for_env(&env_key),
         &ingress_members,
         cli.gas_budget,
@@ -390,6 +442,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deploy_one(
     network: Network,
     grpc_url: &str,
@@ -400,6 +453,13 @@ async fn deploy_one(
     previous_token_info: BTreeMap<String, TokenSpec>,
     previous_deepbook: Option<serde_json::Value>,
     previous_cctp: Option<CctpBridgeRecord>,
+    previous_endpoint_lz: Option<EndpointLzRecord>,
+    previous_endpoint_ccip: Option<EndpointCcipRecord>,
+    // Spokes recorded by --record-evm-spoke; preserved verbatim on every
+    // rewrite of the multichain block.
+    previous_spokes: BTreeMap<String, EvmSpokeRecord>,
+    deploy_endpoints: bool,
+    hub_chain_id: u64,
     // Ed25519 pubkey of this env's attestation registrar (SO-308), seeded
     // into the VaultProtocolConfig at activation. `None` leaves the attested
     // registration path disabled.
@@ -583,6 +643,117 @@ async fn deploy_one(
     .await
     .with_context(|| format!("publishing equity_oracle to {network}"))?;
     tracing::info!(package = %equity_oracle_out.package_id, "equity_oracle published");
+
+    // Transport packages (multichain-vault-plan §2.2), only under
+    // --deploy-endpoints: their pinned LayerZero/CCIP deps must match the
+    // live on-chain packages for the target network (runbook step 1), so
+    // publishing them is opt-in. They link core + vault_v2 by LOCAL path,
+    // which means a protocol republish orphans any previous transports —
+    // the carried-forward blocks are then stale until the next
+    // --deploy-endpoints run (same discipline as cctpBridge).
+    let (endpoint_layerzero, endpoint_ccip) = if deploy_endpoints {
+        // Locate an init-created object in a publish outcome by
+        // module + struct name (same publish-response-only discipline as
+        // trading_vault_init::resolve_objects).
+        let find_created = |out: &deployment_manager::deploy::DepPublishOutcome,
+                            module: &str,
+                            name: &str| {
+            out.created_objects
+                .iter()
+                .find(|(m, n, _)| m == module && n == name)
+                .map(|(_, _, id)| *id)
+                .ok_or_else(|| anyhow!("publish created no {module}::{name}"))
+        };
+
+        let lz_out = publish_dep_package(
+            &client,
+            &signer,
+            &contracts_root.join("endpoint-layerzero"),
+            "endpoint_lz",
+            env,
+            gas_budget,
+        )
+        .await
+        .with_context(|| format!("publishing endpoint_lz to {network}"))?;
+        let lz_transport_id = find_created(&lz_out, "endpoint_lz", "LzTransport")
+            .context("resolving LzTransport from endpoint_lz publish effects")?;
+        // `endpoint_lz`'s init stores `oapp::new`'s fresh OApp object id as
+        // `LzTransport.oapp_address` — that OApp is created in the SAME
+        // publish tx, so the created-objects list is the authoritative
+        // source for it (no follow-up object read).
+        let lz_oapp_id = find_created(&lz_out, "oapp", "OApp")
+            .context("resolving the OApp object from endpoint_lz publish effects")?;
+        tracing::info!(
+            package = %lz_out.package_id,
+            transport = %lz_transport_id,
+            oapp = %lz_oapp_id,
+            "endpoint_lz published"
+        );
+
+        let ccip_out = publish_dep_package(
+            &client,
+            &signer,
+            &contracts_root.join("endpoint-ccip"),
+            "endpoint_ccip",
+            env,
+            gas_budget,
+        )
+        .await
+        .with_context(|| format!("publishing endpoint_ccip to {network}"))?;
+        let ccip_transport_id = find_created(&ccip_out, "endpoint_ccip", "CcipTransport")
+            .context("resolving CcipTransport from endpoint_ccip publish effects")?;
+        tracing::info!(
+            package = %ccip_out.package_id,
+            transport = %ccip_transport_id,
+            "endpoint_ccip published"
+        );
+
+        (
+            Some(EndpointLzRecord {
+                package_id: lz_out.package_id.to_string(),
+                upgrade_cap_id: lz_out.upgrade_cap_id.to_string(),
+                publish_digest: lz_out.digest,
+                deployed_at: chrono::Utc::now().to_rfc3339(),
+                transport_id: lz_transport_id.to_string(),
+                oapp_id: lz_oapp_id.to_string(),
+            }),
+            Some(EndpointCcipRecord {
+                package_id: ccip_out.package_id.to_string(),
+                upgrade_cap_id: ccip_out.upgrade_cap_id.to_string(),
+                publish_digest: ccip_out.digest,
+                deployed_at: chrono::Utc::now().to_rfc3339(),
+                transport_id: ccip_transport_id.to_string(),
+            }),
+        )
+    } else {
+        (previous_endpoint_lz, previous_endpoint_ccip)
+    };
+
+    // Multichain hub wiring: the shared EndpointRegistry is created by the
+    // trading-vault-v2 publish's `endpoint` module init, so every protocol
+    // redeploy refreshes it here; the recorded spokes are preserved
+    // verbatim (only --record-evm-spoke writes them). Registry SEEDING
+    // (set_hub_chain_id, allow_endpoint, add_relayer) stays a manual
+    // AdminCap ceremony — runbook step 2.
+    let multichain = {
+        let endpoint_registry_id = trading_vault_out
+            .created_objects
+            .iter()
+            .find(|(m, n, _)| m == "endpoint" && n == "EndpointRegistry")
+            .map(|(_, _, id)| *id)
+            .context("trading_vault publish created no endpoint::EndpointRegistry")?;
+        tracing::info!(
+            registry = %endpoint_registry_id,
+            hub_chain_id,
+            spokes = previous_spokes.len(),
+            "multichain block recorded"
+        );
+        Some(MultichainRecord {
+            endpoint_registry_id: endpoint_registry_id.to_string(),
+            hub_chain_id,
+            spokes: previous_spokes,
+        })
+    };
 
     // All `None` — options_vault (SO-332) and the auction/options_rfq venue
     // are no longer published; see contracts/.deprecated/.
@@ -873,6 +1044,9 @@ async fn deploy_one(
             // previous deployment's QuoteSigner (package-bound type). The
             // --deploy-mm-collateral pass fills it in.
             quote_signer_id: None,
+            endpoint_layerzero,
+            endpoint_ccip,
+            multichain,
         },
         token_info,
     })

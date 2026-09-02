@@ -1,0 +1,47 @@
+[package]
+name = "vault-messenger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+runtime-config = { workspace = true }
+observability = { workspace = true, features = ["axum"] }
+cli-spec = { workspace = true }
+vault-messages = { workspace = true }
+protocol-types = { workspace = true }
+oracle-client = { workspace = true }
+
+sui-types = { workspace = true }
+sui-tx = { workspace = true }
+move-core-types = { workspace = true }
+
+clap = { workspace = true }
+tokio = { workspace = true }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+
+serde = { workspace = true }
+token-info-client = { workspace = true }
+toml = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
+bigdecimal = { workspace = true }
+
+# EVM leg: light alloy building blocks only (legacy-tx signing + primitives);
+# RPC goes through reqwest JSON-RPC, mirroring cctp-relay's Solana leg. The
+# heavy alloy provider/network stack stays out of the workspace.
+alloy-primitives = "1.7"
+alloy-consensus = "2.4"
+alloy-signer = "2.4"
+alloy-signer-local = "2.4"
+alloy-eips = "2.4"

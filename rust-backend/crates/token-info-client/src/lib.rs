@@ -144,6 +144,30 @@ impl Snapshot {
         self.package_info.deepbook.as_ref()
     }
 
+    /// Multichain hub wiring + EVM spoke deployments
+    /// (multichain-vault-plan §9). `None` until the multichain deploy
+    /// pass has run for this env.
+    pub fn multichain(&self) -> Option<&deployments::MultichainInfo> {
+        self.package_info.multichain.as_ref()
+    }
+
+    /// One EVM spoke's deployment record by name (e.g. "robinhood").
+    pub fn evm_spoke(&self, name: &str) -> Result<&deployments::EvmSpokeInfo> {
+        self.multichain()
+            .ok_or_else(|| anyhow!("no multichain block in token-info package_info"))?
+            .spoke(name)
+    }
+
+    /// LayerZero transport package (contracts/endpoint-layerzero).
+    pub fn endpoint_layerzero(&self) -> Option<&deployments::EndpointLzInfo> {
+        self.package_info.endpoint_layerzero.as_ref()
+    }
+
+    /// CCIP transport package (contracts/endpoint-ccip).
+    pub fn endpoint_ccip(&self) -> Option<&deployments::EndpointCcipInfo> {
+        self.package_info.endpoint_ccip.as_ref()
+    }
+
     /// Generic auction package. `None` on deployments predating the
     /// four-package split.
     pub fn auction(&self) -> Option<&SubPackageInfo> {
@@ -497,6 +521,9 @@ mod tests {
                 exchange_listing: None,
                 whitelist: None,
             bucket_registry_id: None,
+                endpoint_layerzero: None,
+                endpoint_ccip: None,
+                multichain: None,
             },
             tokens: vec![
                 tok(

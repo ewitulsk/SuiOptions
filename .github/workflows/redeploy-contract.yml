@@ -43,6 +43,29 @@
 # network was hardcoded "testnet" for every env — so the guard tested a value
 # it was structurally incapable of producing. It read as a safety guarantee
 # and enforced nothing (SO-330).
+#
+# Multichain (multichain-vault-plan §9, runbook steps 1 + 3):
+#   - deploy_endpoints=true additionally publishes the two Sui transport
+#     packages (contracts/endpoint-layerzero + contracts/endpoint-ccip)
+#     and records them in deployments.json. Their pinned LayerZero/CCIP
+#     deps must match the live on-chain packages for the target network —
+#     verify before dispatching (runbook step 1).
+#   - deploy_evm_spoke=true runs the Foundry spoke deploy
+#     (evm-contracts/script/DeploySpoke.s.sol) after the Sui publish and
+#     folds its artifact into deployments.json via --record-evm-spoke, so
+#     deployments.json stays the ONE place addresses are written. Needs
+#     two repo SECRETS:
+#       SPOKE_RPC_URL     — the spoke EVM chain's RPC endpoint
+#       EVM_DEPLOYER_KEY  — hex private key of the spoke deployer EOA
+#                           (initial DEFAULT_ADMIN per plan §6.1)
+#     and one repo VARIABLE:
+#       EVM_SPOKE_PARAMS  — newline-separated KEY=VALUE lines exported to
+#                           the forge script (SPOKE_NAME=…, SPOKE_ID=…,
+#                           PROTOCOL_CHAIN_ID=…, HUB_APP=…, CURATOR=…,
+#                           ADMIN=…, DEPLOY_TUSDG=…, …; the full list is
+#                           documented in DeploySpoke.s.sol). Kept out of
+#                           the workflow file so spoke-config changes
+#                           don't need a commit (INGRESS_MEMBERS pattern).
 
 name: Redeploy Contract
 
@@ -61,6 +84,16 @@ on:
         required: false
         type: boolean
         default: true
+      deploy_endpoints:
+        description: 'Also publish the Sui transport packages (endpoint-layerzero + endpoint-ccip) — verify their LayerZero/CCIP dep pins against the live network first (runbook step 1)'
+        required: false
+        type: boolean
+        default: false
+      deploy_evm_spoke:
+        description: 'Also deploy the EVM spoke (DeploySpoke.s.sol via SPOKE_RPC_URL/EVM_DEPLOYER_KEY secrets + EVM_SPOKE_PARAMS var) and record it in deployments.json'
+        required: false
+        type: boolean
+        default: false
       grpc_url:
         description: 'gRPC URL for the publish (blank = the shared options/<env>/sui-rpc secret, else the public fullnode)'
         required: false
@@ -381,6 +414,12 @@ jobs:
           if [ "${{ inputs.deploy_tokens }}" = "true" ]; then
             ARGS+=(--deploy-tokens)
           fi
+          # Multichain transports (runbook step 1). --hub-chain-id feeds the
+          # recorded multichain.hubChainId; 1 is the hub's protocol chain id
+          # in every config set today (plan §2.1).
+          if [ "${{ inputs.deploy_endpoints }}" = "true" ]; then
+            ARGS+=(--deploy-endpoints --hub-chain-id 1)
+          fi
           if [ -n "$GRPC_URL" ]; then
             ARGS+=(--grpc "$GRPC_URL")
           fi
@@ -456,6 +495,78 @@ jobs:
             ARGS+=(--grpc "$GRPC_URL")
           fi
           ./target/release/deploy "${ARGS[@]}"
+
+      # ── 7c. EVM spoke deploy (multichain, runbook step 3) ────────────
+      # Runs AFTER the Sui publish (the hub record exists) and BEFORE the
+      # commit step, so the spoke artifact + its deployments.json merge ride
+      # the same redeploy commit. Foundry is pinned like the Rust toolchain:
+      # an unpinned installer here would make redeploys non-reproducible.
+      - name: Install Foundry
+        if: ${{ inputs.deploy_evm_spoke }}
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+
+      - name: Deploy EVM spoke contracts
+        if: ${{ inputs.deploy_evm_spoke }}
+        working-directory: evm-contracts
+        env:
+          ENV: ${{ inputs.environment }}
+          SPOKE_RPC_URL: ${{ secrets.SPOKE_RPC_URL }}
+          EVM_DEPLOYER_KEY: ${{ secrets.EVM_DEPLOYER_KEY }}
+          SPOKE_PARAMS: ${{ vars.EVM_SPOKE_PARAMS }}
+        run: |
+          # Guard rails: refuse a half-configured dispatch before anything
+          # deploys, with the exact name that's missing.
+          if [ -z "$SPOKE_RPC_URL" ]; then
+            echo "::error::deploy_evm_spoke=true but the SPOKE_RPC_URL repo secret is unset"
+            exit 1
+          fi
+          if [ -z "$EVM_DEPLOYER_KEY" ]; then
+            echo "::error::deploy_evm_spoke=true but the EVM_DEPLOYER_KEY repo secret is unset"
+            exit 1
+          fi
+          if [ -z "$SPOKE_PARAMS" ]; then
+            echo "::error::deploy_evm_spoke=true but the EVM_SPOKE_PARAMS repo variable is unset (KEY=VALUE lines; see DeploySpoke.s.sol)"
+            exit 1
+          fi
+          # Spoke parameters (SPOKE_NAME, SPOKE_ID, HUB_APP, …) come from
+          # the repo variable as KEY=VALUE lines — the script reads them
+          # from the environment.
+          while IFS= read -r line; do
+            [ -n "$line" ] && export "${line?}"
+          done <<< "$SPOKE_PARAMS"
+          # The artifact slot is the deployment env — the same key the
+          # --record-evm-spoke pass below merges under.
+          export DEPLOY_ENV="$ENV"
+
+          forge script script/DeploySpoke.s.sol \
+            --rpc-url "$SPOKE_RPC_URL" \
+            --private-key "$EVM_DEPLOYER_KEY" \
+            --broadcast
+
+          test -f "deployments/${ENV}.json" || {
+            echo "::error::forge script succeeded but wrote no deployments/${ENV}.json"
+            exit 1
+          }
+
+      # ── 7d. Fold the spoke artifact into deployments.json ────────────
+      # Pure file merge (no chain access) — deployments.json stays the ONE
+      # place addresses are written; token-info then serves the spoke block
+      # to the frontend and vault-messenger.
+      - name: Record EVM spoke in deployments.json
+        if: ${{ inputs.deploy_evm_spoke }}
+        working-directory: rust-backend
+        env:
+          ENV: ${{ inputs.environment }}
+          NETWORK: ${{ steps.net.outputs.network }}
+        run: |
+          ./target/release/deploy \
+            --env     "$ENV" \
+            --network "$NETWORK" \
+            --output  deployments.json \
+            --secrets /tmp/deploy-secrets/secrets.toml \
+            --record-evm-spoke "../evm-contracts/deployments/${ENV}.json"
 
       # ── 8. Resolve the deployment checkpoint from the tx digest ──
       - name: Get deployment checkpoint
@@ -657,6 +768,12 @@ jobs:
           # mm-bot collateral routing for the fresh core (absent when this
           # env has no mm-bot). Ships to the host in the deploy bundle.
           git add rust-backend/services/mm-bot/config/collateral.*.toml || true
+          # Transport packages' Published.toml (stamped by --deploy-endpoints;
+          # unchanged otherwise) + the forge spoke artifact the
+          # --record-evm-spoke pass merged (absent unless deploy_evm_spoke).
+          git add contracts/endpoint-layerzero/Published.toml \
+                  contracts/endpoint-ccip/Published.toml 2>/dev/null || true
+          git add "evm-contracts/deployments/${ENV}.json" 2>/dev/null || true
 
           git commit -m "[redeploy] Fresh ${ENV} contract deployment" \
             -m "Network: ${{ steps.net.outputs.network }}" \
