@@ -8,6 +8,10 @@ target the deprecated covered-call vault.
 
 Companion docs:
 
+- `09-backtesting-gap-remediation.md` — 2026-09-01 review follow-up:
+  reorders delivery, adds the IV estimator phase, and supersedes §1.6/§6.1
+  with an oracle-agnostic rule (both Pyth and Switchboard, no
+  oracle-specific data).
 - `00-plan.md` — the strategy contract.
 - `07-backtest-data-and-cost-findings.md` — call-only measurements and data
   findings that this framework must reproduce and extend.
@@ -58,7 +62,8 @@ The framework can answer:
 - At what NAV hedge and exercise liquidity become binding.
 
 It cannot establish an unconditional historical APY until Earn arrival and
-acceptance models are calibrated from live outcomes.
+acceptance models are calibrated from live **mainnet** outcomes (see the
+decision under §3.1).
 
 ### 0.3 Explicit non-goals
 
@@ -267,6 +272,21 @@ Every RFQ reaches exactly one terminal outcome:
 
 This dataset calibrates separate call/put arrival and acceptance models,
 including the value of stale quotes during their TTL.
+
+**Decision (2026-09-01): no own-exchange data before mainnet.** Nothing
+observed on our own exchange or Earn RFQ channel while they run on testnet
+is calibration data, and none of it enters the data room. We are the only
+participants, and even real testnet users would not behave like capital at
+risk. The `desk_rfq_outcomes` table shipped in PR A is therefore
+operational telemetry only; no backtest, flow prior, or acceptance model
+may read it. Proper own-venue capture (exchange order flow and the Earn
+RFQ funnel) is a mainnet-launch prerequisite to be designed separately;
+until it exists, §8 runs on stated priors and sweeps.
+
+Follow-up (decided 2026-09-01, not yet implemented): gate the PR A
+recorder behind a config flag that defaults off, so testnet deployments
+write no RFQ rows at all. Keep the table, migration, and code for mainnet.
+Not a revert.
 
 ### 3.2 Continue live source collection
 
@@ -941,8 +961,8 @@ Condition call and put arrivals separately on:
 - Time of day and expiry calendar.
 
 Call writing may increase after run-ups; put writing may increase after
-sell-offs or volatility spikes. These are hypotheses until newly collected
-live RFQ outcomes calibrate them.
+sell-offs or volatility spikes. These are hypotheses until mainnet RFQ
+outcomes calibrate them; testnet outcomes never do (§3.1 decision).
 
 ### 8.3 Size and bucket selection
 
@@ -1190,7 +1210,7 @@ backtesting (§4.6); the Deribit/DVOL options history is used as-is.
 | USDT/USDC or settlement basis | Required when proxy market prices and vault settlement differ |
 | BTC DVOL + Deribit chain | DVOL hourly from 2021; the strike-level chain only from 2026-08-14, so the ablation runs on ATM DVOL (no skew/term) until the chain accumulates; not proof of SUI fair value |
 | Historical Earn RFQ outcomes | Unavailable; never implied or synthesized as observed history |
-| New live RFQ outcomes | Implement immediately; calibrates future call/put flow and acceptance but is not required for scenario capacity mode |
+| New live RFQ outcomes | Recorder shipped (PR A) but testnet rows are telemetry only, never calibration (§3.1 decision, 2026-09-01); mainnet capture of the RFQ funnel and exchange order flow is a launch prerequisite |
 
 Every run serializes a data manifest containing source, venue, coverage,
 version, gaps, proxy status, and hashes/partitions used.
