@@ -8,6 +8,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::engine::{RunOutput, VenueLabels};
+use crate::exercise::ExerciseStats;
 use crate::gaps::{GapSpan, InvalidatedSpan};
 use crate::latency::LatencyConfig;
 use crate::scenario::Scenario;
@@ -111,6 +112,17 @@ pub struct Summary {
     pub topup_declines: u64,
     pub hedge_declines_margin: u64,
     pub first_liquidation_ms: Option<i64>,
+    /// Doc 08 §7.5/§7.6 (PR M): paths taken, rejects, PTB failures,
+    /// unexercised expiries and the non-atomic hedge-close delay.
+    pub exercise_stats: ExerciseStats,
+    pub hedge_close_delay_ms_mean: Option<f64>,
+    /// `max(min_profit_usd, min_profit_bps × payout, mult × route uncertainty)`.
+    pub exercise_min_profit_rule: String,
+    /// Flash/pool capacity is a configured assumption (doc 08 §4.6).
+    pub flash_capacity_assumed: bool,
+    /// The call cash path sells the received underlying on the route
+    /// (the live path leaves it in the vault).
+    pub call_cash_path_sells_spot: bool,
     /// Event-ordering fingerprint (doc 08 §6.2).
     pub trace_hash: String,
     pub determinism_hash: String,
@@ -135,7 +147,7 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         asset: s.asset.clone(),
         labels: Labels {
             proxy_oracle: true, proxy_venue: true, taker_only: out.execution_assumption == "taker_only", no_resale: !s.resale.enabled, constant_flow: out.flow_source == "constant",
-            exercise: "at_expiry",
+            exercise: "american_sweep",
             estimator: if s.estimator.kind == "har" { format!("har(q_bid={})", s.estimator.q_bid) } else { s.estimator.kind.clone() },
             flow_source: out.flow_source,
             acceptance: out.acceptance,
@@ -208,6 +220,11 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         topup_declines: l.topup_declines,
         hedge_declines_margin: l.hedge_declines_margin,
         first_liquidation_ms: out.first_liquidation_ms,
+        exercise_stats: out.exercise.clone(),
+        hedge_close_delay_ms_mean: out.exercise.hedge_close_delay_ms_mean(),
+        exercise_min_profit_rule: format!("max(USD {}, {} bps x payout, {} x {} bps route uncertainty)", s.exercise.min_profit_usd, s.exercise.min_profit_bps, s.exercise.route_uncertainty_mult, s.exercise.route_uncertainty_bps),
+        flash_capacity_assumed: true,
+        call_cash_path_sells_spot: true,
         trace_hash: out.trace_hash.clone(),
         determinism_hash: String::new(),
     };

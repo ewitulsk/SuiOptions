@@ -314,23 +314,8 @@ impl Default for HedgeConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct ExerciseConfig {
-    /// Spot execution slippage on the exercise leg, bps.
-    pub spot_slippage_bps: f64,
-    pub spot_fee_bps: f64,
-    /// Gas per exercise PTB, settlement units.
-    pub gas_per_exercise: f64,
-    /// Gas per hedge rebalance (0 on Bluefin: off-chain sequencer).
-    pub gas_per_rebalance: f64,
-}
-
-impl Default for ExerciseConfig {
-    fn default() -> Self {
-        Self { spot_slippage_bps: 5.0, spot_fee_bps: 2.5, gas_per_exercise: 0.05, gas_per_rebalance: 0.0 }
-    }
-}
+/// `[exercise]`: the exercise execution model (doc 08 §7.5/§7.6, PR M).
+pub use crate::exercise::ExerciseConfig;
 
 /// Doc 09 G7: the protocol premium fee is a writer-side wedge (the desk
 /// pays gross, the writer receives net — it sets the DISPLAYED APY), the

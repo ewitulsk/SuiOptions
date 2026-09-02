@@ -245,3 +245,24 @@ Reading:
   book cannot fund its long-hedge margin through a 17% slide from cash
   alone — the trapped option gains are the doc 08 §7.3 acute risk, and
   the mixed-book numbers above (at-expiry, no margin) understate it.
+
+## 9. Second pass (PR M, SO-455): exercise execution model
+
+- `exercise = at_expiry` is gone: options are exercised the way the live
+  desk exercises them (`exits.rs` / `exits/put.rs`, held to parity by a
+  shared route fixture) — the daily American check and the 24-hour
+  near-expiry sweep every 5 minutes, calls cash-first then quote flash,
+  puts through the vault-underlying → base-flash → quote-flash waterfall,
+  the `max($10, 5 bps × payout, 2 × route uncertainty)` rule, laddering
+  inside expiry, Sui inclusion + indexer detection latency, a seeded PTB
+  failure hazard (a failed PTB moves nothing), and the non-atomic perp
+  close after detection. Whatever is still held at expiry is worthless,
+  as on chain; the summary reports `exercise_stats` (paths, rejects,
+  failures, `expired_unexercised_itm`, hedge-close delay).
+- The route is a configured linear-depth ladder and the pool balances
+  are assumed (`flash_capacity_assumed = true`). On the synthetic
+  regression path the sweep sells ~1M SUI in the last day through a
+  2000-units-per-bp ladder and the option leg pays ~27k less than the
+  at-expiry-at-spot settlement did — the exercise cost doc 07 §6 said
+  would appear once the route was modeled. Re-run §2–§4 before quoting
+  them; the at-expiry numbers above overstate the option leg.

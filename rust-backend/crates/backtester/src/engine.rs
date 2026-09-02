@@ -19,6 +19,12 @@
 //! `ActionableTime` for observations, `CommandTime` for the strategy's
 //! actions, `AcknowledgementTime`/`FillTime` for venue outcomes.
 //!
+//! Exercise (doc 08 §7.5/§7.6): the live exit ladder runs on the exits
+//! cadence (daily check + near-expiry sweep); slices are routed exactly as
+//! `exits.rs`/`exits/put.rs` route them, land after Sui inclusion +
+//! indexer detection, and the non-atomic perp close follows. Unexercised
+//! options expire worthless, as on chain.
+//!
 //! Prices (doc 08 §7.4): options are priced and marked at the DECISION
 //! price (oracle proxy); the perp executes, marks, funds and margins at
 //! the VENUE mark (bar path × basis).
@@ -26,6 +32,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::Result;
+use pricing::american::{forgone_carry, remaining_time_value_call, AmericanInputs};
 use pricing::desk::{expected_hedge_cost, v1_bid, BidContext, HedgeCostParams, V1BidParams};
 use serde::Serialize;
 
@@ -33,6 +40,7 @@ use crate::acceptance::{displayed_apy, AcceptanceModel, LiveQuote, Outcome};
 use crate::clock::{ActionableTime, CommandTime, EventQueue, EventTime, FillTime, Key, Stage};
 use crate::data::{Bar, FundingRow};
 use crate::estimator::{SigmaReadout, WindowsEstimator};
+use crate::exercise::{self, CallPath, ExerciseStats, PlanReject, PtbHazard, PutLiquidity};
 use crate::flow_gen::{ConstantSource, FlowCtx, FlowGen, FlowSource, RfqEvent};
 use crate::gaps::{Coverage, GapTracker};
 use crate::latency::{LatencyConfig, LatencyModel, LatencyStage};
@@ -138,6 +146,8 @@ pub struct RunOutput {
     /// Closest approach to liquidation: min `(MR − MMR) / MMR`.
     pub closest_margin_headroom: Option<f64>,
     pub first_liquidation_ms: Option<i64>,
+    /// Doc 08 §7.5/§7.6 exercise counters and labels.
+    pub exercise: ExerciseStats,
 }
 
 /// The external feeds of one run.
@@ -167,6 +177,8 @@ enum Timer {
     Mark,
     /// RFQ arrivals from the flow source and the quote lifecycle.
     Flow,
+    /// Exits cadence: the exercise ladder (doc 08 §7.5/§7.6).
+    Exit,
     /// Hedge sample: bands decide, the clock only samples.
     Hedge,
     /// Margin check: top-up policy (doc 08 §7.3).
@@ -178,8 +190,9 @@ impl Timer {
         match self {
             Timer::Mark => 0,
             Timer::Flow => 1,
-            Timer::Hedge => 2,
-            Timer::Margin => 3,
+            Timer::Exit => 2,
+            Timer::Hedge => 3,
+            Timer::Margin => 4,
         }
     }
 
@@ -187,6 +200,7 @@ impl Timer {
         match self {
             Timer::Mark => "mark",
             Timer::Flow => "flow",
+            Timer::Exit => "exit",
             Timer::Hedge => "hedge",
             Timer::Margin => "margin",
         }
@@ -198,6 +212,8 @@ enum Command {
     Hedge(HedgeCommand, OrderKind),
     /// Move `amount` of vault cash to the venue as margin.
     TopUp(f64),
+    /// Submit one exercise PTB slice.
+    Exercise(ExerciseCmd),
 }
 
 #[derive(Clone, Debug)]
@@ -206,6 +222,8 @@ enum Queued {
     Timer(Timer),
     Command(Command),
     Outcome(Timed),
+    /// An exercise PTB detected by the indexer (success or atomic failure).
+    Exercised(ExerciseCmd),
     /// Capacity stats, NAV sample and drawdown, after every outcome of
     /// the instant.
     NavSample,
@@ -243,6 +261,26 @@ fn annualize(row: &FundingRow) -> f64 {
     } else {
         row.rate * (8760.0 / row.interval_hours)
     }
+}
+
+/// CRR steps for the call time-value rule (mm-bot `desk::model::CRR_STEPS`).
+const CRR_STEPS: usize = 128;
+
+/// One exercise slice in flight: planned at command time on the route
+/// the desk saw, settled at detection.
+#[derive(Clone, Debug)]
+struct ExerciseCmd {
+    position_id: u64,
+    units: f64,
+    is_put: bool,
+    path: &'static str,
+    /// Net settlement after every modeled cost.
+    net: f64,
+    /// Route notional (acquisition or sale), for the turnover line.
+    turnover: f64,
+    delta_per_unit: f64,
+    spot: f64,
+    failed: bool,
 }
 
 /// One priced spec: fair, greeks, and the V1 bid (None = priced zero).
@@ -332,6 +370,8 @@ struct Engine<'a> {
     min_margin_ratio: Option<f64>,
     closest_headroom: Option<f64>,
     first_liquidation_ms: Option<i64>,
+    hazard: PtbHazard,
+    xstats: ExerciseStats,
     timer_counts: BTreeMap<String, u64>,
     stage_counts: BTreeMap<String, u64>,
     trace_hash: u64,
@@ -482,6 +522,7 @@ impl<'a> Engine<'a> {
         match t {
             Timer::Mark => self.on_mark(now),
             Timer::Flow => self.on_flow(now),
+            Timer::Exit => self.on_exit(now),
             Timer::Hedge => self.on_hedge(now),
             Timer::Margin => self.on_margin(now),
         }
@@ -510,6 +551,19 @@ impl<'a> Engine<'a> {
         while i < self.ledger.positions.len() {
             let p = &mut self.ledger.positions[i];
             if now >= p.expiry_ms {
+                if p.pending_units > 1e-12 {
+                    // A slice included before expiry is still awaiting
+                    // detection; the rest expires worthless now.
+                    let mut shell = p.clone();
+                    shell.qty = p.pending_units;
+                    shell.mark = 0.0;
+                    p.qty -= p.pending_units;
+                    p.pending_units = 0.0;
+                    let dead = std::mem::replace(p, shell);
+                    expired.push(dead);
+                    i += 1;
+                    continue;
+                }
                 expired.push(self.ledger.positions.remove(i));
                 continue;
             }
@@ -528,7 +582,7 @@ impl<'a> Engine<'a> {
             self.gaps.needed_truth("spot", now, "expiry settlement");
         }
         for p in expired {
-            self.settle_at_expiry(now, spot, p);
+            self.expire_worthless(now, spot, p);
         }
 
         // Resale: a labeled upside scenario, off by default (doc 08 §8.5).
@@ -589,49 +643,6 @@ impl<'a> Engine<'a> {
 
     fn flow_ctx(&self, now: i64, spot: f64, readout: &SigmaReadout, nav: f64, stale: bool) -> FlowCtx {
         FlowCtx { now_ms: now, spot, sigma_atm: readout.surface.atm(self.tenor_years), nav, stale, apy_call: self.apy_call, apy_put: self.apy_put }
-    }
-
-    fn settle_at_expiry(&mut self, now: i64, spot: f64, p: Position) {
-        let s = self.s;
-        self.stats.expiries_settled += 1;
-        let intrinsic_per_unit = if p.is_put { (p.strike - spot).max(0.0) } else { (spot - p.strike).max(0.0) };
-        let mut payoff = 0.0;
-        let mut costs = 0.0;
-        if intrinsic_per_unit > 0.0 {
-            let slip = s.exercise.spot_slippage_bps / 10_000.0;
-            let fee = s.exercise.spot_fee_bps / 10_000.0;
-            let notional = spot * p.qty;
-            // Call: pay strike, receive underlying, sell it. Put: buy
-            // underlying, deliver it, receive strike. Both leave the
-            // desk flat in the underlying.
-            let exec_px = if p.is_put { spot * (1.0 + slip) } else { spot * (1.0 - slip) };
-            let gross = if p.is_put { (p.strike - exec_px) * p.qty } else { (exec_px - p.strike) * p.qty };
-            costs = notional * fee + s.exercise.gas_per_exercise;
-            payoff = gross - costs;
-            self.ledger.lines.exercise_turnover_notional += notional;
-            self.stats.volumes.exercise_spot_turnover += notional;
-            if p.is_put { self.stats.exercised_put += 1 } else { self.stats.exercised_call += 1 }
-            // Flash/router capacity: an assumption until PR M lands.
-            // Over the cap the exercise is laddered (counted, still
-            // settled at the same price here).
-            let cap = s.venue.flash_max_notional_per_exercise;
-            if cap > 0.0 && notional > cap {
-                self.stats.flash_cap_hits += 1;
-                self.stats.exercise_laddered += 1;
-            }
-        }
-        self.ledger.cash += payoff;
-        self.ledger.lines.option_payoff += payoff;
-        self.ledger.lines.exercise_costs += costs;
-        let life: Vec<(i64, f64)> = self.price_samples.iter().copied().filter(|(t, _)| *t >= p.opened_ms && *t <= now).collect();
-        let sigma_realized = crate::estimator::realized_vol(&life, now - p.opened_ms + 1, now).unwrap_or(0.0);
-        let tau = (p.expiry_ms - p.opened_ms) as f64 / MS_PER_YEAR_F;
-        let vol_pnl_proxy = 0.5 * p.gamma_open * p.spot_open * p.spot_open * (sigma_realized.powi(2) - p.sigma_paid.powi(2)) * tau * p.qty;
-        self.settled.push(SettledOption {
-            id: p.id, is_put: p.is_put, strike: p.strike, opened_ms: p.opened_ms, expiry_ms: p.expiry_ms, qty: p.qty,
-            spot_open: p.spot_open, spot_close: spot, premium_paid: p.premium_paid, payoff, sigma_paid: p.sigma_paid,
-            sigma_surface: p.sigma_surface, sigma_realized, vol_pnl_proxy, option_leg_pnl: payoff - p.premium_paid,
-        });
     }
 
     /// RFQs from the flow source (the constant injector retries a stale
@@ -727,7 +738,7 @@ impl<'a> Engine<'a> {
                         id, is_put: rfq.is_put, strike: rfq.strike, expiry_ms: rfq.expiry_ms, qty: rfq.qty, premium_paid: q.bid,
                         sigma_paid: q.sigma_paid, sigma_surface: q.sigma_quote, opened_ms: now, spot_open: spot, delta_open: q.delta,
                         gamma_open: q.gamma, vega_open: q.vega, writer_net_premium: q.writer_net,
-                        mark: current_fair / rfq.qty,
+                        mark: current_fair / rfq.qty, qty_open: rfq.qty, pending_units: 0.0, last_check_ms: i64::MIN / 2, exercise_net: 0.0,
                     });
                 }
             }
@@ -837,6 +848,212 @@ impl<'a> Engine<'a> {
         self.schedule(at.ms(), Stage::Command, 0, Queued::Command(Command::TopUp(amount)));
     }
 
+    // ── exercise (doc 08 §7.5/§7.6, PR M) ──────────────────────────────
+
+    /// The exits tick: every held option is checked once per
+    /// `check_interval_secs`, and every sweep inside `near_expiry_hours`
+    /// (the redundant keeper). A wanted exercise is laddered and each
+    /// slice routed exactly as the live policy routes it; the PTB is a
+    /// command that lands after Sui inclusion + indexer detection.
+    fn on_exit(&mut self, now: i64) {
+        let s = self.s;
+        let x = &s.exercise;
+        let next = now + x.sweep_interval_secs.max(1) * 1000;
+        if next < self.end_ms {
+            self.schedule(next, Stage::Timer, Timer::Exit.sub(), Queued::Timer(Timer::Exit));
+        }
+        let Some(ctx) = self.cur.filter(|c| c.ms == now) else { return };
+        if ctx.stale {
+            return;
+        }
+        let spot = ctx.spot;
+        let route = exercise::route_at(x, spot);
+        let policy = exercise::PolicyConfig::from(x);
+        // Free settlement for call cash exercises this tick (reservations
+        // and in-flight slices already spent).
+        let reserved: f64 = self.live.iter().map(|q| q.bid).sum();
+        let mut free_cash = (self.ledger.cash - reserved).max(0.0);
+        let mut own_underlying = exercise::units_raw(x.vault_free_underlying_units);
+        let ids: Vec<usize> = (0..self.ledger.positions.len()).collect();
+        for i in ids {
+            let p = self.ledger.positions[i].clone();
+            let held = p.qty - p.pending_units;
+            if held <= 0.0 || now >= p.expiry_ms {
+                continue;
+            }
+            let hours = (p.expiry_ms - now) as f64 / 3_600_000.0;
+            let near = hours <= x.near_expiry_hours;
+            if !near && now - p.last_check_ms < x.check_interval_secs * 1000 {
+                continue;
+            }
+            self.ledger.positions[i].last_check_ms = now;
+            let itm = if p.is_put { spot < p.strike } else { spot > p.strike };
+            if !itm {
+                continue;
+            }
+            let t = (p.expiry_ms - now) as f64 / MS_PER_YEAR_F;
+            let sigma = ctx.readout.surface.vol(spot, p.strike, t);
+            let inputs = AmericanInputs { spot, strike: p.strike, t_years: t, sigma: sigma.max(1e-6), rate: 0.0, carry_yield: s.carry_yield };
+            // ITM inside the sweep window is always attempted; the CRR
+            // time-value rule only decides the early (daily) case.
+            let wanted = if near {
+                true
+            } else if p.is_put {
+                let fair = fair_per_unit(true, spot, p.strike, t, sigma, s.carry_yield);
+                let tv = (fair - (p.strike - spot).max(0.0)).max(0.0);
+                // Carry on the strike cash at the (zero) settlement rate.
+                exercise::put_exercise_wanted(x.near_expiry_hours, x.carry_mult, spot, p.strike, hours, 0.0, tv)
+            } else {
+                let carry = forgone_carry(&inputs);
+                let tv = remaining_time_value_call(&inputs, CRR_STEPS);
+                exercise::call_exercise_wanted(x.near_expiry_hours, x.carry_mult, spot, p.strike, hours, carry, tv)
+            };
+            if !wanted {
+                continue;
+            }
+            let delta = greeks_per_unit(p.is_put, spot, p.strike, t, sigma, s.carry_yield).delta;
+            let strike = exercise::strike_raw(p.strike);
+            // PR N's per-exercise flash/router ceiling (an assumption the
+            // solver gates on): counted when the held notional exceeds it.
+            let cap = s.venue.flash_max_notional_per_exercise;
+            if cap > 0.0 && held * spot > cap {
+                self.stats.flash_cap_hits += 1;
+            }
+            let slices = exercise::ladder(exercise::units_raw(held), exercise::units_raw(x.max_slice_units), (p.expiry_ms - now) as u64, x.ladder_tx_secs * 1000, x.expiry_margin_secs * 1000);
+            if slices.len() > 1 {
+                self.stats.exercise_laddered += 1;
+            }
+            for slice in slices {
+                let (path, net_raw, turnover_raw) = if p.is_put {
+                    let liq = PutLiquidity { own_underlying, pool: route.pool.clone() };
+                    match exercise::plan_slice(&policy, slice, strike, exercise::STRIKE_SCALE, exercise::SETTLEMENT_DECIMALS, &liq) {
+                        Ok(plan) => (plan.path.label(), plan.expected_net as i128, plan.max_quote_in),
+                        Err(r) => {
+                            self.reject(&r);
+                            break;
+                        }
+                    }
+                } else {
+                    match exercise::plan_call_slice(&policy, slice, strike, exercise::STRIKE_SCALE, exercise::SETTLEMENT_DECIMALS, exercise::settle_raw(free_cash), &route.pool, &route.bids) {
+                        Ok(plan) => {
+                            if plan.path == CallPath::Cash {
+                                free_cash -= exercise::raw_settle(plan.cost as i128);
+                            }
+                            (plan.path.label(), plan.net, plan.proceeds)
+                        }
+                        Err(r) => {
+                            self.reject(&r);
+                            break;
+                        }
+                    }
+                };
+                // The vault-underlying route repurchases what it delivers;
+                // the own balance is unchanged for the next slice.
+                let _ = &mut own_underlying;
+                let units = slice as f64 / 10f64.powi(exercise::UNDERLYING_DECIMALS as i32);
+                self.ledger.positions[i].pending_units += units;
+                self.xstats.slices_submitted += 1;
+                let cmd = ExerciseCmd {
+                    position_id: p.id,
+                    units,
+                    is_put: p.is_put,
+                    path,
+                    net: exercise::raw_settle(net_raw),
+                    turnover: exercise::raw_settle(turnover_raw as i128),
+                    delta_per_unit: delta,
+                    spot,
+                    failed: false,
+                };
+                let at = CommandTime(now + self.lat.draw(LatencyStage::Strategy));
+                self.schedule(at.ms(), Stage::Command, 0, Queued::Command(Command::Exercise(cmd)));
+            }
+        }
+    }
+
+    fn reject(&mut self, r: &PlanReject) {
+        self.xstats.reject(r.label());
+        if matches!(r, PlanReject::Capacity) {
+            self.stats.flash_cap_hits += 1;
+        }
+    }
+
+    /// The PTB lands (or fails) at Sui inclusion; the desk sees it at
+    /// indexer detection. A failed PTB aborts atomically: no balance moves.
+    fn on_exercised(&mut self, at: FillTime, x: ExerciseCmd) {
+        let Some(i) = self.ledger.positions.iter().position(|p| p.id == x.position_id) else { return };
+        let p = &mut self.ledger.positions[i];
+        p.pending_units = (p.pending_units - x.units).max(0.0);
+        if x.failed {
+            self.xstats.ptb_failed += 1;
+            self.stats.exercise_failed += 1;
+            if p.qty <= 1e-12 && p.pending_units <= 1e-12 {
+                let p = self.ledger.positions.remove(i);
+                self.close_position(at.ms(), x.spot, p);
+            }
+            return;
+        }
+        p.qty = (p.qty - x.units).max(0.0);
+        p.exercise_net += x.net;
+        self.ledger.cash += x.net;
+        self.ledger.lines.option_payoff += x.net;
+        self.ledger.lines.exercise_turnover_notional += x.turnover;
+        self.stats.volumes.exercise_spot_turnover += x.turnover;
+        if x.is_put { self.stats.exercised_put += 1 } else { self.stats.exercised_call += 1 }
+        self.xstats.path(x.path);
+        if p.qty <= 1e-12 && p.pending_units <= 1e-12 {
+            let p = self.ledger.positions.remove(i);
+            self.close_position(at.ms(), x.spot, p);
+        }
+        // The Sui PTB is atomic; the perp close is not: send it now, after
+        // the configured extra delay, through the normal hedge path (the
+        // working order counts against the band so the rebalancer does
+        // not double up).
+        let size = x.delta_per_unit * x.units;
+        if size.abs() >= self.s.venue.min_order_units {
+            let delay = self.s.exercise.hedge_close_delay_ms.max(0) + self.lat.draw(LatencyStage::Strategy);
+            let order = HedgeOrder { id: self.next_order_id, size_units: size, spot: x.spot };
+            self.next_order_id += 1;
+            self.open.submit(&order, at.ms() + delay);
+            self.schedule(at.ms() + delay, Stage::Command, 0, Queued::Command(Command::Hedge(HedgeCommand::Submit(order), OrderKind::Taker)));
+            self.xstats.hedge_close_delay_ms_sum += delay;
+            self.xstats.hedge_closes += 1;
+        }
+    }
+
+    /// A position leaves the book: exercised in full, or expired (an
+    /// unexercised option is worthless on chain — `burn_expired_option`).
+    fn close_position(&mut self, now: i64, spot: f64, p: Position) {
+        self.stats.expiries_settled += 1;
+        let payoff = p.exercise_net;
+        let life: Vec<(i64, f64)> = self.price_samples.iter().copied().filter(|(t, _)| *t >= p.opened_ms && *t <= now).collect();
+        let sigma_realized = crate::estimator::realized_vol(&life, now - p.opened_ms + 1, now).unwrap_or(0.0);
+        let tau = (p.expiry_ms - p.opened_ms) as f64 / MS_PER_YEAR_F;
+        let vol_pnl_proxy = 0.5 * p.gamma_open * p.spot_open * p.spot_open * (sigma_realized.powi(2) - p.sigma_paid.powi(2)) * tau * p.qty_open;
+        self.settled.push(SettledOption {
+            id: p.id, is_put: p.is_put, strike: p.strike, opened_ms: p.opened_ms, expiry_ms: p.expiry_ms, qty: p.qty_open,
+            spot_open: p.spot_open, spot_close: spot, premium_paid: p.premium_paid, payoff, sigma_paid: p.sigma_paid,
+            sigma_surface: p.sigma_surface, sigma_realized, vol_pnl_proxy, option_leg_pnl: payoff - p.premium_paid,
+        });
+    }
+
+    /// Expiry: whatever is still held expires worthless; the intrinsic
+    /// value it carried is reported as the exercise model's miss.
+    fn expire_worthless(&mut self, now: i64, spot: f64, mut p: Position) {
+        let held = p.qty;
+        if held > 1e-12 {
+            self.xstats.expired_unexercised += 1;
+            let intrinsic = if p.is_put { (p.strike - spot).max(0.0) } else { (spot - p.strike).max(0.0) };
+            // Only economically exercisable value counts as a miss: the
+            // policy leaves sub-threshold intrinsic to expire by design.
+            if intrinsic * held >= self.s.exercise.min_profit_usd {
+                self.xstats.expired_unexercised_itm += 1;
+                self.xstats.expired_itm_value += intrinsic * held;
+            }
+        }
+        p.qty = 0.0;
+        self.close_position(now, spot, p);
+    }
+
     // ── commands and outcomes ──────────────────────────────────────────
 
     fn on_command(&mut self, at: CommandTime, cmd: Command) {
@@ -847,6 +1064,14 @@ impl<'a> Engine<'a> {
                 let account = self.account();
                 let timed = self.venue.execute(c, kind, arrival, &market, &account, &mut self.lat);
                 self.schedule_outcomes(timed);
+            }
+            Command::Exercise(mut x) => {
+                // Pre-simulated and submitted: it fails atomically (hazard)
+                // or lands at inclusion; the desk sees either at detection.
+                x.failed = self.hazard.fails();
+                let landed = at.ms() + self.lat.draw(LatencyStage::SuiInclusion);
+                let detected = landed + self.lat.draw(LatencyStage::IndexerDetection);
+                self.schedule(detected, Stage::Outcome, 0, Queued::Exercised(x));
             }
             Command::TopUp(amount) => {
                 // Cash leaves the vault now; it is margin once it lands.
@@ -1019,6 +1244,7 @@ impl<'a> Engine<'a> {
             Queued::Timer(t) => self.on_timer(key.ms, t),
             Queued::Command(c) => self.on_command(CommandTime(key.ms), c),
             Queued::Outcome(t) => self.on_outcome(FillTime(key.ms), t),
+            Queued::Exercised(x) => self.on_exercised(FillTime(key.ms), x),
             Queued::NavSample => self.on_nav_sample(key.ms),
         }
     }
@@ -1109,6 +1335,8 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         min_margin_ratio: None,
         closest_headroom: None,
         first_liquidation_ms: None,
+        hazard: PtbHazard::new(s.seed, s.exercise.ptb_failure_prob),
+        xstats: ExerciseStats::default(),
         timer_counts: BTreeMap::new(),
         stage_counts: BTreeMap::new(),
         trace_hash: 0xcbf2_9ce4_8422_2325,
@@ -1116,6 +1344,7 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
     e.schedule(start_ms, Stage::Timer, Timer::Mark.sub(), Queued::Timer(Timer::Mark));
     e.schedule(start_ms, Stage::Timer, Timer::Flow.sub(), Queued::Timer(Timer::Flow));
     e.schedule(start_ms, Stage::Timer, Timer::Hedge.sub(), Queued::Timer(Timer::Hedge));
+    e.schedule(start_ms, Stage::Timer, Timer::Exit.sub(), Queued::Timer(Timer::Exit));
     e.schedule(start_ms, Stage::Timer, Timer::Margin.sub(), Queued::Timer(Timer::Margin));
 
     // Pull external rows and queued events in `(ms, stage)` order; an
@@ -1190,6 +1419,7 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         min_margin_ratio: e.min_margin_ratio,
         closest_margin_headroom: e.closest_headroom,
         first_liquidation_ms: e.first_liquidation_ms,
+        exercise: e.xstats,
     })
 }
 
@@ -1274,11 +1504,13 @@ mod tests {
     /// v0 (SO-439, `4af188ad`) summary on this synthetic path, captured
     /// before the event-queue rewrite. PR K reproduced it to 1e-9 with
     /// fills at the decision price; PR L executes on the bar path (the
-    /// venue's truth, one bar ahead of the 2 s-lagged decision price),
-    /// funds at the venue mark and posts isolated margin, so the
-    /// economics move by the fill-price difference only: same turns and
-    /// option fills, hedge fills within a few percent, NAV within 1% of
-    /// NAV0. Doc 10 §2 turnover/cost tables rest on this reproduction.
+    /// venue's truth) and posts isolated margin; PR M replaces the
+    /// at-expiry settlement with the near-expiry sweep through the
+    /// modeled route (exercised up to 24 h early, sold into the ladder,
+    /// the hedge closed on detection), so the option leg and the hedge
+    /// fill count move. What must not move: turns, option fills, the
+    /// premium paid; NAV stays within 2% of NAV0 and every ITM option is
+    /// exercised. Doc 10 §2 turnover/cost tables rest on this.
     #[test]
     fn zero_latency_taker_replay_stays_within_tolerance_of_v0() {
         let s = scenario();
@@ -1290,22 +1522,24 @@ mod tests {
         assert_eq!(m.execution_assumption, "taker_only");
         assert!(m.labels.taker_only);
         assert_eq!((m.turns, m.fills, m.declines_stale), (3, 3, 1));
-        assert!((m.hedge_fills as i64 - 207).abs() <= 10, "{}", m.hedge_fills);
-        assert!(close(m.nav_end, 884_850.14, 0.01), "{}", m.nav_end);
+        assert!((m.hedge_fills as i64 - 207).abs() <= 40, "{}", m.hedge_fills);
+        assert!(close(m.nav_end, 884_850.14, 0.02), "{}", m.nav_end);
         assert!(close(m.premium_paid, 509_138.52, 0.01), "{}", m.premium_paid);
-        assert!(close(m.option_payoff, 29_080.68, 0.05), "{}", m.option_payoff);
         assert!(close(m.funding_paid, -17_697.32, 0.05), "{}", m.funding_paid);
-        assert!(close(m.hedge_fees, 11_997.53, 0.05), "{}", m.hedge_fees);
-        assert!(close(m.max_drawdown, 0.1411, 0.05), "{}", m.max_drawdown);
-        assert!(close(m.mean_sigma_realized, 0.435_539_138_349_790_4, 1e-9), "{}", m.mean_sigma_realized);
+        assert!(close(m.hedge_fees, 11_997.53, 0.20), "{}", m.hedge_fees);
+        assert!(close(m.max_drawdown, 0.1411, 0.15), "{}", m.max_drawdown);
+        assert_eq!(m.exercise_stats.expired_unexercised_itm, 0);
+        assert!(m.exercise_stats.paths.contains_key("call_cash"), "{:?}", m.exercise_stats);
+        assert!(close(m.mean_sigma_realized, 0.435_539_138_349_790_4, 0.01), "{}", m.mean_sigma_realized);
         let mut s = scenario();
         s.flow.call_share = 0.5;
         s.limits.put_premium_max = 0.30;
         let b = run(&s, &bars, &funding, &[]).unwrap();
         let m = crate::report::summarize(&s, &b);
         assert_eq!(m.fills, 6);
-        assert!((m.hedge_fills as i64 - 199).abs() <= 10, "{}", m.hedge_fills);
-        assert!(close(m.nav_end, 861_564.87, 0.01), "{}", m.nav_end);
+        assert!((m.hedge_fills as i64 - 199).abs() <= 40, "{}", m.hedge_fills);
+        assert!(close(m.nav_end, 861_564.87, 0.03), "{}", m.nav_end);
+        assert_eq!(m.exercise_stats.expired_unexercised_itm, 0, "{:?}", m.exercise_stats);
     }
 
     /// Doc 08 P2 gate: a known synthetic week replays with source row
@@ -1559,6 +1793,124 @@ mod tests {
         assert_cash_identity(&s, &out2);
         let m = crate::report::summarize(&s, &out2);
         assert_eq!(m.topup_rejects, out2.ledger.lines.topup_rejects);
+    }
+
+    // ── doc 08 P3 gates (PR M) ─────────────────────────────────────────
+
+    /// A rally leaves the calls ITM: the near-expiry sweep exercises every
+    /// slice before expiry (cash first, then the quote flash once the free
+    /// settlement is spent), each slice reconciles to the ledger, the
+    /// non-atomic hedge close follows each detection, and nothing ITM
+    /// expires unexercised. With the PTB hazard at 1 every slice fails
+    /// atomically: no balance moves, the options expire worthless, and
+    /// the miss is reported.
+    #[test]
+    fn call_sweep_exercises_itm_before_expiry_and_failed_ptbs_move_nothing() {
+        let mut s = scenario();
+        s.to = "2025-02-05".into();
+        s.flow.tenor_days = 14.0;
+        let start = crate::data::date_start_ms(&s.from).unwrap();
+        let mut bars = synthetic_bars(36, start);
+        for b in bars.iter_mut().filter(|b| b.ts_ms >= start + 7 * MS_PER_DAY) {
+            for px in [&mut b.open, &mut b.high, &mut b.low, &mut b.close] {
+                *px *= 1.3;
+            }
+        }
+        let funding = funding_rows(36, start);
+        let out = run(&s, &bars, &funding, &[]).unwrap();
+        let x = &out.exercise;
+        assert!(x.paths.get("call_cash").copied().unwrap_or(0) > 0, "{x:?}");
+        assert!(x.paths.get("call_quote_flash").copied().unwrap_or(0) > 0, "cash runs out inside the ladder: {x:?}");
+        assert_eq!(x.expired_unexercised_itm, 0, "{x:?}");
+        assert_eq!(x.ptb_failed, 0);
+        assert!(x.hedge_closes > 0);
+        assert_eq!(x.hedge_close_delay_ms_mean(), Some(0.0), "zero latency: the close is immediate");
+        assert!(out.ledger.lines.option_payoff > 0.0);
+        assert!(out.settled.iter().any(|o| o.payoff > 0.0 && !o.is_put));
+        assert_cash_identity(&s, &out);
+        let m = crate::report::summarize(&s, &out);
+        assert_eq!(m.labels.exercise, "american_sweep");
+        assert!(m.exercise_min_profit_rule.starts_with("max(USD 10"));
+        assert!(m.flash_capacity_assumed);
+        // Latency on: the close follows detection by the strategy latency
+        // plus the configured extra delay, and it is reported.
+        let mut l = s.clone();
+        l.latency = LatencyConfig::default();
+        l.exercise.hedge_close_delay_ms = 5_000;
+        let out_l = run(&l, &bars, &funding, &[]).unwrap();
+        assert!(out_l.exercise.hedge_close_delay_ms_mean().is_some_and(|d| d >= 5_000.0), "{:?}", out_l.exercise);
+        assert_eq!(out_l.exercise.expired_unexercised_itm, 0);
+        assert_cash_identity(&l, &out_l);
+        // Every PTB fails: atomic, nothing moves, the ITM value is lost.
+        let mut f = s.clone();
+        f.exercise.ptb_failure_prob = 1.0;
+        let out_f = run(&f, &bars, &funding, &[]).unwrap();
+        let xf = &out_f.exercise;
+        assert!(xf.ptb_failed > 0 && xf.paths.is_empty(), "{xf:?}");
+        assert!(xf.expired_unexercised_itm > 0 && xf.expired_itm_value > 0.0, "{xf:?}");
+        assert_eq!(out_f.ledger.lines.option_payoff, 0.0);
+        assert_eq!(out_f.ledger.lines.exercise_turnover_notional, 0.0);
+        assert_eq!(xf.hedge_closes, 0);
+        assert_cash_identity(&f, &out_f);
+        assert_eq!(out_f.ledger.lines.fills, out.ledger.lines.fills);
+    }
+
+    /// A crash leaves the puts ITM: the sweep routes every slice through
+    /// the live three-path waterfall — vault underlying when the vault
+    /// holds it, else the base flash while the pool has base, else the
+    /// quote flash, else a capacity reject that leaves the put to expire —
+    /// and each reconciles to the ledger.
+    #[test]
+    fn put_sweep_routes_like_the_live_waterfall() {
+        let mut base = scenario();
+        base.to = "2025-02-05".into();
+        base.flow.tenor_days = 14.0;
+        base.flow.call_share = 0.0;
+        base.limits.put_premium_max = 0.30;
+        let start = crate::data::date_start_ms(&base.from).unwrap();
+        let mut bars = synthetic_bars(36, start);
+        for b in bars.iter_mut().filter(|b| b.ts_ms >= start + 7 * MS_PER_DAY) {
+            for px in [&mut b.open, &mut b.high, &mut b.low, &mut b.close] {
+                *px *= 0.7;
+            }
+        }
+        let funding = funding_rows(36, start);
+        let run_with = |f: &dyn Fn(&mut Scenario)| {
+            let mut s = base.clone();
+            f(&mut s);
+            let out = run(&s, &bars, &funding, &[]).unwrap();
+            assert_cash_identity(&s, &out);
+            out
+        };
+        // Default: no vault underlying, base capacity present → base flash.
+        let a = run_with(&|_| {});
+        assert!(a.exercise.paths.get("base_flash").copied().unwrap_or(0) > 0, "{:?}", a.exercise);
+        assert!(!a.exercise.paths.contains_key("vault_underlying"));
+        assert_eq!(a.exercise.expired_unexercised_itm, 0, "{:?}", a.exercise);
+        assert!(a.ledger.lines.option_payoff > 0.0);
+        assert!(a.exercise.hedge_closes > 0);
+        // Vault holds the underlying → the first route.
+        let b = run_with(&|s| s.exercise.vault_free_underlying_units = 5_000_000.0);
+        assert!(b.exercise.paths.get("vault_underlying").copied().unwrap_or(0) > 0, "{:?}", b.exercise);
+        assert!(!b.exercise.paths.contains_key("base_flash"));
+        // No base in the pool → quote flash.
+        let c = run_with(&|s| s.exercise.pool_base_balance_units = 0.0);
+        assert!(c.exercise.paths.get("quote_flash").copied().unwrap_or(0) > 0, "{:?}", c.exercise);
+        assert!(!c.exercise.paths.contains_key("base_flash"));
+        // Neither flash side → capacity reject; the puts expire worthless.
+        let d = run_with(&|s| {
+            s.exercise.pool_base_balance_units = 0.0;
+            s.exercise.pool_quote_balance = 0.0;
+        });
+        assert!(d.exercise.paths.is_empty(), "{:?}", d.exercise);
+        assert!(d.exercise.rejects.get("capacity").copied().unwrap_or(0) > 0, "{:?}", d.exercise);
+        assert!(d.exercise.expired_unexercised_itm > 0);
+        assert!(d.stats.flash_cap_hits > 0);
+        assert_eq!(d.ledger.lines.option_payoff, 0.0);
+        // The same three decisions, at the same price, reconcile the same:
+        // the route cost does not depend on which balance funds it.
+        assert!((a.ledger.lines.option_payoff - b.ledger.lines.option_payoff).abs() < 1e-6);
+        assert!((a.ledger.lines.option_payoff - c.ledger.lines.option_payoff).abs() < 1e-6);
     }
 
     /// Passive execution assumptions run end to end: orders rest, time
