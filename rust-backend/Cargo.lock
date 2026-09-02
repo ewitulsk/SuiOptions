@@ -373,6 +373,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+dependencies = [
+ "derive_arbitrary",
+]
+
+[[package]]
 name = "ark-bn254"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2049,6 +2058,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "collector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "data-room-adapters",
+ "data-room-schema",
+ "data-room-store",
+ "flate2",
+ "futures",
+ "hex",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "object_store 0.12.5",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2698,6 +2736,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "data-room-adapters"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "csv",
+ "data-room-schema",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "zip",
+]
+
+[[package]]
+name = "data-room-schema"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "chrono",
+ "parquet",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "data-room-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "object_store 0.12.5",
+ "url",
+]
+
+[[package]]
 name = "debugserver-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2849,6 +2923,17 @@ name = "derive-where"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d08b3a0bcc0d079199cd476b2cae8435016ec11d1c0986c6901c5ac223041534"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "derive_arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4148,6 +4233,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "gold"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "bytes",
+ "chrono",
+ "clap",
+ "data-room-schema",
+ "data-room-store",
+ "flate2",
+ "futures",
+ "object_store 0.12.5",
+ "parquet",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "governor"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4537,7 +4646,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -5885,11 +5994,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b166dea96003ee2531cf14833efedced545751d800f03535801d833313f8c15"
 dependencies = [
  "base64 0.22.1",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "indexmap 2.14.0",
+ "ipnet",
  "metrics",
  "metrics-util",
  "quanta",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7059,6 +7174,32 @@ name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
+
+[[package]]
+name = "normalizer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "bytes",
+ "chrono",
+ "clap",
+ "data-room-adapters",
+ "data-room-schema",
+ "data-room-store",
+ "flate2",
+ "futures",
+ "object_store 0.12.5",
+ "parquet",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zip",
+]
 
 [[package]]
 name = "notify"
@@ -9137,7 +9278,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -12198,8 +12339,12 @@ checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite 0.24.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -12405,7 +12550,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots",
+ "webpki-roots 1.0.7",
  "zstd 0.13.3",
 ]
 
@@ -12785,6 +12930,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.6",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
@@ -13079,6 +13226,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "vision-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "data-room-schema",
+ "data-room-store",
+ "futures",
+ "hex",
+ "object_store 0.12.5",
+ "reqwest",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "vol-forecast"
 version = "0.1.0"
 dependencies = [
@@ -13282,6 +13449,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -14092,6 +14268,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zip"
+version = "2.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "crossbeam-utils",
+ "displaydoc",
+ "flate2",
+ "indexmap 2.14.0",
+ "memchr",
+ "thiserror 2.0.18",
+ "zopfli",
+]
+
+[[package]]
 name = "zlib-rs"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14102,6 +14295,18 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zopfli"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f05cd8797d63865425ff89b5c4a48804f35ba0ce8d125800027ad6017d2b5249"
+dependencies = [
+ "bumpalo",
+ "crc32fast",
+ "log",
+ "simd-adler32",
+]
 
 [[package]]
 name = "zstd"

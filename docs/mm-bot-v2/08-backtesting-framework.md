@@ -15,8 +15,8 @@ Companion docs:
 - `00-plan.md` — the strategy contract.
 - `07-backtest-data-and-cost-findings.md` — call-only measurements and data
   findings that this framework must reproduce and extend.
-- `data-room/docs/sui-collection-plan.md` — source collection.
-- `data-room/docs/l2-silver-schema-plan.md` — depth normalization.
+- `rust-backend/data-room/docs/sui-collection-plan.md` — source collection.
+- `rust-backend/data-room/docs/l2-silver-schema-plan.md` — depth normalization.
 
 ---
 
@@ -301,7 +301,7 @@ Collect and retain:
 
 - Bluefin trades, L2, mark/ticker, funding, and venue status. Bronze runs
   since 2026-08-15; the S5 silver normalizer
-  (`data-room/docs/l2-silver-schema-plan.md`) replays it when it lands.
+  (`rust-backend/data-room/docs/l2-silver-schema-plan.md`) replays it when it lands.
 - Bluefin funding settlements: add a REST funding-rate-history poller and
   derive settlement events in silver from the ticker stream's
   `nextFundingTimeAtMillis` rollovers; cross-check the two.
@@ -1210,7 +1210,7 @@ backtesting (§4.6); the Deribit/DVOL options history is used as-is.
 | Bluefin L2, trades, mark/ticker, funding, venue status | Bronze accumulating since 2026-08-15; silver is S5 (planned, not started); funding settlements need the §3.2 poller/derivation; calibration depth grows with the capture window |
 | Sui router/DeepBook bidirectional quote ladder | Sell-base rungs accumulating since 2026-08-15; the buy-base direction (put exercise) is not collected yet — see §3.2 |
 | DeepBook base/quote pool balances | No poller exists; backtests assume configured flash capacity (§4.6) and label it; if live capacity binds, switch flash venue |
-| L2 silver schema | `data-room/docs/l2-silver-schema-plan.md` |
+| L2 silver schema | `rust-backend/data-room/docs/l2-silver-schema-plan.md` |
 | Historical SUI BBO | Binance `bookTicker` 2023-05 to 2024-04 only; the window predates both the doc 07 measurement regime and the 2025-10-10 cascade, and no free replacement exists — proxy-era passive fills are sensitivity-only (§7.2) |
 | Staking yield | Shared config initially; historical series later; affects call and put pricing/exercise |
 | Settlement cash yield | Policy/config series; sets the return hurdle floor and idle-cash opportunity cost |

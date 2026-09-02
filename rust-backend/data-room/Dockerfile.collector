@@ -1,0 +1,40 @@
+# Data-room collector: long-lived ws → bronze spool → S3 daemon.
+# Build context = rust-backend/ (the merged workspace root, SO-449), with
+# `--file rust-backend/data-room/Dockerfile.collector`. NOT data-room/ and
+# NOT the repo root.
+#
+# Builder runs under the target platform (linux/amd64 on the x86 GH
+# runner — same convention as rust-backend/deployment/bake.hcl). Do NOT
+# add `--platform=$BUILDPLATFORM`.
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Scoped copy: the workspace root manifest + lock and the data-room tree
+# only — never the protocol crates. scope-workspace.sh then trims the
+# workspace `members` to the data-room subset so cargo resolves no protocol
+# crate and clones no Sui git dependency (see the script for the why).
+COPY Cargo.toml Cargo.lock ./
+COPY data-room/ data-room/
+RUN sh data-room/scope-workspace.sh
+# `release-dataroom` = release + thin LTO (rust-backend/Cargo.toml). No
+# `--locked`: the scoped workspace prunes the full-workspace lock.
+RUN cargo build --profile release-dataroom -p collector
+
+FROM debian:bookworm-slim
+# The data-room crates are rustls-everywhere, so no libssl3/libpq5 today —
+# ca-certificates for TLS roots (S3 + exchange websockets), curl for
+# healthchecks. If a crate ever links a native lib, its runtime .so must
+# be added HERE (the libpq5 lesson, SO-360).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/target/release-dataroom/collector /usr/local/bin/collector
+
+# Config is bind-mounted by deploy/compose.yml; COLLECTOR_CONFIG lets
+# compose repoint it without an image rebuild.
+ENV COLLECTOR_CONFIG=/app/collector.toml
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/collector --config ${COLLECTOR_CONFIG}"]

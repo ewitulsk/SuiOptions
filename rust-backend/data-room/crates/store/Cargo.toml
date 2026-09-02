@@ -1,0 +1,9 @@
+[package]
+name = "data-room-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }

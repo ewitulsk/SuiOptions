@@ -1,0 +1,34 @@
+# Data-room batch image: vision-sync + normalizer + gold in ONE image
+# (one registry repo instead of three — spec §10.2). Build context =
+# rust-backend/ (the merged workspace root, SO-449), with
+# `--file rust-backend/data-room/Dockerfile.batch`.
+#
+# No ENTRYPOINT: the binary + subcommand are chosen by the invocation —
+# systemd timers run `docker compose run --rm batch <binary> <args>`
+# (see deploy/systemd/), so compose's command becomes argv directly.
+#
+# Builder platform convention + scoped-copy rationale: see
+# Dockerfile.collector.
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev clang cmake git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY data-room/ data-room/
+RUN sh data-room/scope-workspace.sh
+RUN cargo build --profile release-dataroom -p vision-sync -p normalizer -p gold
+
+FROM debian:bookworm-slim
+# rustls-everywhere crates: no libssl3/libpq5. Native-lib runtime .so's
+# go here if a crate ever needs one (the libpq5 lesson, SO-360).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /src/target/release-dataroom/vision-sync /usr/local/bin/vision-sync
+COPY --from=builder /src/target/release-dataroom/normalizer  /usr/local/bin/normalizer
+COPY --from=builder /src/target/release-dataroom/gold        /usr/local/bin/gold
+
+CMD ["/bin/sh", "-c", "echo 'usage: docker compose run --rm batch {vision-sync|normalizer|gold} <args>' >&2; exit 64"]

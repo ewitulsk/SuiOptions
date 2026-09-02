@@ -223,6 +223,62 @@ class TestGoServices(unittest.TestCase):
                 )
 
 
+class TestDataRoom(unittest.TestCase):
+    """data-room (SO-449) shares the workspace but never rolls a service."""
+
+    DR_SRC = "rust-backend/data-room/collector/src/main.rs"
+    DR_MANIFEST = "rust-backend/data-room/gold/Cargo.toml"
+
+    def test_data_room_change_selects_nothing(self):
+        self.assertEqual(affected.affected_services([self.DR_SRC, self.DR_MANIFEST]), [])
+
+    def test_data_room_crates_are_not_workspace_crates(self):
+        """`crate_globs()` must not mistake data-room/crates/* for crates/*."""
+        crates = affected._workspace_crates(REPO_ROOT)
+        for name in ("data-room-schema", "data-room-adapters", "data-room-store"):
+            self.assertNotIn(name, crates)
+
+    def test_no_service_manifest_depends_on_a_data_room_crate(self):
+        ws = tomllib.loads((RUST / "Cargo.toml").read_text())
+        data_room = {
+            n for n, s in ws["workspace"]["dependencies"].items()
+            if isinstance(s, dict) and str(s.get("path", "")).startswith("data-room/")
+        }
+        self.assertTrue(data_room, "expected data-room crates in [workspace.dependencies]")
+        for svc in affected.SERVICE_GLOBS:
+            m = tomllib.loads((RUST / "services" / svc / "Cargo.toml").read_text())
+            self.assertFalse(
+                data_room & affected._dep_names(m),
+                f"{svc} depends on a data-room crate; the lockfile carve-out is no longer safe",
+            )
+
+    def test_lockfile_with_only_data_room_changes_selects_nothing(self):
+        got = affected.affected_services([self.DR_MANIFEST, "rust-backend/Cargo.lock"])
+        self.assertEqual(got, [])
+
+    def test_lockfile_with_data_room_and_non_rust_paths_selects_nothing(self):
+        got = affected.affected_services(
+            [self.DR_MANIFEST, "rust-backend/Cargo.lock", "docs/data-room-spec.md", "README.md"]
+        )
+        self.assertEqual(got, [])
+
+    def test_lockfile_alone_still_rebuilds_all(self):
+        got = affected.affected_services(["rust-backend/Cargo.lock"])
+        self.assertEqual(got, sorted(affected.ALL_SERVICES))
+
+    def test_lockfile_with_data_room_and_protocol_path_rebuilds_all(self):
+        got = affected.affected_services(
+            [self.DR_MANIFEST, "rust-backend/Cargo.lock", "rust-backend/crates/pricing/src/lib.rs"]
+        )
+        self.assertEqual(got, sorted(affected.ALL_SERVICES))
+
+    def test_root_manifest_change_still_rebuilds_all(self):
+        """A data-room dep declared at workspace level still rolls everything:
+        the root manifest can move a version every protocol image uses."""
+        got = affected.affected_services([self.DR_MANIFEST, "rust-backend/Cargo.toml"])
+        self.assertEqual(got, sorted(affected.ALL_SERVICES))
+
+
 class TestOutputContract(unittest.TestCase):
     """The workflow short-circuits on `[]`; do not change this."""
 

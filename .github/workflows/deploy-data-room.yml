@@ -14,7 +14,7 @@ on:
   push:
     branches: [staging]
     paths:
-      - 'data-room/**'
+      - 'rust-backend/data-room/**'
       - '.github/workflows/deploy-data-room.yml'
   workflow_dispatch:
     inputs:
@@ -75,7 +75,10 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Context is data-room/ (its own workspace), not the repo root.
+      # Context is rust-backend/ (the merged workspace root, SO-449), NOT
+      # data-room/ and not the repo root: the Dockerfiles copy only the root
+      # manifest + lock and data-room/, then scope the workspace down to the
+      # data-room members (data-room/scope-workspace.sh).
       # linux/amd64 native on the x86 runner — same platform stance as
       # deployment/bake.hcl; per-image gha cache scopes.
       - name: Build & push data-room-${{ matrix.image }}
@@ -83,8 +86,8 @@ jobs:
           ECR: ${{ env.ECR_REGISTRY }}
           IMAGE_TAG: ${{ needs.tag.outputs.tag }}
         run: |
-          docker buildx build data-room \
-            --file "data-room/Dockerfile.${{ matrix.image }}" \
+          docker buildx build rust-backend \
+            --file "rust-backend/data-room/Dockerfile.${{ matrix.image }}" \
             --platform linux/amd64 \
             --tag "$ECR/options/data-room-${{ matrix.image }}:$IMAGE_TAG" \
             --cache-from "type=gha,scope=data-room-${{ matrix.image }}" \
@@ -122,7 +125,7 @@ jobs:
           ssh-keyscan -H "$HOST_ADDR" >> ~/.ssh/known_hosts 2>/dev/null
 
       # compose.yml + collector.toml + the systemd units are provisioned on
-      # the host out-of-band (by hand, from data-room/deploy/); this
+      # the host out-of-band (by hand, from rust-backend/data-room/deploy/); this
       # workflow only moves the tag — spec §10.3.
       - name: SSH deploy
         env:

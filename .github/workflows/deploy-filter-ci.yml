@@ -56,3 +56,13 @@ jobs:
             rust-backend/crates/indexer-graphql/src/lib.rs)
           echo "$out" | python3 -c 'import json,sys; assert "mm-bot" in json.load(sys.stdin)'
           echo "ok: $out"
+          # data-room (SO-449) shares the workspace + lockfile but never
+          # rolls a protocol service: a data-room-only change, even with
+          # lockfile churn, must select nothing. A bare lockfile still
+          # rebuilds all.
+          out=$(python3 rust-backend/deployment/affected.py \
+            rust-backend/data-room/collector/src/main.rs rust-backend/Cargo.lock)
+          test "$out" = "[]" || { echo "data-room + lockfile gave '$out', want []"; exit 1; }
+          out=$(python3 rust-backend/deployment/affected.py rust-backend/Cargo.lock)
+          echo "$out" | python3 -c 'import json,sys; assert "mm-bot" in json.load(sys.stdin)'
+          echo "ok: data-room carve-out"
