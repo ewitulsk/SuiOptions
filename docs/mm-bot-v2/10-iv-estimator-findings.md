@@ -1,6 +1,6 @@
 # IV estimator findings (doc 10 — G6, SO-441)
 
-Status: **FIRST PASS 2026-09-02.** Produced by `desk-backtester` v0
+Status: **SECOND PASS 2026-09-02** (§4.2 adds the G5 forecaster). First pass 2026-09-02. Produced by `desk-backtester` v0
 (SO-439) against the lake mirror. Every number below is a conditional
 simulation: `proxy_oracle`, `proxy_venue` (Binance spot/perp as the path
 and the mark), `taker_only`, `no_resale`, `constant_flow`, `exercise=at_expiry`.
@@ -137,7 +137,56 @@ put side removes most of the directional windfall the calls-only book
 collected in the crash: the option leg lost 111k and the hedge made 3k.
 This is the shape the capacity solver (PR N) will search over.
 
-## 5. Recommended defaults (first pass)
+## 4.2 Second pass: the G5 HAR forecaster (`estimator.kind = "har"`, q_bid 0.35)
+
+Same scenarios, the SO-440 forecaster (HAR-RV-CJ, per-asset sampling
+interval, quantile bid at q = 0.35, no max-lean, no risk premium term
+because the quantile replaces it) in place of the two-window blend.
+
+| scenario | estimator | fills | mean σ paid | mean σ realized | bias | gross return | max DD | turnover ×NAV/30d |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| SUI calls, per turn, Aug 25–Jul 26 | windows (rp 0.05, lean 0.8) | 9 | 0.684 | 0.871 | +0.187 | +33.0 % | 0.341 | 11.8 |
+| SUI calls, per turn | **har q0.35** | 8 | 0.613 | 0.926 | +0.314 | +21.8 % | **0.214** | 10.0 |
+| BTC calls, per turn, 2022–2026 | windows | 52 | 0.463 | 0.497 | +0.034 | −1.9 % | 0.428 | 13.0 |
+| BTC calls, per turn | **har q0.35** | 56 | 0.432 | 0.503 | +0.071 | **+65.7 %** | **0.247** | 18.0 |
+| BTC calls, per turn | DVOL | 55 | 0.551 | 0.498 | −0.053 | −76.8 % | 0.772 | 4.7 |
+| SUI mixed daily, Aug 25–Jul 26 | windows | 725 | 0.834 | 0.859 | +0.025 | −13.0 % | 0.204 | 4.9 |
+| SUI mixed daily | har q0.35 | 726 | 0.843 | 0.859 | +0.016 | −21.8 % | 0.346 | 4.5 |
+
+Reading:
+
+- **On BTC the forecaster is the difference between flat and profitable.**
+  Over 56 turns it bid 7 vol points under realized on average (the
+  quantile doing its job), took every turn (zero capacity declines
+  because it never chased spikes into the cap), and cut the drawdown from
+  43 to 25 percent. This is the first result in this document that clears
+  the doc 08 §0.4 hurdle on a multi-year sample, and it is still one
+  asset and one estimator setting; walk-forward folds (PR O) decide
+  whether it holds.
+- **On SUI calls it traded return for drawdown.** Lower struck sigma
+  (0.61 versus 0.68) and one more capacity decline; the crash regime paid
+  the aggressive blend more, but the forecaster's book drew down 21
+  instead of 34 percent. That is the buyer's asymmetry again: bidding low
+  costs volume, not money.
+- **The mixed book is not an estimator problem.** Both estimators price
+  the put side within 2 vol points of realized and both lose; the put leg
+  loses on delivery costs and the hedge whipsaw in a −82 percent year. It
+  is a hedge-band and put-exercise question for PRs L and M, not a σ
+  question.
+
+## 5. Recommended defaults (second pass)
+
+- Adopt `estimator = "har"` with `q_bid = 0.35` as the staging default
+  once the walk-forward runner (PR O) confirms the BTC result out of
+  sample; until then it runs in shadow on `/desk/state` (SO-440 wires it
+  behind a flag, default `windows`).
+- Drop the max-lean lift: it never helped, and the forecaster's post-shock
+  regime replaces it.
+- Keep `risk_premium` at 0 under `har` (the quantile is the premium).
+- Keep bands at 15–20 percent; the forecaster does not change the doc 07
+  turnover picture.
+
+## 5.1 Recommended defaults (first pass, superseded)
 
 - Keep `band_pct_nav` 15–20 and `band_wide_pct_nav` 25 (SO-436 already
   applied); nothing here argues for tighter.
