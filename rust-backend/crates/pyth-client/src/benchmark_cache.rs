@@ -38,6 +38,12 @@ const ANNUALIZATION_DAYS: f64 = 365.0;
 /// Minimum spacing between Benchmarks requests. The public cap is ~10 req per
 /// 10s; one request per ~1.1s stays comfortably under it.
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(1_100);
+/// How long a failed day fetch is remembered before it's retried. Without
+/// this, a day Benchmarks keeps 401/429-ing (observed 2026-09-01: keyed
+/// requests rate-limited hard from datacenter IPs) is re-attempted on EVERY
+/// sigma call, so each call pays the full paced walk over the same doomed
+/// days instead of answering from the closes it already holds.
+const FAILED_DAY_COOLDOWN: Duration = Duration::from_secs(300);
 
 /// Shared client for realized-vol lookups against Pyth Benchmarks. Holds the
 /// immutable-close cache and the request pacer; construct one and share it
@@ -46,8 +52,12 @@ pub struct BenchmarkVol {
     http: reqwest::Client,
     benchmarks_url: String,
     // (feed, day_boundary_secs) -> close price. Daily closes never change, so
-    // entries are kept for the process lifetime.
+    // entries are kept for the process lifetime. A feed absent from a
+    // SUCCESSFUL day response is stored as NaN — "no observation exists" is
+    // itself immutable and must not be refetched forever.
     cache: Mutex<HashMap<(PriceFeedId, i64), f64>>,
+    // day -> when its last fetch failed; skipped until FAILED_DAY_COOLDOWN.
+    failed_days: Mutex<HashMap<i64, Instant>>,
     // Earliest instant the next request may start — serializes and paces all
     // requests from this client.
     next_allowed: tokio::sync::Mutex<Option<Instant>>,
@@ -59,6 +69,7 @@ impl BenchmarkVol {
             http,
             benchmarks_url: benchmarks_url.into(),
             cache: Mutex::new(HashMap::new()),
+            failed_days: Mutex::new(HashMap::new()),
             next_allowed: tokio::sync::Mutex::new(None),
         }
     }
@@ -110,17 +121,35 @@ impl BenchmarkVol {
             if missing.is_empty() {
                 continue;
             }
+            // A day that failed recently is skipped, not retried — see
+            // FAILED_DAY_COOLDOWN. The sigma below just uses a shorter series.
+            {
+                let failed = self.failed_days.lock().unwrap();
+                if let Some(at) = failed.get(&day) {
+                    if at.elapsed() < FAILED_DAY_COOLDOWN {
+                        continue;
+                    }
+                }
+            }
             match self.fetch_day(&missing, day).await {
                 Ok(found) => {
                     let mut cache = self.cache.lock().unwrap();
-                    for (feed, price) in found {
-                        cache.insert((feed, day), price);
+                    for (feed, price) in &found {
+                        cache.insert((*feed, day), *price);
                     }
+                    // Feeds the (successful) response did not cover have no
+                    // observation for this day — tombstone them so they are
+                    // never refetched. NaN is filtered out of the closes.
+                    let served: std::collections::HashSet<PriceFeedId> =
+                        found.iter().map(|(f, _)| *f).collect();
+                    for feed in missing.iter().filter(|f| !served.contains(f)) {
+                        cache.insert((*feed, day), f64::NAN);
+                    }
+                    self.failed_days.lock().unwrap().remove(&day);
                 }
                 Err(e) => {
-                    // Leave the day uncached (retried next tick); a gap just
-                    // shortens that feed's series below.
                     debug!(day, error = %format!("{e:#}"), "benchmark day fetch failed");
+                    self.failed_days.lock().unwrap().insert(day, Instant::now());
                 }
             }
         }
@@ -134,6 +163,7 @@ impl BenchmarkVol {
                 let closes: Vec<f64> = boundaries
                     .iter()
                     .filter_map(|day| cache.get(&(feed, *day)).copied())
+                    .filter(|close| close.is_finite())
                     .collect();
                 (feed, sigma_from_closes(feed, &closes))
             })
