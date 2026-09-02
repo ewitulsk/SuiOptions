@@ -73,10 +73,29 @@ pub trait HedgeVenue: Send + Sync {
     /// Margin headroom as a fraction of the position's requirement
     /// (1.0 = fully free; 0.0 = at margin call).
     async fn margin_headroom(&self) -> Result<f64>;
-    /// Cumulative realized P&L on the venue (settlement raw units). Feeds
-    /// the scalp attribution line; venues without statements report 0.
+    /// Cumulative realized P&L on the venue (settlement raw units), fills
+    /// only. Feeds the scalp attribution line; venues without statements
+    /// report 0.
     async fn realized_pnl(&self) -> Result<f64> {
         Ok(0.0)
+    }
+    /// Accrue funding on the current SIGNED position up to `now_ms` at
+    /// `mark` and return the cash newly accrued (positive = PAID, i.e. a
+    /// long under positive funding). Live venues settle on their own
+    /// schedule and report the settled amount here; the paper venue
+    /// accrues continuously (SO-438, doc 08 §4.2/§7.4).
+    async fn accrue_funding(&self, _now_ms: u64, _mark: f64) -> Result<f64> {
+        Ok(0.0)
+    }
+    /// Cumulative funding paid (positive) on the venue.
+    async fn funding_paid(&self) -> Result<f64> {
+        Ok(0.0)
+    }
+    /// Drain asynchronous outcomes (partial fills, late fills, cancels)
+    /// that arrived since the last call — the event half of the seam
+    /// (SO-438). The paper venue resolves its working remainders here.
+    async fn poll_events(&self) -> Result<Vec<HedgeEvent>> {
+        Ok(Vec::new())
     }
 }
 
@@ -120,6 +139,9 @@ pub struct HedgeConfig {
     pub margin_financing_rate_annual: f64,
     /// Initial margin fraction of hedge notional at the venue.
     pub initial_margin_fraction: f64,
+    /// Cancel a working hedge order that has not fully filled after this
+    /// long (SO-438). The rebalancer re-plans on the next tick.
+    pub order_timeout_secs: u64,
 }
 
 impl HedgeConfig {
@@ -152,6 +174,7 @@ impl Default for HedgeConfig {
             rebalance_turnover_per_year: 0.0,
             margin_financing_rate_annual: 0.0,
             initial_margin_fraction: 0.10,
+            order_timeout_secs: 60,
         }
     }
 }
@@ -168,6 +191,10 @@ pub struct HedgeVenueToml {
     pub slippage_bps: Option<f64>,
     /// Defaults to `paper_funding_rate_annual`.
     pub funding_rate_annual: Option<f64>,
+    /// Paper only: fraction of each order filled synchronously; the
+    /// remainder rests and fills on the next `poll_events` (default 1.0 =
+    /// instant full fills). Lets staging exercise the partial-fill path.
+    pub fill_fraction: Option<f64>,
 }
 
 /// A resolved venue to instantiate (per underlying market).
@@ -176,6 +203,7 @@ pub struct VenueSpec {
     pub name: String,
     pub slippage_bps: f64,
     pub funding_rate_annual: f64,
+    pub fill_fraction: f64,
 }
 
 impl HedgeConfig {
@@ -189,6 +217,7 @@ impl HedgeConfig {
                 name: "paper".into(),
                 slippage_bps: self.paper_slippage_bps,
                 funding_rate_annual: self.paper_funding_rate_annual,
+                fill_fraction: 1.0,
             }]);
         }
         let mut out = Vec::with_capacity(self.venues.len());
@@ -211,6 +240,7 @@ impl HedgeConfig {
                 funding_rate_annual: v
                     .funding_rate_annual
                     .unwrap_or(self.paper_funding_rate_annual),
+                fill_fraction: v.fill_fraction.unwrap_or(1.0).clamp(0.0, 1.0),
             });
         }
         Ok(out)
@@ -255,6 +285,133 @@ pub fn rebalance_target(
     }
 }
 
+/// The order to submit this tick, if any (SO-438): the signed size that
+/// brings `position + working` to the neutral target when the net delta
+/// INCLUDING unfilled working orders is outside the band. Counting the
+/// working remainder stops a slow fill from being re-submitted every tick.
+pub fn plan_hedge_order(
+    book_delta_units: f64,
+    perp_position_units: f64,
+    working_units: f64,
+    band_units: f64,
+) -> Option<f64> {
+    let effective = perp_position_units + working_units;
+    let target = rebalance_target(book_delta_units, effective, band_units)?;
+    let size = target - effective;
+    if size == 0.0 {
+        None
+    } else {
+        Some(size)
+    }
+}
+
+/// One order the rebalancer submitted that the venue has not finished
+/// resolving.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorkingOrder {
+    pub size_units: f64,
+    pub filled_units: f64,
+    pub submitted_ms: u64,
+}
+
+impl WorkingOrder {
+    pub fn remaining_units(&self) -> f64 {
+        self.size_units - self.filled_units
+    }
+}
+
+/// The rebalancer's view of its working orders (SO-438). Pure: fed by
+/// the events a venue returns synchronously and by `poll_events`.
+/// Fill-after-cancel races resolve in the venue's favour: a fill for an
+/// order this tracker already dropped is still returned to the caller,
+/// because the venue's position already reflects it.
+#[derive(Debug, Default)]
+pub struct OpenOrders {
+    orders: std::collections::HashMap<OrderId, WorkingOrder>,
+}
+
+impl OpenOrders {
+    pub fn submit(&mut self, order: &HedgeOrder, now_ms: u64) {
+        self.orders.insert(
+            order.id,
+            WorkingOrder { size_units: order.size_units, filled_units: 0.0, submitted_ms: now_ms },
+        );
+    }
+
+    /// Apply one event; returns the fill it carried, if any.
+    pub fn apply(&mut self, ev: &HedgeEvent) -> Option<Fill> {
+        match ev {
+            HedgeEvent::Acknowledged(_) => None,
+            HedgeEvent::PartiallyFilled(f) => {
+                if let Some(w) = self.orders.get_mut(&f.order) {
+                    w.filled_units += f.size_units;
+                    // A partial that completes the order closes it.
+                    if w.remaining_units().abs() <= 1e-12 {
+                        self.orders.remove(&f.order);
+                    }
+                }
+                Some(*f)
+            }
+            HedgeEvent::Filled(f) => {
+                self.orders.remove(&f.order);
+                Some(*f)
+            }
+            HedgeEvent::Rejected { order, .. } | HedgeEvent::Cancelled(order) => {
+                self.orders.remove(order);
+                None
+            }
+        }
+    }
+
+    /// Signed unfilled size across working orders.
+    pub fn working_units(&self) -> f64 {
+        self.orders.values().map(WorkingOrder::remaining_units).sum()
+    }
+
+    /// Orders working longer than `timeout_ms`.
+    pub fn stale(&self, now_ms: u64, timeout_ms: u64) -> Vec<OrderId> {
+        let mut ids: Vec<OrderId> = self
+            .orders
+            .iter()
+            .filter(|(_, w)| now_ms.saturating_sub(w.submitted_ms) >= timeout_ms)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    pub fn len(&self) -> usize {
+        self.orders.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.orders.is_empty()
+    }
+}
+
+/// Continuous funding accrual for a paper position (pure, SO-438):
+/// `rate × position × mark × Δt`, positive = paid (a long under positive
+/// funding pays; a short receives). The first call only stamps the clock.
+pub fn accrue_funding_step(
+    state: &mut PaperState,
+    now_ms: u64,
+    mark: f64,
+    funding_rate_annual: f64,
+) -> f64 {
+    const MS_PER_YEAR: f64 = 365.0 * 86_400.0 * 1000.0;
+    if state.last_funding_ms == 0 || now_ms <= state.last_funding_ms || mark <= 0.0 {
+        if now_ms > state.last_funding_ms {
+            state.last_funding_ms = now_ms;
+        }
+        return 0.0;
+    }
+    let dt_years = (now_ms - state.last_funding_ms) as f64 / MS_PER_YEAR;
+    state.last_funding_ms = now_ms;
+    let paid = funding_rate_annual * state.position_units * mark * dt_years;
+    state.funding_paid += paid;
+    paid
+}
+
 // ── paper venue ────────────────────────────────────────────────────────
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -269,6 +426,14 @@ pub struct PaperState {
     pub slippage_paid: f64,
     /// Cumulative traded notional (diagnostics).
     pub traded_notional: f64,
+    /// Cumulative funding PAID (positive; a receiving short drives it
+    /// negative). Kept separate from `realized_pnl` (fills only) so the
+    /// scalp and funding P&L lines never double count (SO-438).
+    #[serde(default)]
+    pub funding_paid: f64,
+    /// Clock of the last funding accrual, ms since epoch (0 = never).
+    #[serde(default)]
+    pub last_funding_ms: u64,
 }
 
 /// Simulated perp venue: fills at oracle spot ± slippage, accounting is
@@ -279,7 +444,11 @@ pub struct PaperVenue {
     path: PathBuf,
     slippage_bps: f64,
     funding_rate_annual: f64,
+    /// Fraction of each order filled synchronously (1.0 = instant full
+    /// fill). The remainder rests in `working` until `poll_events`.
+    fill_fraction: f64,
     state: tokio::sync::Mutex<PaperState>,
+    working: tokio::sync::Mutex<Vec<HedgeOrder>>,
 }
 
 impl PaperVenue {
@@ -314,8 +483,17 @@ impl PaperVenue {
             path,
             slippage_bps,
             funding_rate_annual,
+            fill_fraction: 1.0,
             state: tokio::sync::Mutex::new(state),
+            working: tokio::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Fill only `fraction` of each order synchronously; the remainder
+    /// fills on the next `poll_events` unless cancelled first.
+    pub fn with_fill_fraction(mut self, fraction: f64) -> Self {
+        self.fill_fraction = fraction.clamp(0.0, 1.0);
+        self
     }
 
     fn persist(&self, state: &PaperState) -> Result<()> {
@@ -397,34 +575,43 @@ impl HedgeVenue for PaperVenue {
                         reason: "zero size or non-positive spot".into(),
                     }]);
                 }
-                let mut state = self.state.lock().await;
-                let px = Self::apply_fill(
-                    &mut state,
-                    order.size_units,
-                    order.spot,
-                    self.slippage_bps,
-                )
-                .expect("nonzero order fills on the paper venue");
-                self.persist(&state)?;
-                tracing::info!(
-                    venue = %self.name,
-                    order = order.id,
-                    size = order.size_units,
-                    position = state.position_units,
-                    realized = state.realized_pnl,
-                    "hedge order filled (paper)"
-                );
-                Ok(vec![
-                    HedgeEvent::Acknowledged(order.id),
-                    HedgeEvent::Filled(Fill {
-                        order: order.id,
-                        size_units: order.size_units,
-                        price: px,
-                    }),
-                ])
+                let now_units = order.size_units * self.fill_fraction;
+                let mut events = vec![HedgeEvent::Acknowledged(order.id)];
+                if now_units != 0.0 {
+                    let mut state = self.state.lock().await;
+                    let px = Self::apply_fill(&mut state, now_units, order.spot, self.slippage_bps)
+                        .expect("nonzero order fills on the paper venue");
+                    self.persist(&state)?;
+                    tracing::info!(
+                        venue = %self.name,
+                        order = order.id,
+                        size = now_units,
+                        position = state.position_units,
+                        realized = state.realized_pnl,
+                        "hedge order filled (paper)"
+                    );
+                    let fill = Fill { order: order.id, size_units: now_units, price: px };
+                    if self.fill_fraction >= 1.0 {
+                        events.push(HedgeEvent::Filled(fill));
+                        return Ok(events);
+                    }
+                    events.push(HedgeEvent::PartiallyFilled(fill));
+                }
+                // The remainder rests until `poll_events` or a cancel.
+                self.working.lock().await.push(HedgeOrder {
+                    id: order.id,
+                    size_units: order.size_units - now_units,
+                    spot: order.spot,
+                });
+                Ok(events)
             }
-            // Paper orders fill instantly; nothing ever rests.
-            HedgeCommand::Cancel(id) => Ok(vec![HedgeEvent::Cancelled(id)]),
+            HedgeCommand::Cancel(id) => {
+                // Drop the resting remainder if there is one; a cancel for
+                // an order that already fully filled is still acknowledged
+                // as cancelled (the fill events were already delivered).
+                self.working.lock().await.retain(|w| w.id != id);
+                Ok(vec![HedgeEvent::Cancelled(id)])
+            }
             HedgeCommand::Replace { old, new } => {
                 let mut events = vec![HedgeEvent::Cancelled(old)];
                 events.extend(self.execute(HedgeCommand::Submit(new)).await?);
@@ -445,11 +632,135 @@ impl HedgeVenue for PaperVenue {
     async fn realized_pnl(&self) -> Result<f64> {
         Ok(self.state.lock().await.realized_pnl)
     }
+
+    async fn accrue_funding(&self, now_ms: u64, mark: f64) -> Result<f64> {
+        let mut state = self.state.lock().await;
+        let paid = accrue_funding_step(&mut state, now_ms, mark, self.funding_rate_annual);
+        if paid != 0.0 {
+            self.persist(&state)?;
+        }
+        Ok(paid)
+    }
+
+    async fn funding_paid(&self) -> Result<f64> {
+        Ok(self.state.lock().await.funding_paid)
+    }
+
+    /// Resting remainders fill in full at their reference spot.
+    async fn poll_events(&self) -> Result<Vec<HedgeEvent>> {
+        let resting: Vec<HedgeOrder> = std::mem::take(&mut *self.working.lock().await);
+        if resting.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut state = self.state.lock().await;
+        let mut events = Vec::with_capacity(resting.len());
+        for w in resting {
+            if let Some(px) = Self::apply_fill(&mut state, w.size_units, w.spot, self.slippage_bps) {
+                events.push(HedgeEvent::Filled(Fill { order: w.id, size_units: w.size_units, price: px }));
+            }
+        }
+        self.persist(&state)?;
+        Ok(events)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SO-438: funding accrual, working orders, partial fills ─────────
+
+    #[test]
+    fn funding_accrues_against_signed_position() {
+        let mut s = PaperState { position_units: 100.0, ..Default::default() };
+        // First call stamps the clock only.
+        assert_eq!(accrue_funding_step(&mut s, 1_000, 10.0, 0.10), 0.0);
+        // One year later at +10%/yr: a LONG pays 0.10 × 100 × 10 = 100.
+        let year = 365 * 86_400 * 1000;
+        let paid = accrue_funding_step(&mut s, 1_000 + year, 10.0, 0.10);
+        assert!((paid - 100.0).abs() < 1e-9, "{paid}");
+        assert!((s.funding_paid - 100.0).abs() < 1e-9);
+        // A SHORT receives under the same rate.
+        s.position_units = -100.0;
+        let paid = accrue_funding_step(&mut s, 1_000 + 2 * year, 10.0, 0.10);
+        assert!((paid + 100.0).abs() < 1e-9, "{paid}");
+        // Negative funding flips both.
+        s.position_units = 100.0;
+        let paid = accrue_funding_step(&mut s, 1_000 + 3 * year, 10.0, -0.10);
+        assert!((paid + 100.0).abs() < 1e-9, "{paid}");
+        // Time never runs backwards.
+        assert_eq!(accrue_funding_step(&mut s, 5, 10.0, 0.10), 0.0);
+    }
+
+    #[test]
+    fn partial_fills_reduce_working_and_plan_avoids_resubmit() {
+        let mut open = OpenOrders::default();
+        let order = HedgeOrder { id: 1, size_units: -100.0, spot: 10.0 };
+        open.submit(&order, 0);
+        assert_eq!(open.working_units(), -100.0);
+        // Book delta +100, venue position 0, working −100: effective net
+        // is 0 → nothing to submit while the order works.
+        assert_eq!(plan_hedge_order(100.0, 0.0, open.working_units(), 10.0), None);
+        let f = open.apply(&HedgeEvent::PartiallyFilled(Fill { order: 1, size_units: -40.0, price: 10.0 }));
+        assert_eq!(f.map(|f| f.size_units), Some(-40.0));
+        assert_eq!(open.working_units(), -60.0);
+        // Venue now reports −40; still nothing to do.
+        assert_eq!(plan_hedge_order(100.0, -40.0, open.working_units(), 10.0), None);
+        // A partial that completes the order closes it.
+        open.apply(&HedgeEvent::PartiallyFilled(Fill { order: 1, size_units: -60.0, price: 10.0 }));
+        assert!(open.is_empty());
+        assert_eq!(open.working_units(), 0.0);
+    }
+
+    #[test]
+    fn fill_after_cancel_is_still_counted() {
+        let mut open = OpenOrders::default();
+        open.submit(&HedgeOrder { id: 7, size_units: 50.0, spot: 10.0 }, 0);
+        assert_eq!(open.stale(59_999, 60_000), Vec::<OrderId>::new());
+        assert_eq!(open.stale(60_000, 60_000), vec![7]);
+        // Cancel drops the working remainder…
+        assert!(open.apply(&HedgeEvent::Cancelled(7)).is_none());
+        assert_eq!(open.working_units(), 0.0);
+        // …but a fill that raced the cancel is still surfaced to the
+        // caller: the venue's position already includes it.
+        let late = open.apply(&HedgeEvent::Filled(Fill { order: 7, size_units: 50.0, price: 10.0 }));
+        assert_eq!(late.map(|f| f.size_units), Some(50.0));
+        assert!(open.is_empty());
+        // Rejects clear too.
+        open.submit(&HedgeOrder { id: 8, size_units: 5.0, spot: 10.0 }, 0);
+        open.apply(&HedgeEvent::Rejected { order: 8, reason: "x".into() });
+        assert!(open.is_empty());
+    }
+
+    #[tokio::test]
+    async fn paper_venue_partial_fill_then_poll_or_cancel() {
+        let path = std::env::temp_dir().join(format!("so438-partial-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let v = PaperVenue::load(path.clone(), 0.0, 0.0).with_fill_fraction(0.25);
+        let ev = v
+            .execute(HedgeCommand::Submit(HedgeOrder { id: 1, size_units: -100.0, spot: 10.0 }))
+            .await
+            .unwrap();
+        assert!(matches!(ev[1], HedgeEvent::PartiallyFilled(Fill { size_units, .. }) if size_units == -25.0));
+        assert_eq!(v.position_units().await.unwrap(), -25.0);
+        // The remainder fills on poll.
+        let late = v.poll_events().await.unwrap();
+        assert!(matches!(late[0], HedgeEvent::Filled(Fill { order: 1, size_units, .. }) if size_units == -75.0));
+        assert_eq!(v.position_units().await.unwrap(), -100.0);
+        assert!(v.poll_events().await.unwrap().is_empty());
+        // A cancelled remainder never fills.
+        v.execute(HedgeCommand::Submit(HedgeOrder { id: 2, size_units: 40.0, spot: 10.0 })).await.unwrap();
+        v.execute(HedgeCommand::Cancel(2)).await.unwrap();
+        assert!(v.poll_events().await.unwrap().is_empty());
+        assert_eq!(v.position_units().await.unwrap(), -90.0);
+        // Funding accrues on the signed position and persists.
+        let v = PaperVenue::load(path.clone(), 0.0, 0.10);
+        v.accrue_funding(1_000, 10.0).await.unwrap();
+        let paid = v.accrue_funding(1_000 + 365 * 86_400 * 1000, 10.0).await.unwrap();
+        assert!((paid + 90.0).abs() < 1e-9, "short receives: {paid}");
+        assert!((v.funding_paid().await.unwrap() + 90.0).abs() < 1e-9);
+        assert_eq!(v.realized_pnl().await.unwrap(), 0.0, "funding never leaks into fill P&L");
+    }
 
     #[test]
     fn band_widens_when_funding_is_expensive() {
@@ -542,6 +853,7 @@ mod tests {
                 name: "paper".into(),
                 slippage_bps: 3.0,
                 funding_rate_annual: 0.1,
+                fill_fraction: 1.0,
             }]
         );
     }
@@ -563,8 +875,14 @@ mod tests {
         assert_eq!(specs.len(), 2);
         // First entry inherits the legacy knobs and the "paper" name (and
         // with it the legacy state-file path).
-        assert_eq!(specs[0], VenueSpec { name: "paper".into(), slippage_bps: 3.0, funding_rate_annual: 0.0 });
-        assert_eq!(specs[1], VenueSpec { name: "paper-b".into(), slippage_bps: 7.0, funding_rate_annual: -0.2 });
+        assert_eq!(
+            specs[0],
+            VenueSpec { name: "paper".into(), slippage_bps: 3.0, funding_rate_annual: 0.0, fill_fraction: 1.0 }
+        );
+        assert_eq!(
+            specs[1],
+            VenueSpec { name: "paper-b".into(), slippage_bps: 7.0, funding_rate_annual: -0.2, fill_fraction: 1.0 }
+        );
 
         let bad: HedgeConfig =
             toml::from_str("[[venues]]\nkind = \"bluefin\"\n").unwrap();

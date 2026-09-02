@@ -195,6 +195,7 @@ enabled            = false
 # rebalance_turnover_per_year = 0.0   # doc 07 §5: ~137/yr at 20% bands
 # margin_financing_rate_annual = 0.0
 # initial_margin_fraction = 0.10
+# order_timeout_secs = 60             # cancel a working hedge order after this (SO-438)
 
 # Multi-venue hedging: declare [[desk.hedge.venues]] entries to run
 # several venues (per-venue labelled gauges, min-margin alerts naming
@@ -206,6 +207,7 @@ enabled            = false
 # name = "paper"              # gauge/alert label + state-file key
 # slippage_bps = 3.5          # default: paper_slippage_bps
 # funding_rate_annual = 0.0   # default: paper_funding_rate_annual
+# fill_fraction = 1.0         # paper: fraction filled at once; remainder fills next tick (SO-438)
 
 # [desk.auctions]             # RETIRED on-chain RFQ channel
 # The auction venue is deprecated (contracts/.deprecated/auction):

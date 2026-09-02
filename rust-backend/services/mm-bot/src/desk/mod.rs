@@ -634,12 +634,15 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
             } else {
                 format!("paper-hedge-{}-{}.json", spec.name, m.symbol.to_lowercase())
             };
-            let venue: Arc<dyn hedge::HedgeVenue> = Arc::new(hedge::PaperVenue::load_named(
-                spec.name.clone(),
-                std::path::PathBuf::from(&p.cfg.state_dir).join(file),
-                spec.slippage_bps,
-                spec.funding_rate_annual,
-            ));
+            let venue: Arc<dyn hedge::HedgeVenue> = Arc::new(
+                hedge::PaperVenue::load_named(
+                    spec.name.clone(),
+                    std::path::PathBuf::from(&p.cfg.state_dir).join(file),
+                    spec.slippage_bps,
+                    spec.funding_rate_annual,
+                )
+                .with_fill_fraction(spec.fill_fraction),
+            );
             if vi == 0 {
                 primary_venues.push(Arc::clone(&venue));
             }
@@ -1336,8 +1339,33 @@ fn spawn_rebalancer(p: RebalancerParams) {
         // Process-local order ids (unique per run; the funnel/event log
         // carries the venue name alongside).
         let mut next_order_id: hedge::OrderId = 0;
+        // Working orders (SO-438): partial fills and late fills arrive
+        // through `poll_events`; unfilled size counts toward the net so a
+        // slow fill is never re-submitted, and stale orders are cancelled.
+        let mut open = hedge::OpenOrders::default();
+        let timeout_ms = p.hedge_cfg.order_timeout_secs.max(1) * 1000;
         loop {
             ticker.tick().await;
+            let now = auctions::now_ms();
+            match p.venue.poll_events().await {
+                Ok(events) => {
+                    for ev in &events {
+                        open.apply(ev);
+                    }
+                }
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "hedge event poll failed"),
+            }
+            for id in open.stale(now, timeout_ms) {
+                match p.venue.execute(hedge::HedgeCommand::Cancel(id)).await {
+                    Ok(events) => {
+                        for ev in &events {
+                            open.apply(ev);
+                        }
+                        tracing::warn!(venue = p.venue.name(), symbol = %p.symbol, order = id, "stale hedge order cancelled");
+                    }
+                    Err(e) => tracing::warn!(error = %format!("{e:#}"), order = id, "hedge cancel failed"),
+                }
+            }
             // The venue's own funding drives THIS band decision; the
             // aggregate (notional-weighted across venues) that pricing
             // consumes is written by the monitors.
@@ -1374,21 +1402,24 @@ fn spawn_rebalancer(p: RebalancerParams) {
                 }
             };
             p.shared.hedge_position_units.write().insert(p.coin_type.clone(), position);
-            let band = hedge::band_units(&p.hedge_cfg, nav, spot, funding);
-            if let Some(target) = hedge::rebalance_target(delta, position, band) {
-                let size = target - position;
-                if size == 0.0 {
-                    continue;
+            // Funding accrues on the signed position every tick, as its
+            // own P&L line — never through the fills-only realized figure.
+            match p.venue.accrue_funding(now, spot).await {
+                Ok(paid) if paid != 0.0 => {
+                    p.book.write().record_pnl(PnlLine::Funding, -paid, "hedge funding accrual", now);
                 }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "hedge funding accrual failed"),
+            }
+            let band = hedge::band_units(&p.hedge_cfg, nav, spot, funding);
+            if let Some(size) = hedge::plan_hedge_order(delta, position, open.working_units(), band) {
                 next_order_id += 1;
-                let cmd = hedge::HedgeCommand::Submit(hedge::HedgeOrder {
-                    id: next_order_id,
-                    size_units: size,
-                    spot,
-                });
-                match p.venue.execute(cmd).await {
+                let order = hedge::HedgeOrder { id: next_order_id, size_units: size, spot };
+                open.submit(&order, now);
+                match p.venue.execute(hedge::HedgeCommand::Submit(order)).await {
                     Ok(events) => {
                         for ev in &events {
+                            open.apply(ev);
                             if let hedge::HedgeEvent::Rejected { order, reason } = ev {
                                 tracing::error!(
                                     alert_id = "tx-failed-mm-bot-desk",
