@@ -23,6 +23,9 @@
 //!   `vol_forecast`'s, the ONE shared implementation).
 //! - [`book`] — holdings, written lines, the durable-reservation state
 //!   machine (the DB writer stays in mm-bot), P&L attribution counters.
+//! - [`ledger`] — the exact ledger (§2.3 / §5.3, SO-451): balances,
+//!   positions, reservations, pending operations and liabilities that
+//!   reconcile to NAV after every event; the book's reservation store.
 //! - [`exposure`] — the mark pass: holdings → marks, greeks, exposure and
 //!   the capital snapshot inputs.
 //! - [`exits`] / [`exits::put`] — call and put exit policy.
@@ -39,11 +42,13 @@ pub mod exits;
 pub mod exposure;
 pub mod hedge;
 pub mod kernel;
+pub mod ledger;
 pub mod limits;
 pub mod model;
 pub mod quote;
 
 pub use kernel::{Command, DeskKernel, Event, KernelConfig};
+pub use ledger::{Ledger, LedgerEvent};
 pub use vol_forecast::RollingVolBuffer;
 
 #[cfg(test)]

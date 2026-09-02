@@ -129,6 +129,7 @@ fn mark_update(at_ms: u64, custody: Option<(Vec<Holding>, Vec<Written>)>) -> Eve
         free_underlying_by_asset: HashMap::from([("TSUI".to_string(), 5e8)]),
         external: None,
         queued_withdrawal_value: Some(0.0),
+        queued_withdrawal_shares: 0.0,
     }))
 }
 

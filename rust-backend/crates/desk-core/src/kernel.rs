@@ -22,6 +22,15 @@
 //! poller ([`Event::QuoteFilled`])
 //! and the exits ladder ([`Event::ExitTimer`] + [`Event::PutLiquidity`]).
 //! Same quotes, same hedges, same declines, same rows.
+//!
+//! Every event is also applied to the exact ledger ([`crate::ledger`],
+//! SO-451) the book carries: fills, hedge fills, funding, margin,
+//! liquidations, exercise PTBs and the custody / venue re-syncs of the
+//! mark pass. The ledger never decides — the one place it feeds back is
+//! the reservation rule ([`crate::ledger::Ledger::available_capital`]),
+//! which declines a quote the free settlement cannot back. An event the
+//! ledger refuses (a PTB on a line custody has not synced yet) is kept in
+//! [`DeskKernel::ledger_rejections`] for the reconciliation status.
 
 use std::collections::HashMap;
 
@@ -36,6 +45,10 @@ use crate::exits::put::{self, PoolLiquidity, PutLiquidity, PutPath, PutPlan};
 use crate::exits::{self, ExitAction, ExitsConfig};
 use crate::exposure::{self, MarkInputs, MarkSnapshot, SpotSnapshot};
 use crate::hedge::{self, HedgeConfig, HedgeEvent, HedgeOrder, OpenOrders, OrderId};
+use crate::ledger::{
+    ExercisePath, ExercisePlan, ExternalAccount, Ledger, LedgerEvent, OptionKind, OptionSpec, OptionSync,
+    QueuedWithdrawals, Violation,
+};
 use crate::limits::{
     self, BookExposure, CapitalConfig, CapitalInputs, ExternalInputs, KillSwitchState,
     LimitsConfig, VenueMarginInputs,
@@ -100,6 +113,8 @@ pub struct MarkUpdate {
     pub free_underlying_by_asset: HashMap<String, f64>,
     pub external: Option<ExternalInputs>,
     pub queued_withdrawal_value: Option<f64>,
+    /// Shares in the withdrawal queue (the ledger's liability detail).
+    pub queued_withdrawal_shares: f64,
 }
 
 /// Which custody leg a put-exercise liquidity read / PTB is for.
@@ -304,6 +319,12 @@ pub struct DeskKernel {
     pub naked_written_units: u64,
     hedge_cost: pricing::desk::HedgeCostParams,
     last_theta_accrual_ms: u64,
+    /// Ids of the pending ledger operations (exercise PTBs) this kernel
+    /// opened.
+    next_op_id: u64,
+    /// The last ledger events refused (newest last, bounded): a PTB on a
+    /// line custody has not synced yet, and the like.
+    pub ledger_rejections: Vec<String>,
 }
 
 impl DeskKernel {
@@ -333,7 +354,40 @@ impl DeskKernel {
             naked_written_units: 0,
             hedge_cost,
             last_theta_accrual_ms: booted_at_ms,
+            next_op_id: 0,
+            ledger_rejections: Vec::new(),
         }
+    }
+
+    /// The exact ledger (doc 08 §5.3): the book's balances, positions,
+    /// reservations, pending operations and liabilities.
+    pub fn ledger(&self) -> &Ledger {
+        &self.book.ledger
+    }
+
+    /// Reconciliation status: every ledger invariant currently violated.
+    pub fn reconciliation(&self) -> Vec<Violation> {
+        self.book.ledger.check()
+    }
+
+    /// Apply one event to the ledger; a refusal is recorded, never fatal
+    /// (the ledger records, it does not decide).
+    fn ledger_apply(&mut self, ev: LedgerEvent) {
+        if let Err(e) = self.book.ledger.apply(&ev) {
+            if self.ledger_rejections.len() >= 16 {
+                self.ledger_rejections.remove(0);
+            }
+            self.ledger_rejections.push(format!("{e} ({ev:?})"));
+        }
+    }
+
+    fn next_op(&mut self) -> u64 {
+        self.next_op_id += 1;
+        self.next_op_id
+    }
+
+    fn market_key(&self, market: MarketIndex) -> String {
+        self.models[market].symbol.clone()
     }
 
     /// Seed the scalp high-water mark from the venue so a restart does
@@ -385,21 +439,52 @@ impl DeskKernel {
             Event::QuoteFilled { fill, fair_total, at_ms } => {
                 self.on_fill(&mut out, &fill, fair_total, at_ms);
             }
-            Event::Hedge { market, event, .. } => {
+            Event::Hedge { market, event, at_ms } => {
+                let key = self.market_key(market);
+                let ledger_ev = match &event {
+                    HedgeEvent::Acknowledged(_) => None,
+                    HedgeEvent::PartiallyFilled(f) | HedgeEvent::Filled(f) => {
+                        let reference =
+                            self.book.ledger.pending.hedges.get(&f.order).map(|h| h.spot).unwrap_or(f.price);
+                        Some(LedgerEvent::PerpFill {
+                            op: Some(f.order),
+                            market: key,
+                            size_units: f.size_units,
+                            price: f.price,
+                            fee: 0.0,
+                            reference,
+                            gas: 0.0,
+                            passive: false,
+                            partial: matches!(event, HedgeEvent::PartiallyFilled(_)),
+                            at_ms,
+                        })
+                    }
+                    HedgeEvent::Rejected { order, .. } => {
+                        Some(LedgerEvent::HedgeResolved { op: *order, rejected: true, at_ms })
+                    }
+                    HedgeEvent::Cancelled(id) => Some(LedgerEvent::HedgeResolved { op: *id, rejected: false, at_ms }),
+                };
+                if let Some(ev) = ledger_ev {
+                    self.ledger_apply(ev);
+                }
                 self.markets[market].open_orders.apply(&event);
             }
             Event::HedgeTimer { market, at_ms } => {
                 let timeout_ms = self.cfg.hedge.order_timeout_secs.max(1) * 1000;
-                let m = &mut self.markets[market];
-                for id in m.open_orders.stale(at_ms, timeout_ms) {
+                for id in self.markets[market].open_orders.stale(at_ms, timeout_ms) {
                     // The venue acknowledges the cancel synchronously
                     // (paper) or through its event stream; either way the
                     // remainder no longer counts toward the working size.
-                    m.open_orders.apply(&HedgeEvent::Cancelled(id));
+                    self.markets[market].open_orders.apply(&HedgeEvent::Cancelled(id));
+                    self.ledger_apply(LedgerEvent::HedgeResolved { op: id, rejected: false, at_ms });
                     out.push(Command::CancelHedgeOrder { market, id });
                 }
             }
             Event::HedgeTick { market, position_units, funding_rate_annual, at_ms } => {
+                // Venue truth for the signed position.
+                let key = self.market_key(market);
+                let mark = self.markets[market].spot.map(|s| s.spot);
+                self.ledger_apply(LedgerEvent::ResyncPerp { market: key, units: position_units, mark, at_ms });
                 self.on_hedge_tick(&mut out, market, position_units, funding_rate_annual, at_ms);
             }
             Event::HedgeRealized { market, realized_pnl, at_ms } => {
@@ -413,9 +498,11 @@ impl DeskKernel {
                     self.drain_pnl(&mut out);
                 }
             }
-            Event::FundingSettled { paid, at_ms, .. } => {
+            Event::FundingSettled { market, paid, at_ms } => {
                 // Funding accrues on the signed position as its own P&L
                 // line — never through the fills-only realized figure.
+                let key = self.market_key(market);
+                self.ledger_apply(LedgerEvent::Funding { market: key, paid, at_ms });
                 if paid != 0.0 {
                     self.book.record_pnl(PnlLine::Funding, -paid, "hedge funding accrual", at_ms);
                     self.drain_pnl(&mut out);
@@ -426,9 +513,20 @@ impl DeskKernel {
                 self.funding_rate_annual = funding_weighted;
                 self.venue_margin = inputs;
             }
-            Event::Liquidation { market, position_units_after, .. } => {
+            Event::Liquidation { market, position_units_after, at_ms } => {
                 // The venue closed (part of) the position and every
                 // working order with it.
+                let key = self.market_key(market);
+                let held = self.book.ledger.perps.get(&key).copied().unwrap_or_default();
+                let price = self.markets[market].spot.map(|s| s.spot).unwrap_or(held.mark);
+                self.ledger_apply(LedgerEvent::Liquidation {
+                    market: key,
+                    size_closed: position_units_after - held.units,
+                    price,
+                    penalty: 0.0,
+                    full: position_units_after == 0.0,
+                    at_ms,
+                });
                 let m = &mut self.markets[market];
                 m.hedge_position_units = position_units_after;
                 m.open_orders = OpenOrders::default();
@@ -438,6 +536,9 @@ impl DeskKernel {
                 self.on_put_liquidity(&mut out, bucket, wallet_underlying, vault_underlying, pool, at_ms);
             }
             Event::ExercisePtbResult { bucket, leg, units, ok, at_ms } => {
+                if let Some(op) = self.book.ledger.find_pending_exercise(&bucket.to_hex(), units as f64) {
+                    self.ledger_apply(LedgerEvent::ExerciseSettled { op, ok, actual: None, at_ms });
+                }
                 self.on_exercise_result(&mut out, bucket, leg, units, ok, at_ms);
             }
             Event::MarginTopUpResult { .. } => {
@@ -584,6 +685,12 @@ impl DeskKernel {
                                     .into(),
                             };
                         }
+                        Err(ReserveError::ExceedsAvailableCapital) => {
+                            return Decision::Decline {
+                                reason: "ledger: reservations + committed spend would exceed free settlement"
+                                    .into(),
+                            };
+                        }
                     }
                 }
                 d
@@ -617,6 +724,36 @@ impl DeskKernel {
         );
         self.book.record_pnl(PnlLine::Spread, spread, &note, now_ms);
         self.drain_pnl(out);
+        // The ledger takes the bought units at the model mark; the
+        // bucket's economics come from custody when it is already
+        // synced, else from the reservation the fill closes (the next
+        // custody sync completes them).
+        if f.side == FillSide::Bought && f.amount > 0 {
+            let spec = self
+                .book
+                .holdings
+                .iter()
+                .find(|h| h.bucket_id == f.bucket_id)
+                .map(|h| OptionSpec { kind: OptionKind::of(h.is_put), strike: h.strike_scaled(), expiry_ms: h.expiry_ms })
+                .or_else(|| match &f.link {
+                    FillLink::WsQuote { nonce } => self
+                        .book
+                        .ledger
+                        .reservations
+                        .values()
+                        .find(|r| r.nonce == Some(*nonce))
+                        .map(|r| OptionSpec { kind: OptionKind::of(r.is_put), strike: 0.0, expiry_ms: r.expiry_ms }),
+                    FillLink::AuctionTicket { .. } => None,
+                });
+            self.ledger_apply(LedgerEvent::OptionBought {
+                option: f.bucket_id.to_hex(),
+                spec,
+                qty: f.amount as f64,
+                premium: f.premium as f64,
+                mark_per_unit: fair_total / f.amount as f64,
+                at_ms: now_ms,
+            });
+        }
         // A chain fill closes the quote's reservation (SO-444): ground
         // truth, idempotent when it is already closed.
         if let FillLink::WsQuote { nonce } = &f.link {
@@ -651,19 +788,22 @@ impl DeskKernel {
             m.next_order_id += 1;
             let order = HedgeOrder { id: m.next_order_id, size_units: size, spot };
             m.open_orders.submit(&order, now_ms);
+            let key = self.market_key(market);
+            self.ledger_apply(LedgerEvent::HedgeSubmitted { op: order.id, market: key, size_units: size, spot, at_ms: now_ms });
             out.push(Command::SubmitHedgeOrder { market, order });
         }
     }
 
     // ── mark / margin update (mirrors the book refresher) ──────────────
 
-    fn on_mark_update(&mut self, out: &mut Vec<Command>, u: MarkUpdate) {
+    fn on_mark_update(&mut self, out: &mut Vec<Command>, mut u: MarkUpdate) {
         let now = u.at_ms;
+        let custody_synced = u.holdings.is_some();
         if u.holdings.is_some() || u.written.is_some() {
-            if let Some(holdings) = u.holdings {
+            if let Some(holdings) = u.holdings.take() {
                 self.book.holdings = holdings;
             }
-            if let Some(written) = u.written {
+            if let Some(written) = u.written.take() {
                 self.book.written = written;
             }
             self.book.recompute_covered();
@@ -691,6 +831,7 @@ impl DeskKernel {
         });
         let mut exposure = pass.exposure;
         self.marks = pass.marks;
+        self.ledger_resync(&u, custody_synced, now);
 
         // Theta accrual → P&L attribution.
         let dt_days = now.saturating_sub(self.last_theta_accrual_ms) as f64 / 86_400_000.0;
@@ -747,6 +888,156 @@ impl DeskKernel {
         self.exposure = exposure;
     }
 
+    /// The mark pass's ledger side: chain balances and custody as
+    /// observed (residuals to the equity lines), fresh marks, expiries,
+    /// the withdrawal queue and the external account.
+    fn ledger_resync(&mut self, u: &MarkUpdate, custody_synced: bool, now: u64) {
+        let mut underlying = Vec::new();
+        let mut perp_marks = Vec::new();
+        for (mi, m) in self.models.iter().enumerate() {
+            let Some(spot) = u.spot_by_model.get(mi).copied().flatten() else {
+                continue;
+            };
+            let value = u.free_underlying_by_asset.get(&m.symbol).copied().unwrap_or(0.0);
+            underlying.push((m.symbol.clone(), if spot > 0.0 { value / spot } else { 0.0 }, spot));
+            perp_marks.push((m.symbol.clone(), spot));
+        }
+        self.ledger_apply(LedgerEvent::ResyncBalances { settlement: Some(u.free_settlement), underlying, at_ms: now });
+        if custody_synced {
+            let positions: Vec<OptionSync> = self
+                .book
+                .holdings
+                .iter()
+                .map(|h| OptionSync {
+                    option: h.bucket_id.to_hex(),
+                    spec: OptionSpec { kind: OptionKind::of(h.is_put), strike: h.strike_scaled(), expiry_ms: h.expiry_ms },
+                    qty: h.amount() as f64,
+                    mark_per_unit: self.marks.get(&h.bucket_id).map(|m| m.mark_per_unit),
+                })
+                .collect();
+            self.ledger_apply(LedgerEvent::ResyncOptions { positions, at_ms: now });
+        } else {
+            let mut marks: Vec<(String, f64)> =
+                self.marks.iter().map(|(id, m)| (id.to_hex(), m.mark_per_unit)).collect();
+            marks.sort_by(|a, b| a.0.cmp(&b.0));
+            self.ledger_apply(LedgerEvent::MarkOptions { marks, at_ms: now });
+        }
+        self.ledger_apply(LedgerEvent::ExpireOptions { at_ms: now });
+        for (market, mark) in perp_marks {
+            self.ledger_apply(LedgerEvent::MarkPerp { market, mark, at_ms: now });
+        }
+        self.ledger_apply(LedgerEvent::QueuedWithdrawals(QueuedWithdrawals {
+            shares: u.queued_withdrawal_shares,
+            value: u.queued_withdrawal_value,
+            observed_at_ms: now,
+        }));
+        if let Some(x) = &u.external {
+            let nav = x.nav_for_limits.unwrap_or(0.0);
+            self.ledger_apply(LedgerEvent::External(ExternalAccount {
+                exposure: x.exposure,
+                attested_equity: x.equity,
+                attested_at_ms: x.equity_at,
+                total_budget: nav * x.budget_bps as f64 / 10_000.0,
+                daily_release_limit: nav * x.daily_release_bps as f64 / 10_000.0,
+                daily_release_used: x.released_in_window,
+                window_start_ms: x.window_start_ms,
+                observed_at_ms: now,
+            }));
+        }
+    }
+
+    /// Open a pending exercise on the ledger for a call PTB about to be
+    /// commanded.
+    fn ledger_call_exercise(&mut self, h: &Holding, symbol: &str, spot: f64, leg: CallLeg, now: u64) {
+        let (path, amount, cost) = match leg {
+            CallLeg::WalletCash { amount, strike_cost } => (ExercisePath::CallCash, amount, strike_cost),
+            CallLeg::WalletFlash { amount } => {
+                (ExercisePath::CallFlash, amount, exits::strike_cost(amount, h.strike, h.strike_scale))
+            }
+            CallLeg::VaultCoins => {
+                let units = h.amount_vault.saturating_add(h.amount_coin_positions());
+                (ExercisePath::CallCash, units, exits::strike_cost(units, h.strike, h.strike_scale))
+            }
+        };
+        let (cost, qty) = (cost as f64, amount as f64);
+        let plan = match path {
+            ExercisePath::CallFlash => ExercisePlan {
+                option: h.bucket_id.to_hex(),
+                path,
+                qty,
+                asset: symbol.to_string(),
+                settlement_out: cost,
+                settlement_in: spot * qty,
+                underlying_in: 0.0,
+                underlying_out: 0.0,
+                flash_borrowed: cost,
+                flash_repaid: cost,
+                route_notional: spot * qty,
+                gas: 0.0,
+            },
+            _ => ExercisePlan {
+                option: h.bucket_id.to_hex(),
+                path,
+                qty,
+                asset: symbol.to_string(),
+                settlement_out: cost,
+                settlement_in: 0.0,
+                underlying_in: qty,
+                underlying_out: 0.0,
+                flash_borrowed: 0.0,
+                flash_repaid: 0.0,
+                route_notional: 0.0,
+                gas: 0.0,
+            },
+        };
+        let op = self.next_op();
+        self.ledger_apply(LedgerEvent::ExerciseSubmitted { op, plan, at_ms: now });
+    }
+
+    /// Open a pending exercise on the ledger for a put PTB slice.
+    fn ledger_put_exercise(&mut self, bucket: ObjectId, symbol: &str, spot: f64, plan: &PutPlan, now: u64) {
+        let qty = plan.amount as f64;
+        let ledger_plan = match plan.path {
+            PutPath::VaultUnderlying => ExercisePlan {
+                option: bucket.to_hex(),
+                path: ExercisePath::PutVaultUnderlying,
+                qty,
+                asset: symbol.to_string(),
+                settlement_out: 0.0,
+                settlement_in: plan.payout as f64,
+                underlying_in: 0.0,
+                underlying_out: qty,
+                flash_borrowed: 0.0,
+                flash_repaid: 0.0,
+                route_notional: 0.0,
+                gas: 0.0,
+            },
+            PutPath::BaseFlash | PutPath::QuoteFlash => {
+                let principal = if plan.path == PutPath::BaseFlash { spot * qty } else { plan.max_quote_in as f64 };
+                ExercisePlan {
+                    option: bucket.to_hex(),
+                    path: if plan.path == PutPath::BaseFlash {
+                        ExercisePath::PutBaseFlash
+                    } else {
+                        ExercisePath::PutQuoteFlash
+                    },
+                    qty,
+                    asset: symbol.to_string(),
+                    settlement_out: 0.0,
+                    settlement_in: plan.expected_net as f64,
+                    underlying_in: 0.0,
+                    underlying_out: 0.0,
+                    flash_borrowed: principal,
+                    flash_repaid: principal,
+                    route_notional: plan.max_quote_in as f64,
+                    gas: 0.0,
+                }
+            }
+        };
+        let op = self.next_op();
+        self.ledger_apply(LedgerEvent::ExerciseSubmitted { op, plan: ledger_plan, at_ms: now });
+    }
+
     // ── exits (mirrors `exits::tick`) ──────────────────────────────────
 
     fn on_exit_timer(&mut self, out: &mut Vec<Command>, mut wallet_cash: u64, now: u64) {
@@ -762,6 +1053,7 @@ impl DeskKernel {
             let Some(spot) = self.markets[mi].spot.map(|s| s.spot) else {
                 continue;
             };
+            let symbol = self.models[mi].symbol.clone();
 
             // Step 0 (netting): a written position + same-bucket VaultMm
             // coin custody offset-close at zero market impact. One tx per
@@ -820,6 +1112,7 @@ impl DeskKernel {
                     ExitAction::FlashExercise => CallLeg::WalletFlash { amount: h.amount_wallet },
                     ExitAction::Hold | ExitAction::ExercisePut => unreachable!(),
                 };
+                self.ledger_call_exercise(&h, &symbol, spot, leg, now);
                 out.push(Command::ExecuteCallPtb { bucket: h.bucket_id, leg });
             }
 
@@ -843,6 +1136,7 @@ impl DeskKernel {
             if self.risk_off {
                 continue;
             }
+            self.ledger_call_exercise(&h, &symbol, spot, CallLeg::VaultCoins, now);
             out.push(Command::ExecuteCallPtb { bucket: h.bucket_id, leg: CallLeg::VaultCoins });
         }
     }
@@ -867,10 +1161,11 @@ impl DeskKernel {
         else {
             return;
         };
-        let Some((h, _spot, _decided_at)) = self.markets[mi].pending_put_exercise.remove(&bucket) else {
+        let Some((h, spot, _decided_at)) = self.markets[mi].pending_put_exercise.remove(&bucket) else {
             return;
         };
-        let cfg = &self.cfg.exits;
+        let symbol = self.models[mi].symbol.clone();
+        let cfg = self.cfg.exits.clone();
         let pcfg = &cfg.put;
         let remaining_ms = h.expiry_ms.saturating_sub(now_ms);
         let ladder = |units: u64| {
@@ -886,11 +1181,16 @@ impl DeskKernel {
         // Wallet leg (float coins).
         if h.amount_wallet > 0 {
             let liq = PutLiquidity { own_underlying: wallet_underlying, pool: pool.clone() };
+            let mut plans = Vec::new();
             for slice in ladder(h.amount_wallet) {
                 match put::plan_slice(pcfg, slice, h.strike, h.strike_scale, self.cfg.settlement_decimals, &liq) {
-                    Ok(plan) => out.push(Command::ExecutePutPtb { bucket, leg: PutLeg::Wallet, plan }),
+                    Ok(plan) => plans.push(plan),
                     Err(_) => break,
                 }
+            }
+            for plan in plans {
+                self.ledger_put_exercise(bucket, &symbol, spot, &plan, now_ms);
+                out.push(Command::ExecutePutPtb { bucket, leg: PutLeg::Wallet, plan });
             }
         }
 
@@ -902,6 +1202,7 @@ impl DeskKernel {
         }
         let liq = PutLiquidity { own_underlying: vault_underlying, pool };
         let mut budget = vault_units;
+        let mut plans = Vec::new();
         for cp in &h.coin_positions {
             if budget == 0 {
                 break;
@@ -912,15 +1213,15 @@ impl DeskKernel {
                 match put::plan_slice(pcfg, slice, h.strike, h.strike_scale, self.cfg.settlement_decimals, &liq) {
                     Ok(plan) if plan.path == PutPath::VaultUnderlying => {
                         budget -= plan.amount;
-                        out.push(Command::ExecutePutPtb {
-                            bucket,
-                            leg: PutLeg::VaultCoin { position_id: cp.position_id },
-                            plan,
-                        });
+                        plans.push((cp.position_id, plan));
                     }
                     _ => break,
                 }
             }
+        }
+        for (position_id, plan) in plans {
+            self.ledger_put_exercise(bucket, &symbol, spot, &plan, now_ms);
+            out.push(Command::ExecutePutPtb { bucket, leg: PutLeg::VaultCoin { position_id }, plan });
         }
     }
 
@@ -962,6 +1263,8 @@ impl DeskKernel {
         m.next_order_id += 1;
         let order = HedgeOrder { id: m.next_order_id, size_units: size, spot };
         m.open_orders.submit(&order, now_ms);
+        let key = self.market_key(mi);
+        self.ledger_apply(LedgerEvent::HedgeSubmitted { op: order.id, market: key, size_units: size, spot, at_ms: now_ms });
         out.push(Command::SubmitHedgeOrder { market: mi, order });
     }
 
