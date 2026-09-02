@@ -386,6 +386,12 @@ impl Book {
         self.transition(key, ReservationState::Reverted, now_ms)
     }
 
+    /// The quote's TTL elapsed with no detected fill (the sweep's outcome
+    /// delivered explicitly): free the capacity.
+    pub fn expire_reservation(&mut self, key: &str, now_ms: u64) -> bool {
+        self.transition(key, ReservationState::Expired, now_ms)
+    }
+
     /// A chain fill carrying this quote nonce landed: the premium is now
     /// custody (it reaches `deployed` on the next custody re-sync).
     /// Returns the key it closed, if a live reservation carried the nonce.
