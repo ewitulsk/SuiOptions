@@ -1,12 +1,13 @@
 //! The event loop (doc 08 §6): a deterministic queue merges external
 //! rows (bars, funding, vol index — one Arrow batch per source), the
 //! observations they become after feed latency, the timers (mark / vol
-//! sample, RFQ flow + quote lifecycle, hedge sample, NAV sample), the
-//! commands the strategy submits, and the acknowledgements / fills that
-//! come back after venue latency. Timers keep firing through capture
-//! holes (§6.4): cached prices age, staleness gates fire, funding and
-//! expiry continue, and anything that needed the missing truth is
-//! reported as bounded or invalidated.
+//! sample, RFQ flow + quote lifecycle, hedge sample, margin check, NAV
+//! sample), the commands the strategy submits, and the acknowledgements
+//! / fills / liquidations / margin transfers that come back after venue
+//! latency. Timers keep firing through capture holes (§6.4): cached
+//! prices age, staleness gates fire, funding and expiry continue, and
+//! anything that needed the missing truth is reported as bounded or
+//! invalidated.
 //!
 //! Flow is pluggable (`FlowSource`: the constant injector or the PR N
 //! generator), quotes live through the acceptance hazard (reserve →
@@ -17,8 +18,12 @@
 //! Every instant is a `clock` newtype: `EventTime` for rows,
 //! `ActionableTime` for observations, `CommandTime` for the strategy's
 //! actions, `AcknowledgementTime`/`FillTime` for venue outcomes.
+//!
+//! Prices (doc 08 §7.4): options are priced and marked at the DECISION
+//! price (oracle proxy); the perp executes, marks, funds and margins at
+//! the VENUE mark (bar path × basis).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use anyhow::Result;
 use pricing::desk::{expected_hedge_cost, v1_bid, BidContext, HedgeCostParams, V1BidParams};
@@ -32,13 +37,14 @@ use crate::flow_gen::{ConstantSource, FlowCtx, FlowGen, FlowSource, RfqEvent};
 use crate::gaps::{Coverage, GapTracker};
 use crate::latency::{LatencyConfig, LatencyModel, LatencyStage};
 use crate::ledger::{Ledger, Position};
+use crate::margin::{entry_margin, topup_amount, IsolatedPosition};
 use crate::merge::{EventSource, External, Merge, SliceSource};
 use crate::model::{fair_per_unit, greeks_per_unit};
 use crate::oracle::{Observation, OracleProxy};
 use crate::rng::Pcg32;
 use crate::scenario::Scenario;
 use crate::stats::{RunStats, TrailingMin};
-use crate::venue::{plan_hedge_order, HedgeCommand, HedgeEvent, HedgeOrder, MarketState, OpenOrders, SimVenue, TakerVenue};
+use crate::venue::{plan_hedge_order, HedgeCommand, HedgeEvent, HedgeOrder, MarketState, OpenOrders, OrderKind, SimPerpVenue, SimVenue, Timed, VenueEvent};
 use crate::{MS_PER_DAY, MS_PER_YEAR_F};
 
 /// One settled option, for the vol-P&L study (doc 09 §2.4).
@@ -78,6 +84,20 @@ pub struct NavPoint {
     pub premium_deployed_pct: f64,
     pub sigma_surface: Option<f64>,
     pub stale: bool,
+    /// Venue margin ratio of the perp position (None when flat).
+    pub margin_ratio: Option<f64>,
+}
+
+/// Venue/margin labels every summary carries (doc 08 §7.3).
+#[derive(Clone, Debug, Serialize)]
+pub struct VenueLabels {
+    pub proxy_venue: bool,
+    pub imr: f64,
+    pub mmr: f64,
+    pub leverage: f64,
+    /// Partial liquidation is an assumption (not in the Bluefin docs).
+    pub partial_liquidation_assumed: bool,
+    pub basis_configured: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -112,6 +132,12 @@ pub struct RunOutput {
     pub pending_outcomes: u64,
     pub latency: LatencyConfig,
     pub execution_assumption: String,
+    pub venue_labels: VenueLabels,
+    /// Lowest venue margin ratio seen while a position was open.
+    pub min_margin_ratio: Option<f64>,
+    /// Closest approach to liquidation: min `(MR − MMR) / MMR`.
+    pub closest_margin_headroom: Option<f64>,
+    pub first_liquidation_ms: Option<i64>,
 }
 
 /// The external feeds of one run.
@@ -133,7 +159,7 @@ impl Sources {
 
 /// Timer kinds (doc 08 §6.2: merged into the event stream, never
 /// scheduled from wall clock). `sub` order inside one instant: mark →
-/// flow → hedge, the order the desk's tasks see a minute.
+/// flow → hedge → margin, the order the desk's tasks see a minute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Timer {
     /// Staleness, estimator readout, option marks, expiry settlement,
@@ -143,6 +169,8 @@ enum Timer {
     Flow,
     /// Hedge sample: bands decide, the clock only samples.
     Hedge,
+    /// Margin check: top-up policy (doc 08 §7.3).
+    Margin,
 }
 
 impl Timer {
@@ -151,6 +179,7 @@ impl Timer {
             Timer::Mark => 0,
             Timer::Flow => 1,
             Timer::Hedge => 2,
+            Timer::Margin => 3,
         }
     }
 
@@ -159,13 +188,16 @@ impl Timer {
             Timer::Mark => "mark",
             Timer::Flow => "flow",
             Timer::Hedge => "hedge",
+            Timer::Margin => "margin",
         }
     }
 }
 
 #[derive(Clone, Debug)]
 enum Command {
-    Hedge(HedgeCommand),
+    Hedge(HedgeCommand, OrderKind),
+    /// Move `amount` of vault cash to the venue as margin.
+    TopUp(f64),
 }
 
 #[derive(Clone, Debug)]
@@ -173,7 +205,7 @@ enum Queued {
     Observation(Observation),
     Timer(Timer),
     Command(Command),
-    Outcome(HedgeEvent),
+    Outcome(Timed),
     /// Capacity stats, NAV sample and drawdown, after every outcome of
     /// the instant.
     NavSample,
@@ -233,9 +265,9 @@ pub fn flow_source(s: &Scenario, start_ms: i64) -> Result<Box<dyn FlowSource>> {
     })
 }
 
-/// What the Mark timer computed this minute, shared with the Flow and
-/// Hedge timers and the NAV sample of the same instant (the observable
-/// cache, §6.2 step 3).
+/// What the Mark timer computed this minute, shared with the Flow, Hedge
+/// and Margin timers and the NAV sample of the same instant (the
+/// observable cache, §6.2 step 3).
 #[derive(Clone, Copy)]
 struct MinuteCtx {
     ms: i64,
@@ -269,9 +301,11 @@ struct Engine<'a> {
     queue: EventQueue<Queued>,
     lat: LatencyModel,
     gaps: GapTracker,
-    venue: Box<dyn SimVenue>,
+    venue: SimPerpVenue,
     open: OpenOrders,
     next_order_id: u64,
+    /// After a passive timeout the next order goes out as a taker.
+    escalate: bool,
     market: MarketState,
     /// Last bar close (market truth) for marks while stale.
     last_spot: f64,
@@ -284,7 +318,6 @@ struct Engine<'a> {
     last_revalue_ms: i64,
     apy_call: Option<f64>,
     apy_put: Option<f64>,
-    in_liquidation: bool,
     cur: Option<MinuteCtx>,
     nav_path: Vec<NavPoint>,
     settled: Vec<SettledOption>,
@@ -294,6 +327,11 @@ struct Engine<'a> {
     max_dd: f64,
     last_nav_day: i64,
     net_delta_units: f64,
+    /// Rolling 24 h of accepted top-ups (doc 08 §0.4 cap).
+    topups: VecDeque<(i64, f64)>,
+    min_margin_ratio: Option<f64>,
+    closest_headroom: Option<f64>,
+    first_liquidation_ms: Option<i64>,
     timer_counts: BTreeMap<String, u64>,
     stage_counts: BTreeMap<String, u64>,
     trace_hash: u64,
@@ -318,8 +356,23 @@ impl<'a> Engine<'a> {
         self.queue.schedule(ms, stage, sub, ev)
     }
 
+    fn schedule_outcomes(&mut self, timed: Vec<Timed>) {
+        for t in timed {
+            self.schedule(t.at_ms, Stage::Outcome, 0, Queued::Outcome(t));
+        }
+    }
+
     fn in_window(&self, ms: i64) -> bool {
         ms >= self.start_ms && ms < self.end_ms
+    }
+
+    /// The venue mark of the latest bar.
+    fn mark(&self) -> f64 {
+        self.venue.mark(&self.market)
+    }
+
+    fn account(&self) -> IsolatedPosition {
+        IsolatedPosition { size: self.ledger.perp.position, entry: self.ledger.perp.avg_entry, margin: self.ledger.perp.collateral }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -382,24 +435,29 @@ impl<'a> Engine<'a> {
         }
         self.last_spot = bar.close;
         self.spot_start.get_or_insert(bar.close);
-        self.market = MarketState { ts_ms: at.ms(), spot: bar.close };
+        self.market = MarketState::from_bar(&bar);
         let extra = self.lat.draw(LatencyStage::Observation);
         if let Some(obs) = self.oracle.observe(at.ms(), bar.close, extra) {
             let actionable = ActionableTime(obs.actionable_ms);
             self.schedule(actionable.ms(), Stage::Observable, 0, Queued::Observation(obs));
         }
-        let timed = self.venue.on_bar(&self.market, &mut self.lat);
-        for t in timed {
-            self.schedule(t.at_ms, Stage::Outcome, 0, Queued::Outcome(t.ev));
+        // Venue truth: resting orders, the mark, the risk engine.
+        let account = self.account();
+        let market = self.market;
+        let timed = self.venue.on_bar(&market, &account, &mut self.lat);
+        self.schedule_outcomes(timed);
+        if let Some(mr) = account.margin_ratio(self.mark()) {
+            self.min_margin_ratio = Some(self.min_margin_ratio.map_or(mr, |m| m.min(mr)));
+            let h = (mr - self.s.margin.mmr) / self.s.margin.mmr;
+            self.closest_headroom = Some(self.closest_headroom.map_or(h, |c| c.min(h)));
         }
     }
 
-    fn on_funding(&mut self, at: EventTime, row: FundingRow) {
+    /// Funding settles at the venue against the signed position at the
+    /// venue mark (doc 08 §1 item 4, §7.4).
+    fn on_funding(&mut self, _at: EventTime, row: FundingRow) {
         self.funding_annual = annualize(&row);
-        // Against the signed position at the mark (the spot path is the
-        // mark: proxy_venue), using what the desk can see now.
-        let mark = self.oracle.decision(at.ms()).map(|d| d.price).unwrap_or(self.last_spot);
-        let paid = row.rate * self.ledger.perp.position * mark;
+        let paid = row.rate * self.ledger.perp.position * self.mark();
         self.ledger.cash -= paid;
         self.ledger.lines.funding_paid += paid;
         self.funding_settlements += 1;
@@ -425,6 +483,7 @@ impl<'a> Engine<'a> {
             Timer::Mark => self.on_mark(now),
             Timer::Flow => self.on_flow(now),
             Timer::Hedge => self.on_hedge(now),
+            Timer::Margin => self.on_margin(now),
         }
     }
 
@@ -507,7 +566,7 @@ impl<'a> Engine<'a> {
                 self.apy_call = None;
                 self.apy_put = None;
             } else {
-                let nav_now = self.ledger.nav(spot);
+                let nav_now = self.ledger.nav(self.mark());
                 let ctx0 = self.flow_ctx(now, spot, &readout, nav_now, stale);
                 for (is_put, strike, expiry_ms) in self.source.indicative_specs(&ctx0) {
                     let qty = s.flow_gen.apy_reference_notional / spot;
@@ -585,7 +644,7 @@ impl<'a> Engine<'a> {
         let Some(ctx) = self.cur.filter(|c| c.ms == now) else { return };
         let (spot, stale, readout) = (ctx.spot, ctx.stale, ctx.readout);
         let carry = s.carry_yield;
-        let nav_now = self.ledger.nav(spot);
+        let nav_now = self.ledger.nav(self.mark());
         let fctx = self.flow_ctx(now, spot, &readout, nav_now, stale);
         let reserved_total: f64 = self.live.iter().map(|q| q.bid).sum();
         for rfq in self.source.rfqs(&fctx) {
@@ -680,9 +739,10 @@ impl<'a> Engine<'a> {
 
     /// Hedge sample: bands not clocks; no orders on a stale price. Net
     /// delta is recomputed at the revalue cadence or when the book
-    /// changed. The order is a command that reaches the venue after the
-    /// strategy and submit latencies; the working remainder counts
-    /// against the band so a slow fill is not re-submitted every minute.
+    /// changed. Orders working past the timeout are cancelled (and the
+    /// next order goes out as a taker when `passive_timeout_to_taker`);
+    /// the working remainder counts against the band so a slow fill is
+    /// not re-submitted every minute (mm-bot `plan_hedge_order`).
     fn on_hedge(&mut self, now: i64) {
         let s = self.s;
         let Some(ctx) = self.cur.filter(|c| c.ms == now) else { return };
@@ -703,7 +763,15 @@ impl<'a> Engine<'a> {
         if ctx.stale {
             return;
         }
-        let nav_now = self.ledger.nav(spot);
+        for id in self.open.stale(now, s.venue.order_timeout_secs * 1000) {
+            let at = CommandTime(now + self.lat.draw(LatencyStage::Strategy));
+            self.schedule(at.ms(), Stage::Command, 0, Queued::Command(Command::Hedge(HedgeCommand::Cancel(id), OrderKind::Taker)));
+            self.ledger.lines.cancels += 1;
+            if s.venue.passive_timeout_to_taker {
+                self.escalate = true;
+            }
+        }
+        let nav_now = self.ledger.nav(self.mark());
         let pct = if self.funding_annual < s.hedge.funding_widen_threshold { s.hedge.band_wide_pct_nav } else { s.hedge.band_pct_nav };
         let band_units = (pct / 100.0) * nav_now / spot;
         let working = self.open.working_units();
@@ -720,50 +788,143 @@ impl<'a> Engine<'a> {
                     return;
                 }
             }
+            // No risk without margin: an order that grows the exposure must
+            // be fundable from free cash at the entry ratio, else it is not
+            // sent (counted; the band re-plans next minute).
+            let after = self.ledger.perp.position + working + size;
+            if after.abs() > (self.ledger.perp.position + working).abs() {
+                let need = entry_margin(after.abs() * self.mark(), &s.margin) - self.ledger.perp.collateral;
+                if need > self.ledger.cash {
+                    self.ledger.lines.hedge_declines_margin += 1;
+                    return;
+                }
+            }
             let order = HedgeOrder { id: self.next_order_id, size_units: size, spot };
             self.next_order_id += 1;
+            let kind = if s.venue.is_passive() && !self.escalate { OrderKind::Passive } else { OrderKind::Taker };
+            self.escalate = false;
             let at = CommandTime(now + self.lat.draw(LatencyStage::Strategy));
             self.open.submit(&order, at.ms());
-            self.schedule(at.ms(), Stage::Command, 0, Queued::Command(Command::Hedge(HedgeCommand::Submit(order))));
+            self.schedule(at.ms(), Stage::Command, 0, Queued::Command(Command::Hedge(HedgeCommand::Submit(order), kind)));
         }
+    }
+
+    /// Margin check (doc 08 §7.3): below the trigger ratio, move cash to
+    /// the venue to restore the target, inside the 24 h cap and the free
+    /// cash. The transfer lands after `topup_transfer_ms`.
+    fn on_margin(&mut self, now: i64) {
+        let s = self.s;
+        let next = now + s.margin.check_secs.max(1) * 1000;
+        if next < self.end_ms {
+            self.schedule(next, Stage::Timer, Timer::Margin.sub(), Queued::Timer(Timer::Margin));
+        }
+        let want = topup_amount(&self.account(), self.mark(), &s.margin);
+        if want <= 0.0 {
+            return;
+        }
+        while self.topups.front().is_some_and(|(t, _)| now - *t >= MS_PER_DAY) {
+            self.topups.pop_front();
+        }
+        let used: f64 = self.topups.iter().map(|(_, a)| a).sum();
+        let cap = s.margin.max_topup_24h_pct_nav * self.ledger.nav(self.mark()) - used;
+        let amount = want.min(cap).min(self.ledger.cash);
+        if amount <= 0.0 {
+            self.ledger.lines.topup_declines += 1;
+            return;
+        }
+        self.topups.push_back((now, amount));
+        let at = CommandTime(now + self.lat.draw(LatencyStage::Strategy));
+        self.schedule(at.ms(), Stage::Command, 0, Queued::Command(Command::TopUp(amount)));
     }
 
     // ── commands and outcomes ──────────────────────────────────────────
 
     fn on_command(&mut self, at: CommandTime, cmd: Command) {
         match cmd {
-            Command::Hedge(c) => {
+            Command::Hedge(c, kind) => {
                 let arrival = at.ms() + self.lat.draw(LatencyStage::VenueSubmit);
                 let market = self.market;
-                let timed = self.venue.execute(c, arrival, &market, &mut self.lat);
-                for t in timed {
-                    self.schedule(t.at_ms, Stage::Outcome, 0, Queued::Outcome(t.ev));
+                let account = self.account();
+                let timed = self.venue.execute(c, kind, arrival, &market, &account, &mut self.lat);
+                self.schedule_outcomes(timed);
+            }
+            Command::TopUp(amount) => {
+                // Cash leaves the vault now; it is margin once it lands.
+                self.ledger.cash -= amount;
+                let arrival = at.ms() + self.s.margin.topup_transfer_ms.max(0);
+                let timed = self.venue.topup(amount, arrival);
+                self.schedule_outcomes(timed);
+            }
+        }
+    }
+
+    fn on_outcome(&mut self, at: FillTime, t: Timed) {
+        match t.ev {
+            VenueEvent::Hedge(ev) => {
+                match &ev {
+                    HedgeEvent::Rejected { .. } => self.ledger.lines.hedge_rejects += 1,
+                    HedgeEvent::PartiallyFilled(_) => self.ledger.lines.partial_fills += 1,
+                    _ => {}
+                }
+                if let Some((fill, _)) = self.open.apply(&ev) {
+                    self.apply_fill(at, fill.size_units, fill.price, t.fee, t.reference);
+                }
+            }
+            VenueEvent::Liquidated { size_closed, price, penalty, full } => {
+                let l = &mut self.ledger;
+                let realized = l.perp.fill(size_closed, price);
+                l.cash += realized;
+                l.lines.hedge_realized += realized;
+                l.lines.hedge_turnover_notional += size_closed.abs() * price;
+                self.stats.volumes.hedge_turnover += size_closed.abs() * price;
+                // The penalty leaves the margin account.
+                l.perp.collateral -= penalty;
+                l.lines.liquidation_loss += penalty;
+                l.lines.liquidations += 1;
+                self.stats.liquidations += 1;
+                self.first_liquidation_ms.get_or_insert(at.ms());
+                if full {
+                    l.cash += l.perp.collateral;
+                    l.perp.collateral = 0.0;
+                } else {
+                    let before = l.perp.position - size_closed;
+                    self.sync_collateral(before, size_closed, price);
+                }
+                // The venue dropped every working order.
+                self.open = OpenOrders::default();
+            }
+            VenueEvent::TopUp { amount, accepted } => {
+                if accepted {
+                    self.ledger.perp.collateral += amount;
+                    self.ledger.lines.margin_topups += 1;
+                    self.ledger.lines.topup_total += amount;
+                } else {
+                    self.ledger.cash += amount;
+                    self.ledger.lines.topup_rejects += 1;
                 }
             }
         }
     }
 
-    fn on_outcome(&mut self, at: FillTime, ev: HedgeEvent) {
-        if matches!(ev, HedgeEvent::Rejected { .. }) {
-            self.ledger.lines.hedge_rejects += 1;
-        }
-        if let Some((fill, reference)) = self.open.apply(&ev) {
-            self.apply_fill(at, fill.size_units, fill.price, reference.unwrap_or(fill.price));
-        }
-    }
-
     /// A fill reaches the ledger: realized P&L on the closed slice, the
-    /// taker fee on the reference notional, slippage as the distance from
-    /// the reference price, gas per rebalance.
-    fn apply_fill(&mut self, _at: FillTime, size: f64, price: f64, reference: f64) {
+    /// venue's fee, slippage as the signed distance from the mark at
+    /// execution (a passive fill inside the mark is negative), gas per
+    /// rebalance, then the isolated margin is re-synced to the position.
+    fn apply_fill(&mut self, _at: FillTime, size: f64, price: f64, fee: f64, reference: f64) {
         let s = self.s;
         let notional = size.abs() * reference;
-        let slip = (price - reference).abs();
-        let fee = notional * s.hedge.taker_fee_bps / 10_000.0 + s.hedge.fixed_fee_per_fill;
+        let slip = (price - reference) * size.signum();
+        let before = self.ledger.perp.position;
         let realized = self.ledger.perp.fill(size, price);
         self.ledger.cash += realized - fee - s.exercise.gas_per_rebalance;
         self.ledger.lines.hedge_realized += realized;
-        self.ledger.lines.hedge_fees += fee;
+        if slip < 0.0 {
+            self.ledger.lines.maker_fees += fee;
+            self.ledger.lines.passive_fills += 1;
+        } else {
+            self.ledger.lines.hedge_fees += fee;
+            self.ledger.lines.taker_fills += 1;
+        }
         self.ledger.lines.hedge_slippage += size.abs() * slip;
         self.ledger.lines.gas += s.exercise.gas_per_rebalance;
         self.ledger.lines.hedge_turnover_notional += notional;
@@ -771,6 +932,29 @@ impl<'a> Engine<'a> {
         self.stats.volumes.hedge_turnover += notional;
         if self.ledger.lines.hedge_fills == 1 {
             self.stats.initial_hedge_margin = self.ledger.perp.position.abs() * reference * s.hedge.initial_margin_fraction;
+        }
+        self.sync_collateral(before, size, price);
+    }
+
+    /// Isolated margin follows the position the way the venue assigns
+    /// it: a fill that extends the position posts entry margin on the
+    /// added notional (from cash, bounded by it); a fill that reduces it
+    /// releases the closed slice's share of the margin; a reversal does
+    /// both. Losses erode the ratio — only a top-up (or the risk engine)
+    /// restores it.
+    fn sync_collateral(&mut self, before: f64, size: f64, price: f64) {
+        let l = &mut self.ledger;
+        let closed = if before == 0.0 || before.signum() == size.signum() { 0.0 } else { size.abs().min(before.abs()) };
+        if closed > 0.0 {
+            let release = l.perp.collateral * closed / before.abs();
+            l.perp.collateral -= release;
+            l.cash += release;
+        }
+        let added = size.abs() - closed;
+        if added > 0.0 {
+            let post = entry_margin(added * price, &self.s.margin).min(l.cash.max(0.0));
+            l.cash -= post;
+            l.perp.collateral += post;
         }
     }
 
@@ -780,22 +964,17 @@ impl<'a> Engine<'a> {
     /// drawdown and the daily sample — after every outcome of the minute.
     fn on_nav_sample(&mut self, now: i64) {
         let Some(ctx) = self.cur.filter(|c| c.ms == now) else { return };
-        let s = self.s;
         let spot = ctx.spot;
+        let mark = self.mark();
         let reserved: f64 = self.live.iter().map(|q| q.bid).sum();
         self.stats.sample_reserved(reserved);
-        let margin_req = self.ledger.perp.position.abs() * spot * s.hedge.initial_margin_fraction;
+        // The margin actually posted at the venue (doc 08 §7.3).
+        let margin_req = self.ledger.perp.collateral;
         self.stats.peak_hedge_margin = self.stats.peak_hedge_margin.max(margin_req);
         self.stats.peak_24h_margin_topup = self.stats.peak_24h_margin_topup.max(self.topup.push(now, margin_req));
         let free = self.ledger.cash - reserved;
         self.stats.min_free_settlement = self.stats.min_free_settlement.min(free);
-        self.stats.min_margin_headroom = self.stats.min_margin_headroom.min(free - margin_req);
-        let maint = s.venue.maintenance_margin_fraction * self.ledger.perp.position.abs() * spot;
-        let liquidating = self.ledger.perp.position != 0.0 && free + self.ledger.perp.unrealized(spot) < maint;
-        if liquidating && !self.in_liquidation {
-            self.stats.liquidations += 1;
-        }
-        self.in_liquidation = liquidating;
+        self.stats.min_margin_headroom = self.stats.min_margin_headroom.min(free);
         if ctx.revalue_now || ctx.filled {
             let marks = self.ledger.option_marks();
             self.stats.peak_premium_at_risk_total = self.stats.peak_premium_at_risk_total.max(marks + reserved);
@@ -814,7 +993,7 @@ impl<'a> Engine<'a> {
             self.stats.peak_capital_deployed = self.stats.peak_capital_deployed.max(marks + reserved + margin_req);
         }
 
-        let nav = self.ledger.nav(spot);
+        let nav = self.ledger.nav(mark);
         self.peak = self.peak.max(nav);
         if self.peak > 0.0 {
             self.max_dd = self.max_dd.max((self.peak - nav) / self.peak);
@@ -828,6 +1007,7 @@ impl<'a> Engine<'a> {
                 premium_deployed_pct: if nav > 0.0 { self.ledger.premium_deployed() / nav } else { 0.0 },
                 sigma_surface: if ctx.readout.fallback { None } else { Some(ctx.readout.surface.atm(self.tenor_years)) },
                 stale: ctx.stale,
+                margin_ratio: self.account().margin_ratio(mark),
             });
         }
     }
@@ -838,7 +1018,7 @@ impl<'a> Engine<'a> {
             Queued::Observation(o) => self.on_observation(o),
             Queued::Timer(t) => self.on_timer(key.ms, t),
             Queued::Command(c) => self.on_command(CommandTime(key.ms), c),
-            Queued::Outcome(ev) => self.on_outcome(FillTime(key.ms), ev),
+            Queued::Outcome(t) => self.on_outcome(FillTime(key.ms), t),
             Queued::NavSample => self.on_nav_sample(key.ms),
         }
     }
@@ -868,10 +1048,15 @@ pub fn run_sources(s: &Scenario, sources: Sources) -> Result<RunOutput> {
 }
 
 pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSource) -> Result<RunOutput> {
+    anyhow::ensure!(
+        matches!(s.venue.execution_assumption.as_str(), "taker_only" | "optimistic" | "central" | "conservative"),
+        "unknown venue.execution_assumption {}",
+        s.venue.execution_assumption
+    );
     let start_ms = crate::data::date_start_ms(&s.from)?;
     let end_ms = crate::data::date_start_ms(&s.to)? + MS_PER_DAY;
     let mut ext = Merge::new(vec![sources.bars, sources.funding, sources.vol_index])?;
-    let venue: Box<dyn SimVenue> = Box::new(TakerVenue { slippage_bps: s.hedge.slippage_bps });
+    let venue = SimPerpVenue::new(s.venue.clone(), s.margin.clone(), s.hedge.slippage_bps, s.hedge.taker_fee_bps, s.hedge.fixed_fee_per_fill);
     let execution_assumption = venue.execution_assumption().to_string();
     let acceptance = AcceptanceModel::new(s.acceptance.clone(), s.seed);
     let acceptance_label = acceptance.label();
@@ -899,7 +1084,8 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         venue,
         open: OpenOrders::default(),
         next_order_id: 1,
-        market: MarketState { ts_ms: i64::MIN, spot: 0.0 },
+        escalate: false,
+        market: MarketState { ts_ms: i64::MIN, spot: 0.0, low: 0.0, high: 0.0, volume: 0.0 },
         last_spot: 0.0,
         spot_start: None,
         price_samples: Vec::new(),
@@ -910,7 +1096,6 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         last_revalue_ms: i64::MIN,
         apy_call: None,
         apy_put: None,
-        in_liquidation: false,
         cur: None,
         nav_path: Vec::new(),
         settled: Vec::new(),
@@ -920,6 +1105,10 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         max_dd: 0.0,
         last_nav_day: i64::MIN,
         net_delta_units: 0.0,
+        topups: VecDeque::new(),
+        min_margin_ratio: None,
+        closest_headroom: None,
+        first_liquidation_ms: None,
         timer_counts: BTreeMap::new(),
         stage_counts: BTreeMap::new(),
         trace_hash: 0xcbf2_9ce4_8422_2325,
@@ -927,6 +1116,7 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
     e.schedule(start_ms, Stage::Timer, Timer::Mark.sub(), Queued::Timer(Timer::Mark));
     e.schedule(start_ms, Stage::Timer, Timer::Flow.sub(), Queued::Timer(Timer::Flow));
     e.schedule(start_ms, Stage::Timer, Timer::Hedge.sub(), Queued::Timer(Timer::Hedge));
+    e.schedule(start_ms, Stage::Timer, Timer::Margin.sub(), Queued::Timer(Timer::Margin));
 
     // Pull external rows and queued events in `(ms, stage)` order; an
     // external row at the same instant as a queued event runs first
@@ -961,7 +1151,7 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
     e.ledger.lines.declines_stale += e.source.stale_declines();
     let pending_outcomes = e.queue.len() as u64;
     let spot_end = e.last_spot;
-    let nav_end = e.ledger.nav(spot_end);
+    let nav_end = e.ledger.nav(e.mark());
     let spot_start = e.spot_start.unwrap_or(spot_end);
     let coverage = e.gaps.finish();
     Ok(RunOutput {
@@ -989,6 +1179,17 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         pending_outcomes,
         latency: s.latency.clone(),
         execution_assumption,
+        venue_labels: VenueLabels {
+            proxy_venue: true,
+            imr: s.margin.imr,
+            mmr: s.margin.mmr,
+            leverage: s.margin.leverage,
+            partial_liquidation_assumed: s.margin.partial_close > 0.0,
+            basis_configured: !s.venue.basis.is_empty(),
+        },
+        min_margin_ratio: e.min_margin_ratio,
+        closest_margin_headroom: e.closest_headroom,
+        first_liquidation_ms: e.first_liquidation_ms,
     })
 }
 
@@ -1022,9 +1223,14 @@ mod tests {
         (a - b).abs() <= rel * a.abs().max(b.abs()).max(1.0)
     }
 
+    /// The cash identity every run must satisfy (doc 08 §1 item 9):
+    /// premium, payoff, hedge realized, funding, fees, gas, forfeited
+    /// margin and the collateral parked at the venue.
     fn assert_cash_identity(s: &Scenario, a: &RunOutput) {
         let l = &a.ledger.lines;
-        let cash_expected = s.nav0 - l.premium_paid + l.option_payoff + l.hedge_realized - l.funding_paid - l.hedge_fees - l.gas;
+        let cash_expected = s.nav0 - l.premium_paid + l.option_payoff + l.hedge_realized - l.funding_paid - l.hedge_fees - l.maker_fees - l.gas
+            - l.liquidation_loss
+            - a.ledger.perp.collateral;
         assert!((a.ledger.cash - cash_expected).abs() < 1e-6, "cash {} vs identity {}", a.ledger.cash, cash_expected);
     }
 
@@ -1046,9 +1252,13 @@ mod tests {
         for p in &a.nav_path {
             assert!(p.nav.is_finite() && p.cash.is_finite());
         }
-        assert!((a.nav_end - (a.ledger.cash + a.ledger.option_marks() + a.ledger.perp.unrealized(a.spot_end))).abs() < 1e-6);
+        assert!((a.nav_end - (a.ledger.cash + a.ledger.option_marks() + a.ledger.perp.collateral + a.ledger.perp.unrealized(a.spot_end))).abs() < 1e-6);
         assert!(a.settled.iter().all(|o| o.sigma_realized > 0.0));
         assert_eq!(a.pending_outcomes, 0);
+        assert_eq!(a.ledger.lines.liquidations, 0);
+        assert!(a.min_margin_ratio.is_some_and(|m| m > s.margin.mmr));
+        assert!(a.closest_margin_headroom.is_some_and(|h| h > 0.0));
+        assert!(a.nav_path.iter().any(|p| p.margin_ratio.is_some()), "margin is posted on the open hedge");
         // The six volumes are all reported; instant acceptance means
         // quoted == accepted and premium turnover == premium paid.
         let (v, l) = (&a.stats.volumes, &a.ledger.lines);
@@ -1062,11 +1272,15 @@ mod tests {
     }
 
     /// v0 (SO-439, `4af188ad`) summary on this synthetic path, captured
-    /// before the event-queue rewrite. With every latency at zero the
-    /// replay must reproduce it within floating tolerance (doc 08 P2
-    /// gate, and the doc 07 reproduction in doc 10 §2 rests on it).
+    /// before the event-queue rewrite. PR K reproduced it to 1e-9 with
+    /// fills at the decision price; PR L executes on the bar path (the
+    /// venue's truth, one bar ahead of the 2 s-lagged decision price),
+    /// funds at the venue mark and posts isolated margin, so the
+    /// economics move by the fill-price difference only: same turns and
+    /// option fills, hedge fills within a few percent, NAV within 1% of
+    /// NAV0. Doc 10 §2 turnover/cost tables rest on this reproduction.
     #[test]
-    fn zero_latency_replay_reproduces_v0_summary() {
+    fn zero_latency_taker_replay_stays_within_tolerance_of_v0() {
         let s = scenario();
         let start = crate::data::date_start_ms(&s.from).unwrap();
         let bars = synthetic_bars(70, start);
@@ -1074,24 +1288,24 @@ mod tests {
         let a = run(&s, &bars, &funding, &[]).unwrap();
         let m = crate::report::summarize(&s, &a);
         assert_eq!(m.execution_assumption, "taker_only");
-        assert_eq!((m.turns, m.fills, m.declines_stale, m.hedge_fills), (3, 3, 1, 207));
-        assert!(close(m.nav_end, 884_850.141_395_085_6, 1e-9), "{}", m.nav_end);
-        assert!(close(m.premium_paid, 509_138.523_502_254_33, 1e-9), "{}", m.premium_paid);
-        assert!(close(m.option_payoff, 29_080.683_845_507_043, 1e-9), "{}", m.option_payoff);
-        assert!(close(m.hedge_realized, 316_963.676_061_323_67, 1e-9), "{}", m.hedge_realized);
-        assert!(close(m.funding_paid, -17_697.316_866_668_3, 1e-9), "{}", m.funding_paid);
-        assert!(close(m.hedge_fees, 11_997.531_733_248_825, 1e-9), "{}", m.hedge_fees);
-        assert!(close(m.max_drawdown, 0.141_101_953_863_820_96, 1e-9), "{}", m.max_drawdown);
+        assert!(m.labels.taker_only);
+        assert_eq!((m.turns, m.fills, m.declines_stale), (3, 3, 1));
+        assert!((m.hedge_fills as i64 - 207).abs() <= 10, "{}", m.hedge_fills);
+        assert!(close(m.nav_end, 884_850.14, 0.01), "{}", m.nav_end);
+        assert!(close(m.premium_paid, 509_138.52, 0.01), "{}", m.premium_paid);
+        assert!(close(m.option_payoff, 29_080.68, 0.05), "{}", m.option_payoff);
+        assert!(close(m.funding_paid, -17_697.32, 0.05), "{}", m.funding_paid);
+        assert!(close(m.hedge_fees, 11_997.53, 0.05), "{}", m.hedge_fees);
+        assert!(close(m.max_drawdown, 0.1411, 0.05), "{}", m.max_drawdown);
         assert!(close(m.mean_sigma_realized, 0.435_539_138_349_790_4, 1e-9), "{}", m.mean_sigma_realized);
-        // Mixed book (calls and puts): the signed hedge nets.
         let mut s = scenario();
         s.flow.call_share = 0.5;
         s.limits.put_premium_max = 0.30;
         let b = run(&s, &bars, &funding, &[]).unwrap();
         let m = crate::report::summarize(&s, &b);
-        assert_eq!((m.fills, m.hedge_fills), (6, 199));
-        assert!(close(m.nav_end, 861_564.868_693_224_6, 1e-9), "{}", m.nav_end);
-        assert!(close(m.funding_paid, 9_598.337_503_269_262, 1e-9), "{}", m.funding_paid);
+        assert_eq!(m.fills, 6);
+        assert!((m.hedge_fills as i64 - 199).abs() <= 10, "{}", m.hedge_fills);
+        assert!(close(m.nav_end, 861_564.87, 0.01), "{}", m.nav_end);
     }
 
     /// Doc 08 P2 gate: a known synthetic week replays with source row
@@ -1112,6 +1326,7 @@ mod tests {
         assert_eq!(a.timer_counts["mark"], 7 * 1440);
         assert_eq!(a.timer_counts["flow"], 7 * 1440);
         assert_eq!(a.timer_counts["hedge"], 7 * 1440);
+        assert_eq!(a.timer_counts["margin"], 7 * 1440);
         assert_eq!(a.stage_counts["external"], 7 * 1440 + 21 + 168);
         assert_eq!(a.stage_counts["ledger"], 7 * 1440);
         // One turn at the start (retried once: the first minute is stale
@@ -1224,5 +1439,152 @@ mod tests {
         wide.bid.base_spread_volpts = 0.30;
         let w = run(&wide, &bars, &[], &[]).unwrap();
         assert!(w.stats.quotes_accepted < st.quotes_accepted, "wide {} vs base {}", w.stats.quotes_accepted, st.quotes_accepted);
+    }
+
+    // ── doc 08 P3 gates (PR L) ─────────────────────────────────────────
+
+    /// Funding matches the settlement rows for a SHORT (call hedge:
+    /// receives under positive funding) and a LONG (put hedge: pays),
+    /// against the signed position at the venue mark: Σ rate × position ×
+    /// mark over the rows, replayed from the daily position path bound.
+    #[test]
+    fn funding_matches_settlements_for_short_and_long_hedges() {
+        for (call_share, expect_sign) in [(1.0, -1.0), (0.0, 1.0)] {
+            let mut s = scenario();
+            s.to = "2025-01-10".into();
+            s.flow.call_share = call_share;
+            s.limits.put_premium_max = 0.30;
+            let start = crate::data::date_start_ms(&s.from).unwrap();
+            let bars = synthetic_bars(10, start);
+            let funding = funding_rows(10, start);
+            let out = run(&s, &bars, &funding, &[]).unwrap();
+            assert_eq!(out.funding_settlements, 30);
+            assert!(out.ledger.lines.funding_paid * expect_sign > 0.0, "call_share {call_share}: funding_paid {}", out.ledger.lines.funding_paid);
+            let pos_max = out.nav_path.iter().map(|p| p.perp_position.abs()).fold(0.0, f64::max);
+            let mark_max = bars.iter().map(|b| b.close).fold(0.0, f64::max);
+            assert!(out.ledger.lines.funding_paid.abs() <= 30.0 * 0.0001 * pos_max * mark_max * 1.5);
+            assert_cash_identity(&s, &out);
+        }
+    }
+
+    /// Doc 08 P3 gate: a crash proxy on the MARK liquidates the long put
+    /// hedge on the crash bar; the run reports the count, the forfeited
+    /// margin, the first liquidation instant and the closest headroom,
+    /// and the ledger still reconciles. The same path with a mark basis
+    /// that offsets the crash on the mark does not liquidate on that
+    /// bar: the risk engine uses marks, not trades.
+    #[test]
+    fn crash_on_marks_liquidates_and_is_reported() {
+        let mut s = scenario();
+        s.to = "2025-01-20".into();
+        s.flow.call_share = 0.0;
+        s.limits.put_premium_max = 0.30;
+        s.margin.topup_trigger_mr = 0.0; // no top-ups: let the crash bite
+        let start = crate::data::date_start_ms(&s.from).unwrap();
+        let crash = start + 5 * MS_PER_DAY;
+        let mut bars = synthetic_bars(20, start);
+        // Day 5: the bar path gaps down 30% (a long perp at 10x is bust).
+        for b in bars.iter_mut().filter(|b| b.ts_ms >= crash) {
+            for px in [&mut b.open, &mut b.high, &mut b.low, &mut b.close] {
+                *px *= 0.7;
+            }
+        }
+        let funding = funding_rows(20, start);
+        let out = run(&s, &bars, &funding, &[]).unwrap();
+        assert!(out.ledger.lines.liquidations >= 1, "{:?}", out.ledger.lines);
+        assert_eq!(out.first_liquidation_ms, Some(crash), "liquidated on the crash bar");
+        assert!(out.ledger.lines.liquidation_loss >= 0.0);
+        assert!(out.closest_margin_headroom.is_some_and(|h| h < 0.0), "{:?}", out.closest_margin_headroom);
+        assert!(out.min_margin_ratio.is_some_and(|m| m < s.margin.mmr));
+        assert_cash_identity(&s, &out);
+        let m = crate::report::summarize(&s, &out);
+        assert_eq!(m.liquidations, out.ledger.lines.liquidations);
+        assert_eq!(m.stats.liquidations, out.ledger.lines.liquidations);
+        assert_eq!(m.first_liquidation_ms, Some(crash));
+        assert!(!m.venue_labels.partial_liquidation_assumed);
+        // +50% mark basis from the crash bar: the mark RISES 5% while the
+        // trades fall 30%; a long is not liquidated on that bar.
+        s.venue.basis = vec![crate::scenario::BasisPoint { from_ms: crash, bps: 5_000.0 }];
+        let out2 = run(&s, &bars, &funding, &[]).unwrap();
+        assert!(out2.first_liquidation_ms.is_none_or(|t| t > crash + MS_PER_DAY), "{:?}", out2.first_liquidation_ms);
+        assert!(out2.venue_labels.basis_configured);
+        assert_cash_identity(&s, &out2);
+        // A desk that cannot fund entry margin sends no order (no cascade).
+        assert!(out.ledger.lines.hedge_declines_margin + out.ledger.lines.hedge_fills > 0);
+    }
+
+    /// Margin top-ups keep the hedge alive through a slow slide when the
+    /// policy is on and land after the transfer latency; a venue outage
+    /// refuses them, the cash returns, and the position is liquidated
+    /// during the outage instead.
+    #[test]
+    fn topups_restore_margin_and_outages_refuse_them() {
+        let mut s = scenario();
+        s.to = "2025-01-20".into();
+        s.flow.call_share = 0.0;
+        s.limits.put_premium_max = 0.30;
+        s.margin.topup_trigger_mr = 0.06;
+        // A 1× NAV put book: the long hedge's slide loss is fundable from
+        // cash (at 3× NAV the trapped option gains cannot fund the margin
+        // and the liquidation is the correct outcome — doc 08 §7.3).
+        s.flow.notional_nav_multiple = 1.0;
+        // The doc 08 §0.4 24 h cap (10% NAV) would bind on this slide and
+        // liquidate anyway; lift it so the test isolates the transfer path.
+        s.margin.max_topup_24h_pct_nav = 0.5;
+        let start = crate::data::date_start_ms(&s.from).unwrap();
+        let slide_start = start + 5 * MS_PER_DAY;
+        let mut bars = synthetic_bars(20, start);
+        // A slow slide: −0.4% per hour for two days, then flat lower.
+        for b in bars.iter_mut().filter(|b| b.ts_ms >= slide_start) {
+            let hours = ((b.ts_ms - slide_start) as f64 / 3_600_000.0).min(48.0);
+            let f = (1.0 - 0.004f64).powf(hours);
+            for px in [&mut b.open, &mut b.high, &mut b.low, &mut b.close] {
+                *px *= f;
+            }
+        }
+        let funding = funding_rows(20, start);
+        let out = run(&s, &bars, &funding, &[]).unwrap();
+        assert!(out.ledger.lines.margin_topups >= 1, "{:?}", out.ledger.lines);
+        assert!(out.ledger.lines.topup_total > 0.0);
+        assert_eq!(out.ledger.lines.topup_rejects, 0);
+        assert_eq!(out.ledger.lines.liquidations, 0, "top-ups keep the hedge alive: {:?}", out.ledger.lines);
+        assert_cash_identity(&s, &out);
+        // Outage from six hours into the slide: transfers refused, cash
+        // returned, and the risk engine (which keeps running) liquidates.
+        s.margin.outages = vec![[slide_start + 6 * 3_600_000, slide_start + 3 * MS_PER_DAY]];
+        let out2 = run(&s, &bars, &funding, &[]).unwrap();
+        assert!(out2.ledger.lines.topup_rejects >= 1, "{:?}", out2.ledger.lines);
+        assert!(out2.ledger.lines.liquidations >= 1, "{:?}", out2.ledger.lines);
+        assert!(out2.first_liquidation_ms.is_some_and(|t| t >= slide_start + 6 * 3_600_000));
+        assert_cash_identity(&s, &out2);
+        let m = crate::report::summarize(&s, &out2);
+        assert_eq!(m.topup_rejects, out2.ledger.lines.topup_rejects);
+    }
+
+    /// Passive execution assumptions run end to end: orders rest, time
+    /// out, escalate to takers, and the labels say which assumption.
+    #[test]
+    fn passive_assumptions_label_and_escalate() {
+        for assumption in ["optimistic", "central", "conservative"] {
+            let mut s = scenario();
+            s.to = "2025-01-10".into();
+            s.venue.execution_assumption = assumption.into();
+            s.venue.queue_depth_units = 10.0;
+            s.venue.passive_participation = 0.5;
+            let start = crate::data::date_start_ms(&s.from).unwrap();
+            let bars = synthetic_bars(10, start);
+            let out = run(&s, &bars, &funding_rows(10, start), &[]).unwrap();
+            assert_eq!(out.execution_assumption, assumption);
+            assert!(out.ledger.lines.hedge_fills > 0, "{assumption}: {:?}", out.ledger.lines);
+            assert_cash_identity(&s, &out);
+            let m = crate::report::summarize(&s, &out);
+            assert!(!m.labels.taker_only);
+            if assumption == "conservative" {
+                // Flat synthetic bars never trade through: everything
+                // escalates to takers after the timeout.
+                assert!(out.ledger.lines.cancels > 0);
+                assert_eq!(out.ledger.lines.passive_fills, 0);
+            }
+        }
     }
 }

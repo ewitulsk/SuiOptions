@@ -221,3 +221,27 @@ Reading:
 - The v0 loop ignored the warm-up bars loaded before `from`; the replay
   feeds them to the oracle and estimator, so the first turn of a re-run
   prices off a warm surface instead of `fallback_vol`.
+
+## 8. Second pass (PR L, SO-454): signed perp execution, margin, liquidation
+
+- The perp now executes on the bar path (venue truth), not the decision
+  price: taker fills at mark ± slippage ± own impact with contract
+  rounding, fees and a depth cap; passive placement under
+  `optimistic | central | conservative` queue assumptions (sensitivity
+  only until native Bluefin capture calibrates them); cancel latency and
+  fill-after-cancel races; funding against the signed position at the
+  venue mark.
+- Isolated margin per the Bluefin docs (IMR 4.5%, MMR 2.5%, default 10x;
+  `margin.rs` cites the equations): entry margin leaves cash on every
+  extending fill, losses erode the ratio, the top-up policy (trigger,
+  target, 24 h cap, transfer latency, outage rejection) restores it, and
+  the risk engine liquidates at the mark. Every summary carries
+  `venue_labels`, `liquidations`, `liquidation_loss`,
+  `first_liquidation_ms`, `min_margin_ratio`, `closest_margin_headroom`,
+  `margin_topups`, `topup_rejects`.
+- Caveat that replaces "perp mark = spot; no margin model": Binance is
+  still the mark proxy (`proxy_venue`), basis is a configured series, and
+  partial liquidation is an assumption (off by default). A 3× NAV put
+  book cannot fund its long-hedge margin through a 17% slide from cash
+  alone — the trapped option gains are the doc 08 §7.3 acute risk, and
+  the mixed-book numbers above (at-expiry, no margin) understate it.

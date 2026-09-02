@@ -35,6 +35,9 @@ pub struct Perp {
     pub position: f64,
     pub avg_entry: f64,
     pub realized: f64,
+    /// Cash assigned to the venue as isolated margin (doc 08 §7.3):
+    /// part of NAV, not of `cash`.
+    pub collateral: f64,
 }
 
 impl Perp {
@@ -93,6 +96,24 @@ pub struct Lines {
     pub declines_priced_zero: u64,
     /// Venue rejections of hedge orders (doc 08 §7.2).
     pub hedge_rejects: u64,
+    /// Doc 08 §7.2/§7.3 venue lifecycle and margin lines.
+    pub maker_fees: f64,
+    pub taker_fills: u64,
+    pub passive_fills: u64,
+    pub partial_fills: u64,
+    pub cancels: u64,
+    pub liquidations: u64,
+    /// Margin forfeited to liquidations (penalty on top of mark P&L).
+    pub liquidation_loss: f64,
+    pub margin_topups: u64,
+    pub topup_total: f64,
+    /// Top-ups refused by the venue (outage).
+    pub topup_rejects: u64,
+    /// Top-ups the desk declined: 24 h cap or no free cash.
+    pub topup_declines: u64,
+    /// Hedge orders not sent because the entry margin could not be
+    /// funded from free cash (no risk without margin).
+    pub hedge_declines_margin: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -113,8 +134,10 @@ impl Ledger {
         self.positions.iter().map(|p| p.mark * p.qty).sum()
     }
 
+    /// NAV = cash + option marks + perp collateral + perp unrealized at
+    /// the venue mark (doc 08 §2.3).
     pub fn nav(&self, mark: f64) -> f64 {
-        self.cash + self.option_marks() + self.perp.unrealized(mark)
+        self.cash + self.option_marks() + self.perp.collateral + self.perp.unrealized(mark)
     }
 
     pub fn premium_deployed(&self) -> f64 {
