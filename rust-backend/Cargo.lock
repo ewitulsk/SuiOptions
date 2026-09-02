@@ -1236,21 +1236,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backtester"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "csv",
- "pricing",
- "rayon",
- "serde",
- "serde_json",
- "toml 0.8.23",
- "vault-sim",
-]
-
-[[package]]
 name = "balance-monitor"
 version = "0.1.0"
 dependencies = [
@@ -5353,7 +5338,6 @@ dependencies = [
  "move-core-types",
  "observability",
  "oracle-client",
- "pricing",
  "protocol-types",
  "pyth-client",
  "reqwest",
@@ -5367,7 +5351,6 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
- "vault-sim",
 ]
 
 [[package]]
@@ -13051,17 +13034,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "vault-sim"
-version = "0.1.0"
-dependencies = [
- "pricing",
- "rand 0.8.6",
- "rand_chacha 0.3.1",
- "serde",
- "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -6,11 +6,9 @@
 //! equity ([`venue_equity`]) and fulfills withdrawals. It holds only a
 //! gas wallet — the contracts validate everything that matters.
 //!
-//! The covered-call ("Ribbon-style") vault crank is deprecated (SO-332).
-//! Its modules ([`discovery`], [`planner`], [`slicing`], [`state`],
-//! [`strike`], [`submit`]) are still here and still compile, but they are
-//! driven only by [`legacy_vault`] behind the undeployed `keeper-legacy`
-//! binary. The deployed `keeper` never touches them.
+//! The covered-call ("Ribbon-style") vault crank this crate used to carry
+//! was deprecated in SO-332 and removed in SO-452 (with `crates/vault-sim`
+//! and `tools/backtester`); see git history before that ticket.
 
 use std::path::PathBuf;
 
@@ -20,14 +18,6 @@ use sui_tx::sui_client::Network;
 
 pub mod config;
 pub mod discovery;
-/// DEPRECATED (SO-332): the covered-call vault crank, reachable only via the
-/// undeployed `keeper-legacy` binary. See the module docs.
-pub mod legacy_vault;
-pub mod planner;
-pub mod slicing;
-pub mod state;
-pub mod strike;
-pub mod submit;
 pub mod trading_vault;
 pub mod venue_equity;
 

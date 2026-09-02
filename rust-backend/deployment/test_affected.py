@@ -130,15 +130,15 @@ class TestDerivedCrateCoverage(unittest.TestCase):
                 self.assertEqual(set(self.derived[svc]), expected)
 
     def test_dev_dependencies_are_excluded(self):
-        """keeper dev-depends on vault-sim; a test-only crate must not deploy."""
-        keeper = tomllib.loads((RUST / "services" / "keeper" / "Cargo.toml").read_text())
+        """staging-mm-bot dev-depends on exchange-book; a test-only crate must not deploy."""
+        bot = tomllib.loads((RUST / "services" / "staging-mm-bot" / "Cargo.toml").read_text())
         self.assertIn(
-            "vault-sim",
-            keeper["dev-dependencies"],
-            "fixture drifted: keeper no longer dev-depends on vault-sim",
+            "exchange-book",
+            bot["dev-dependencies"],
+            "fixture drifted: staging-mm-bot no longer dev-depends on exchange-book",
         )
-        self.assertNotIn("vault-sim", keeper.get("dependencies", {}))
-        self.assertNotIn("rust-backend/crates/vault-sim/**", self.derived["keeper"])
+        self.assertNotIn("exchange-book", bot.get("dependencies", {}))
+        self.assertNotIn("rust-backend/crates/exchange-book/**", self.derived["staging-mm-bot"])
 
     def test_transitive_crate_is_covered(self):
         """mm-bot never names deployments; token-info-client pulls it in."""

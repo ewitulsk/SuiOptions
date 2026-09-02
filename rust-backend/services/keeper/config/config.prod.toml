@@ -4,7 +4,7 @@
 # mapping if prod ever moves to mainnet).
 #
 # Vaults are NOT configured here: the keeper discovers them from the
-# indexer's `vaults` view and resolves feeds/decimals/PriceInfoObjects
+# indexer's `trading_vaults` view and resolves Pyth PriceInfoObject ids
 # from chain state (src/discovery.rs). As soon as a prod vault is
 # created on chain, the next tick picks it up — no config edit, no
 # redeploy. With no vaults on chain, the keeper idles with /health up.
@@ -17,7 +17,7 @@ health_addr = "0.0.0.0:8086"
 [pyth]
 # Sui TESTNET PriceInfoObjects are keyed by the BETA feed set; update
 # data must come from hermes-beta (see config.staging.toml for the
-# verification notes). Benchmarks is stable-only → sigma_fallback.
+# verification notes).
 hermes_url     = "https://hermes-beta.pyth.network"
 # Sui TESTNET Pyth + Wormhole deployment (prod runs testnet today), per
 # https://docs.pyth.network/price-feeds/contract-addresses/sui
@@ -31,17 +31,5 @@ price_info_table_id = "0xcb858b77d8068c6c8c0d8a4ddfba95053268e4a31f8ecc49adccc4e
 wormhole_state_id   = "0x31358d198147da50db32eda2562951d53973a0c0ad5ed738e9b17d88b213d790"
 update_fee_mist     = 1
 
-# Strategy defaults for every discovered vault — launch-memo values
-# (guide doc 08).
 [vault_defaults]
-iv_ratio = 1.15
-target_delta = 0.20
-# Hourly (≤6h round) vaults target closer to ATM: at that tenor a 0.20-delta
-# call's premium falls below the reserve, so it would never sell. (SO-262/grid.)
-short_round_target_delta = 0.25
-sigma_fallback = 0.85  # load-bearing on testnet (benchmarks is stable-only)
-vol_window_days = 30
-
-[vault_defaults.slicing]
-slices = 4
-stagger_minutes = 90
+vol_window_days = 30   # realized-vol window for the VolBook premium-mark crank

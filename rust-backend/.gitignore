@@ -41,10 +41,5 @@
 *.profraw
 tarpaulin-report.html
 
-# Backtester market data (fetched by tools/backtester/fetch-data.sh) and
-# run outputs. Only the small fixtures/ files are committed.
-tools/backtester/data/
-tools/backtester/out/
-
-# Python bytecode from the backtester fetch scripts.
+# Python bytecode (deployment scripts).
 __pycache__/

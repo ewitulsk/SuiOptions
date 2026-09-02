@@ -222,8 +222,7 @@ services:
   # positions, sweeps custody, posts external equity and fulfills the
   # withdrawal queue. Holds only a gas wallet (/run/secrets/keeper.toml,
   # from options/prod/keeper); with no trading vault on chain it idles
-  # with /health up. The covered-call crank it used to run alongside this
-  # is deprecated (SO-332) and lives in the undeployed keeper-legacy bin.
+  # with /health up.
   keeper:
     image: ${ECR}/options/keeper:${KEEPER_TAG}
     environment:

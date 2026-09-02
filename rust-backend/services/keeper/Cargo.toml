@@ -20,7 +20,6 @@ cli-spec       = { workspace = true }
 sui-tx         = { workspace = true }
 pyth-client    = { workspace = true }
 oracle-client  = { workspace = true }
-pricing        = { workspace = true }
 token-info-client = { workspace = true }
 indexer-graphql = { workspace = true }
 
@@ -41,8 +40,6 @@ metrics = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]
-# Strike-selection goldens shared with the backtester (doc 04 §5).
-vault-sim = { workspace = true }
 # Parse-validate the shipped per-env config TOMLs in unit tests.
 toml = { workspace = true }
 # Mock Bluefin account endpoint for the venue_equity::Bluefin test.
