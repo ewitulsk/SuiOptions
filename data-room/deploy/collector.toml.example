@@ -159,6 +159,21 @@ url = "wss://stream.api.sui-prod.bluefin.io/ws/market"
 products = ["SUI-PERP"]
 channels = ["Diff_Depth_200_ms", "Recent_Trade", "Ticker"]
 
+# Full-book snapshots for book_l2 reconstruction (SO-446, S5). The WS
+# diff stream alone cannot seed a book — its Partial_Depth streams are
+# top-5/10/20 only — and /v1/exchange/depth is the venue's documented
+# sync point (snapshot lastUpdateId sits inside one diff's
+# firstUpdateId..lastUpdateId). limit=1000 is the max and returns the
+# whole visible book (~50 levels/side today); 60 s gives 1,440
+# snapshots/day, so a partition never has to be reconstructed from the
+# previous day. Stream name is `depth.`, not `book.`, so the WS and REST
+# lines never share a spool file.
+[[pollers]]
+exchange = "bluefin"
+url = "https://api.sui-prod.bluefin.io/v1/exchange/depth?symbol=SUI-PERP&limit=1000"
+stream = "depth.SUI-PERP"
+interval_secs = 60
+
 # Funding settlements (SO-446). Public, unauthenticated; newest first,
 # default 100 rows (max 1000) — settlements are hourly, so one poll
 # covers ~4 days and an hourly cadence gives every settlement several

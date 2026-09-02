@@ -4,6 +4,7 @@
 
 pub mod aftermath;
 pub mod bluefin_funding;
+pub mod book_l2;
 pub mod deribit;
 pub mod funding;
 pub mod instruments;

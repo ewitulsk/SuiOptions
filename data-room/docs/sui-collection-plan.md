@@ -15,7 +15,7 @@ step not done — see §6.
 | S2 Bluefin SUI-PERP | **merged** | SO-404 (#490) |
 | S3 Vision backfill + timers | **backfill running, timers live** | SO-406 (#492) |
 | S4 bookTicker adapter | **merged** | SO-405 (#491) |
-| S5 P4 `book_deltas` | not started | — |
+| S5 P4 `book_deltas` (`book_l2` silver) | **merged, config pending on host** (gold `depth`/`seq_gap` open) | SO-446 |
 
 Written to be picked up by someone who has not been part of the analysis
 behind it.
@@ -569,7 +569,7 @@ the meantime. The expensive, irreversible thing is not recording.
 | **S2** ✅ | Bluefin bronze capture (1.3), incl. the allowlist, markers and `gaps.rs` | three streams landing; ack → `control.bluefin`; reconnect drill gives alternating markers **and** 12 gaps rows |
 | **S3** ✅ | Vision SUI backfill (3.1) **and the three systemd units** | backfill mirroring; units installed and timers armed for 00:10/00:15/00:30 UTC |
 | **S4** ✅ | `for_each_book_ticker` + `BookTopWriter` + normalizer arm (3.2) | 1,909,374 rows from the real 2024-03-30 dump — CSV lines minus header, zero rejects — at 224 MB peak RSS |
-| **S5** | P4 `book_deltas` schema + Bluefin/DeepBook normalizers | replay S2's accumulated bronze; determinism test green |
+| **S5** ✅ silver | P4 `book_deltas` schema (`book_l2`, plan §3) + Bluefin/DeepBook normalizers, plus the `depth.SUI-PERP` REST snapshot poller the plan turned out to need | determinism tests green in CI; host replay of accumulated bronze is the remaining gate (needs the collector.toml block deployed) |
 
 S5 is the only step left, and it is the one that **cannot be rushed**: its
 gate is a replay of accumulated Bluefin bronze, and that bronze started

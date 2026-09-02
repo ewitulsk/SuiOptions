@@ -21,12 +21,16 @@
 //! consumed by `normalizer::bluefin_funding`). Settlements are hourly —
 //! verified against the history endpoint, 3600 s apart.
 //!
-//! L2 diffs want the `book_deltas` table, which is P4 in the spec and
-//! does not exist yet — no depth `parse()` here until it lands. Bronze is
-//! sacred; the silver layer replays it then. All numeric fields arrive as
-//! E9-scaled integer strings (`bidsE9`, `lastFundingRateE9`).
+//! Depth (SO-446, S5 → `book_l2`): `parse_book` turns
+//! `OrderbookDiffDepthUpdate` frames into absolute level rows sequenced
+//! by `firstUpdateId..lastUpdateId`; `parse_depth_rest` turns the
+//! `GET /v1/exchange/depth` poller's response (`depth.{symbol}`) into a
+//! full-book snapshot at `lastUpdateId` — the documented sync point for
+//! the diff stream. `OrderbookPartialDepthUpdate` frames are top-N only
+//! (5/10/20 levels), so they are NOT snapshots and are skipped.
+//! All numeric fields arrive as E9-scaled integer strings.
 
-use schema::FundingRate;
+use schema::{BookL2, FundingRate};
 use serde::Deserialize;
 
 use crate::Reject;
@@ -104,6 +108,100 @@ pub fn parse_funding_history(
             })
         })
         .collect()
+}
+
+#[derive(Deserialize)]
+struct RawDepth {
+    symbol: String,
+    #[serde(rename = "updatedAtMillis")]
+    updated_ms: i64,
+    #[serde(rename = "bidsE9")]
+    bids_e9: Vec<[String; 2]>,
+    #[serde(rename = "asksE9")]
+    asks_e9: Vec<[String; 2]>,
+    #[serde(rename = "firstUpdateId")]
+    first_update_id: Option<i64>,
+    #[serde(rename = "lastUpdateId")]
+    last_update_id: i64,
+}
+
+fn depth_rows(
+    d: RawDepth,
+    is_snapshot: bool,
+    ts_recv: i64,
+    src_file: &str,
+    src_line: i32,
+) -> Result<Vec<BookL2>, Reject> {
+    let instrument = instrument_id(&d.symbol);
+    let mut rows = Vec::with_capacity(d.bids_e9.len() + d.asks_e9.len());
+    for (side, levels) in [("bid", &d.bids_e9), ("ask", &d.asks_e9)] {
+        for [px, sz] in levels {
+            let p =
+                |v: &str| e9(v).ok_or_else(|| reject(src_file, src_line, format!("bad level {v}")));
+            rows.push(BookL2 {
+                // The REST snapshot reports 0 here; that is "unknown".
+                ts_event: (d.updated_ms > 0).then_some(d.updated_ms * 1_000_000),
+                ts_recv,
+                exchange: EXCHANGE.into(),
+                instrument_id: instrument.clone(),
+                seq: d.last_update_id,
+                seq_first: if is_snapshot { None } else { d.first_update_id },
+                is_snapshot,
+                side: side.into(),
+                price: p(px)?,
+                size: p(sz)?,
+                src_file: src_file.into(),
+                src_line,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// One captured `book.{symbol}` frame → level rows. Diffs carry absolute
+/// sizes (0 = level removed) at `firstUpdateId..lastUpdateId`; partial
+/// depth frames parse to nothing (top-N is not a book image); anything
+/// else on the stream is a reject.
+pub fn parse_book(
+    payload: &str,
+    ts_recv: i64,
+    src_file: &str,
+    src_line: i32,
+) -> Result<Vec<BookL2>, Reject> {
+    #[derive(Deserialize)]
+    struct Frame {
+        event: String,
+        payload: Option<serde_json::Value>,
+    }
+    let f: Frame = serde_json::from_str(payload).map_err(|e| reject(src_file, src_line, e))?;
+    match (f.event.as_str(), f.payload) {
+        ("OrderbookDiffDepthUpdate", Some(raw)) => {
+            let d: RawDepth =
+                serde_json::from_value(raw).map_err(|e| reject(src_file, src_line, e))?;
+            if d.first_update_id.is_none() {
+                return Err(reject(src_file, src_line, "diff without firstUpdateId"));
+            }
+            depth_rows(d, false, ts_recv, src_file, src_line)
+        }
+        ("OrderbookPartialDepthUpdate", Some(_)) => Ok(vec![]),
+        (ev, _) => Err(reject(
+            src_file,
+            src_line,
+            format!("not a depth frame: {ev}"),
+        )),
+    }
+}
+
+/// One captured `GET /v1/exchange/depth` response → a full-book snapshot
+/// at `lastUpdateId` (`is_snapshot = true`).
+pub fn parse_depth_rest(
+    payload: &str,
+    ts_recv: i64,
+    src_file: &str,
+    src_line: i32,
+) -> Result<Vec<BookL2>, Reject> {
+    let d: RawDepth = serde_json::from_str(payload).map_err(|e| reject(src_file, src_line, e))?;
+    depth_rows(d, true, ts_recv, src_file, src_line)
 }
 
 /// The funding-relevant slice of a `TickerUpdate` frame.
@@ -278,6 +376,71 @@ mod tests {
     fn ids_and_partitions() {
         assert_eq!(instrument_id("SUI-PERP"), "sui-perp.bluefin");
         assert_eq!(partition_symbol("SUI-PERP"), "SUI-PERP");
+    }
+
+    /// Real frames off the live socket, 2026-09-01: a multi-level diff and
+    /// a `Partial_Depth_20` frame; plus a real `/v1/exchange/depth`
+    /// response from the same minute.
+    const BOOK_MULTI: &str = include_str!("../fixtures/bluefin-diffdepth-multi.json");
+    const PARTIAL: &str = include_str!("../fixtures/bluefin-partialdepth.json");
+    const DEPTH_REST: &str = include_str!("../fixtures/bluefin-depth-rest.json");
+
+    #[test]
+    fn real_diff_frames_parse_as_absolute_levels() {
+        let rows = parse_book(BOOK, 9, "f", 4).unwrap();
+        assert_eq!(rows.len(), 1); // one bid, no asks in this frame
+        let r = &rows[0];
+        assert_eq!(r.instrument_id, "sui-perp.bluefin");
+        assert_eq!((r.side.as_str(), r.price, r.size), ("bid", 0.6787, 2.0));
+        assert_eq!((r.seq_first, r.seq), (Some(16_837_928), 16_837_928));
+        assert!(!r.is_snapshot);
+        assert_eq!(r.ts_event, Some(1_786_822_333_604 * 1_000_000));
+        assert_eq!((r.ts_recv, r.src_line), (9, 4));
+
+        let rows = parse_book(BOOK_MULTI, 9, "f", 0).unwrap();
+        assert_eq!(rows.len(), 12); // 6 bids + 6 asks
+        assert!(rows
+            .iter()
+            .all(|r| r.seq_first == Some(67_638_374) && r.seq == 67_638_385));
+        assert_eq!(rows.iter().filter(|r| r.side == "bid").count(), 6);
+    }
+
+    #[test]
+    fn partial_depth_is_not_a_snapshot_and_control_is_a_reject() {
+        assert_eq!(parse_book(PARTIAL, 1, "f", 0).unwrap(), vec![]);
+        assert!(parse_book(TICKER, 1, "f", 0)
+            .unwrap_err()
+            .reason
+            .contains("not a depth frame"));
+        assert!(parse_book(r#"{"event":"SubscriptionAck"}"#, 1, "f", 0).is_err());
+    }
+
+    #[test]
+    fn real_rest_depth_is_a_full_snapshot() {
+        let rows = parse_depth_rest(DEPTH_REST, 3, "f", 0).unwrap();
+        assert_eq!(rows.len(), 49 + 48); // whole visible book that minute
+        assert!(rows
+            .iter()
+            .all(|r| r.is_snapshot && r.seq_first.is_none() && r.seq == 67_639_469));
+        // updatedAtMillis is 0 on the REST response → unknown, not epoch.
+        assert!(rows.iter().all(|r| r.ts_event.is_none()));
+        let bid = &rows[0];
+        assert_eq!(
+            (bid.side.as_str(), bid.price, bid.size),
+            ("bid", 0.7202, 69.0)
+        );
+        let best_bid = rows
+            .iter()
+            .filter(|r| r.side == "bid")
+            .map(|r| r.price)
+            .fold(0.0, f64::max);
+        let best_ask = rows
+            .iter()
+            .filter(|r| r.side == "ask")
+            .map(|r| r.price)
+            .fold(f64::MAX, f64::min);
+        assert!(best_bid < best_ask);
+        assert!(parse_depth_rest("{}", 1, "f", 0).is_err());
     }
 
     /// The depth frame is the one whose shape we actually depend on: the

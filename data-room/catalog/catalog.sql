@@ -19,6 +19,13 @@ CREATE OR REPLACE VIEW book_top AS
 SELECT *
 FROM read_parquet(getvariable('root') || '/silver/v1/book_top/**/*.parquet', hive_partitioning = true);
 
+-- L2 depth: one row per price level per update; `size` is absolute
+-- (0 = level removed), `is_snapshot` marks full-book images. Reconstruct
+-- with the latest snapshot at or before T plus the diffs after it.
+CREATE OR REPLACE VIEW book_l2 AS
+SELECT *
+FROM read_parquet(getvariable('root') || '/silver/v1/book_l2/**/*.parquet', hive_partitioning = true);
+
 -- Router execution curve: one row per (poll, direction, rung); partition
 -- key is `pair`, not `symbol`.
 CREATE OR REPLACE VIEW quote_ladder AS

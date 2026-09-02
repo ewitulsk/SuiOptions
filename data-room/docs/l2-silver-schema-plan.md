@@ -1,8 +1,11 @@
 # L2 depth: silver schema + gold slippage surface
 
-Status: **PLANNED, not started. 2026-08-15.** Promotes spec §13 P4
-("depth — deferred") into scope, because the backtesting framework's
-execution model has no other input.
+Status: **silver SHIPPED (SO-446, 2026-09-02): `book_l2` + `quote_ladder`
+schemas, Bluefin/DeepBook/Aftermath adapters and normalizers, determinism
+tests. `gold/depth`, `seq_gap`, quality gates and timers (§5, §6 gold
+rows, §8) remain open.** Originally planned 2026-08-15; promotes spec
+§13 P4 ("depth — deferred") into scope, because the backtesting
+framework's execution model has no other input.
 
 Companion docs: `docs/data-room-spec.md` (§4 layout, §5 schemas, §7
 normalizer contract), `sui-collection-plan.md` (the collectors producing
@@ -38,7 +41,7 @@ into one table would be wrong:
 | Source | Shape | Cadence |
 |---|---|---|
 | Bluefin WS `OrderbookDiffDepthUpdate` | sequenced **diffs** | 200 ms |
-| Bluefin WS `OrderbookPartialDepthUpdate` | periodic **snapshots** | venue-defined |
+| Bluefin REST `/v1/exchange/depth` (was: WS `OrderbookPartialDepthUpdate` — top-20 only, see §3) | full **snapshots** | 60 s poll |
 | DeepBook indexer `/orderbook?level=2&depth=100` | full **snapshots**, 50 levels/side | 30 s poll |
 | Aftermath router `/trade-route` | **quote ladder** (size in → amount out) | 5 min poll |
 
@@ -64,7 +67,8 @@ silver/v1/book_l2/exchange=<x>/symbol=<s>/date=<d>/part-00.parquet
 | `ts_recv` | i64 ns | capture time. **Never null** — this table is live-capture only, no archive source exists |
 | `exchange` | dict str | |
 | `instrument_id` | dict str | ours, not venue-native |
-| `seq` | i64 | venue sequence / update id — ordering **and** gap detection |
+| `seq` | i64 | venue sequence at the **end** of the update (Bluefin `lastUpdateId`; DeepBook: venue timestamp ms) — ordering **and** dedup |
+| `seq_first` | i64, nullable | venue sequence at the **start** of a diff (Bluefin `firstUpdateId`); null on snapshots. Gap detection: `seq_first != prev.seq + 1` |
 | `is_snapshot` | bool | true ⇒ this row belongs to a full-book image at `seq` |
 | `side` | dict str | `bid` \| `ask` |
 | `price` | f64 | |
@@ -78,8 +82,39 @@ make reconstruction idempotent — a dropped message corrupts one level
 until its next update, rather than permanently desynchronising an
 accumulator.
 
-Row sort for determinism (spec §7): `(ts_recv, seq, side, price)`.
-Writer settings from the existing `schema::writer_props()`.
+Row sort for determinism (spec §7): `(ts_recv, seq, side, price)`,
+lineage as the final tiebreak. Writer settings from the existing
+`schema::writer_props()`.
+
+**Shipped decisions (SO-446), recorded so they are not re-litigated:**
+
+- `seq_first` was added. The plan's single `seq` cannot detect a Bluefin
+  gap: frames span `firstUpdateId..lastUpdateId`, so `lastUpdateId`
+  legitimately jumps every frame. Verified on the live socket
+  (2026-09-01): consecutive frames satisfy `first == prev.last + 1`, so
+  `seq_first != prev.seq + 1` is the gap test.
+- **Bluefin snapshots come from the REST `GET /v1/exchange/depth`
+  poller (`depth.{symbol}` bronze, 60 s), not from the WS
+  `Partial_Depth_*` streams.** Partial depth is top-5/10/20 only —
+  probed live, `depthLevel: "20"` — so it is not a book image and the
+  normalizer parses those frames to nothing. The REST response is the
+  venue's documented diff-stream sync point (its `lastUpdateId` falls
+  inside one diff's `first..last`); `limit=1000` is the max and today
+  returns the whole visible book (~50 levels/side). Its
+  `updatedAtMillis` is `0`, so those rows have `ts_event = null`.
+- Frame dedup key is `(is_snapshot, seq)` across the day: a reconnect
+  re-capture or a DeepBook response served twice with the same
+  `timestamp` lands once, first capture wins (bronze keys are sorted).
+- Normalizer memory is bounded by **bronze hour**, not by day: an hour
+  directory is a `ts_recv` boundary, so per-hour sort + one row group
+  per hour (`schema::BookL2Writer`) preserves the global order without
+  ever holding a day of rows. A separate `normalizer::book_l2` module
+  rather than `ws.rs` arms, because `ws.rs` collects a whole day into a
+  `Vec` (fine for trades, not for 1–2M diff rows on a 2 GB host).
+- An empty diff (both sides empty) produces no rows and no dedup entry.
+- Symbols: Bluefin `SUI-PERP` → `sui-perp.bluefin` / partition
+  `SUI-PERP`; DeepBook pool `SUI_USDC` → `sui-usdc.deepbook` / partition
+  `SUI-USDC`.
 
 ### 3.1 Reconstruction contract
 
@@ -94,10 +129,12 @@ This imposes an **operational requirement on the collector**: every
 partition must contain at least one full snapshot, ideally several. Two
 consequences:
 
-- **Bluefin capture must subscribe to `OrderbookPartialDepthUpdate` as
-  well as the diff stream.** Diffs alone make a day's partition
-  unreconstructable without replaying the previous day, which breaks the
-  partition-independence the whole design rests on.
+- **Bluefin capture must poll `GET /v1/exchange/depth` alongside the
+  diff stream** (superseding the original "subscribe to
+  `OrderbookPartialDepthUpdate`" wording — see the shipped decisions
+  above for why partial depth cannot serve). Diffs alone make a day's
+  partition unreconstructable without replaying the previous day, which
+  breaks the partition-independence the whole design rests on.
 - A partition whose first snapshot is at 04:00 UTC cannot be
   reconstructed before 04:00. That is honest and acceptable — record it,
   do not paper over it (see §5).
@@ -210,17 +247,19 @@ Precise seams, all of which already exist:
 
 | File | Change |
 |---|---|
-| `crates/schema/src/lib.rs` | add `CanonicalEvent::{BookL2, QuoteLadder}` variants + `BookL2` / `QuoteLadder` structs; `book_l2_schema()` / `book_l2_batch()`, `quote_ladder_schema()` / `quote_ladder_batch()`; a `BookL2Writer` mirroring `TradesWriter` (per-day, `flush()` per 100k — the batch-memory discipline) |
-| `crates/adapters/src/bluefin.rs` | new: `parse()` → `BookL2` events, `route()` → bronze stream names. Golden fixtures from real captures |
-| `crates/adapters/src/deepbook.rs` | new: parse the indexer snapshot JSON → `BookL2` with `is_snapshot=true` |
-| `crates/adapters/src/aftermath.rs` | new: parse `/trade-route` → `QuoteLadder` (strip trailing `n`) |
-| `normalizer/src/ws.rs` | `parse_payload()` + `stream_target()` arms: `("bluefin","book") => ("book_l2", sym)` |
-| `normalizer/src/` (new module) | poller-sourced snapshots: DeepBook + Aftermath bronze → silver. These are poller streams, not WS, so they need their own path (compare `deribit.rs`, which does exactly this for chain polls) |
+| `crates/schema/src/lib.rs` | ✅ `BookL2` / `QuoteLadder` structs (typed, like `OptionsQuote` — no new `CanonicalEvent` variants were needed); `book_l2_schema()` / `book_l2_batch()`, `quote_ladder_schema()` / `quote_ladder_batch()` / `quote_ladder_key()`; `BookL2Writer` mirroring `TradesWriter` (one flushed row group per chunk) |
+| `crates/adapters/src/bluefin.rs` | ✅ `parse_book()` (WS diffs → `BookL2`), `parse_depth_rest()` (REST snapshot → `BookL2`, `is_snapshot=true`); real fixtures `bluefin-diffdepth{,-multi}.json`, `bluefin-partialdepth.json`, `bluefin-depth-rest.json` |
+| `crates/adapters/src/deepbook.rs` | ✅ `parse_book()` → `BookL2` with `is_snapshot=true`; real fixture `deepbook-orderbook.json` |
+| `crates/adapters/src/aftermath.rs` | ✅ `parse()` → `QuoteLadder` (strip trailing `n`); real fixtures both directions |
+| `normalizer/src/book_l2.rs` | ✅ Bluefin (`book.*` + `depth.*`) and DeepBook (`book.*`) → `book_l2`, hour-chunked; determinism tests. (`ws.rs` deliberately untouched — see §3 decisions) |
+| `normalizer/src/aftermath.rs` | ✅ `route.*` → `quote_ladder` |
+| `normalizer/src/main.rs` | ✅ `bluefin`, `deepbook`, `aftermath` subcommands |
 | `gold/src/depth.rs` | new: book replay + ladder walk → `gold/depth` |
 | `gold/src/main.rs` | `depth` subcommand |
 | `gold/src/gaps.rs` | emit `kind="seq_gap"` |
-| `catalog/catalog.sql` | views: `book_l2`, `quote_ladder`, `depth` |
-| `deploy/systemd/data-room-normalizer.service` | add the new normalizer invocations |
+| `catalog/catalog.sql` | ✅ views `book_l2`, `quote_ladder`; `depth` pending |
+| `deploy/systemd/data-room-normalizer.service` | ✅ `aftermath`, `bluefin`, `deepbook` lines (hand-installed on the host, per `sui-collection-plan.md` §0.2) |
+| `deploy/collector.toml.example` | ✅ `depth.SUI-PERP` REST snapshot poller (60 s) — must be mirrored onto the live host before Bluefin partitions are reconstructable |
 | `deploy/systemd/data-room-gold.service` | add `gold --date $d depth` after `bars` |
 
 `deribit.rs` is the closest existing model for the poller-snapshot path;
@@ -277,10 +316,10 @@ Added to the existing daily gate (spec §11, `dataroom-quality-gate`):
 
 | Phase | Scope | Gate |
 |---|---|---|
-| **L0** | `book_l2` schema + DeepBook adapter (snapshots only — no reconstruction needed) | DeepBook silver populated; `gold/depth` reproduces the §1 hand-measured depth profile |
-| **L1** | `quote_ladder` + Aftermath adapter | Router rungs in silver; `gold/depth` shows both sources; DeepBook-vs-router crossover visible |
+| **L0** ✅ silver | `book_l2` schema + DeepBook adapter (snapshots only — no reconstruction needed) | DeepBook silver populated; `gold/depth` reproduces the §1 hand-measured depth profile |
+| **L1** ✅ silver | `quote_ladder` + Aftermath adapter | Router rungs in silver; `gold/depth` shows both sources; DeepBook-vs-router crossover visible |
 | **L2** | `gold/depth` job + catalog views + timers | 7 consecutive days; quality gates green |
-| **L3** | Bluefin adapter (diffs + snapshots) + `seq_gap` | Reconstruction correctness harness: replay a day, compare reconstructed BBO against the venue's own ticker stream |
+| **L3** ✅ silver | Bluefin adapter (diffs + REST snapshots); `seq_gap` still open | Reconstruction correctness harness: replay a day, compare reconstructed BBO against the venue's own ticker stream |
 | **L4** | Backfill `bookTicker` (2023-05 → 2024-04) into `book_top` | Historical BBO queryable — the only pre-2026 spread data for SUI |
 
 **L0 and L1 come first deliberately**: they need no reconstruction (every
@@ -293,9 +332,9 @@ harder and unblocks the hedge-cost half.
 
 ## 10. Open questions
 
-1. **Bluefin snapshot cadence** — does `OrderbookPartialDepthUpdate` fire
-   often enough to give several snapshots per UTC day? If not, the
-   collector needs its own periodic resync poll. Blocks L3.
+1. ~~**Bluefin snapshot cadence**~~ — resolved (SO-446): partial depth
+   is top-20 at most, so it never could serve; the REST `/v1/exchange/depth`
+   poller at 60 s is the snapshot source (§3 decisions).
 2. **Depth truncation** — DeepBook gives 50 levels/side (`depth=100`
    max, `depth=200` errors). At the $1M rung that may be the whole visible
    book, so `exhausted` will be common. Decide whether to record the

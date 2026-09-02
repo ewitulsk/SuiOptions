@@ -6,6 +6,7 @@ pub mod aftermath;
 pub mod binance_vision;
 pub mod bluefin;
 pub mod coinbase;
+pub mod deepbook;
 pub mod deribit;
 pub mod hyperliquid;
 
