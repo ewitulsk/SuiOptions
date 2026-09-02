@@ -39,14 +39,98 @@ pub struct ExpectedHedgeCost {
     pub venue_fees: f64,
     pub slippage: f64,
     pub fixed_cost: f64,
+    /// Financing charge on the incremental margin the hedge parks at the
+    /// venue over the holding period (doc 08 §4.3; SO-437).
+    pub margin_financing: f64,
 }
 
 impl ExpectedHedgeCost {
     /// The bid subtracts this; never negative — a net funding credit can
     /// offset fees but never ADD to the bid.
     pub fn total(&self) -> f64 {
-        (self.funding + self.venue_fees + self.slippage + self.fixed_cost).max(0.0)
+        (self.funding + self.venue_fees + self.slippage + self.fixed_cost + self.margin_financing)
+            .max(0.0)
     }
+}
+
+/// Venue cost inputs for [`expected_hedge_cost`] (doc 08 §4.3, SO-437).
+/// `slippage_bps` and `taker_fee_bps` are bps of traded notional;
+/// `fixed_fee_per_fill` is in settlement units; `rebalance_turnover_per_year`
+/// is the expected number of extra fills per year per unit of initial
+/// hedge notional (doc 07 §5: ~11.3× per 30d turn at 20% bands ≈ 137/yr);
+/// `margin_financing_rate_annual` × `initial_margin_fraction` prices the
+/// cash parked as margin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HedgeCostParams {
+    pub slippage_bps: f64,
+    pub taker_fee_bps: f64,
+    pub fixed_fee_per_fill: f64,
+    pub rebalance_turnover_per_year: f64,
+    pub margin_financing_rate_annual: f64,
+    pub initial_margin_fraction: f64,
+}
+
+/// Position-aware expected hedge cost of one fill (doc 09 G2). The fill
+/// moves the signed hedge from `position_before_units` to
+/// `position_before_units − incremental_delta_units`; every term is the
+/// CHANGE that move causes, so a fill that reduces an existing hedge is
+/// charged only the trade it takes to reduce it, never as if it opened a
+/// fresh position.
+pub fn expected_hedge_cost(
+    position_before_units: f64,
+    incremental_delta_units: f64,
+    spot: f64,
+    funding_rate_annual: f64,
+    holding_years: f64,
+    income_credit: f64,
+    p: &HedgeCostParams,
+) -> ExpectedHedgeCost {
+    let after = position_before_units - incremental_delta_units;
+    let trade_notional = incremental_delta_units.abs() * spot;
+    let fills = 1.0 + p.rebalance_turnover_per_year.max(0.0) * holding_years.max(0.0);
+    let turnover_notional = trade_notional * fills;
+    let margin_delta = ((after.abs() - position_before_units.abs()) * spot).max(0.0);
+    ExpectedHedgeCost {
+        funding: expected_funding_cost_from_position(
+            position_before_units,
+            incremental_delta_units,
+            spot,
+            funding_rate_annual,
+            holding_years,
+            income_credit,
+        ),
+        venue_fees: turnover_notional * p.taker_fee_bps / 10_000.0,
+        slippage: turnover_notional * p.slippage_bps / 10_000.0,
+        fixed_cost: p.fixed_fee_per_fill * fills,
+        margin_financing: margin_delta
+            * p.initial_margin_fraction
+            * p.margin_financing_rate_annual
+            * holding_years.max(0.0),
+    }
+}
+
+/// Position-aware expected funding (doc 09 G2): `cost(after) − cost(before)`
+/// where `cost(pos) = funding × pos × spot × T` for a long (pays positive
+/// funding) and a short's income is credited at `income_credit`. Reducing
+/// a short under positive funding therefore costs only the credited income
+/// it gives up — zero at the conservative default.
+pub fn expected_funding_cost_from_position(
+    position_before_units: f64,
+    incremental_delta_units: f64,
+    spot: f64,
+    funding_rate_annual: f64,
+    holding_years: f64,
+    income_credit: f64,
+) -> f64 {
+    let cost = |pos: f64| {
+        let c = funding_rate_annual * pos * spot * holding_years;
+        if c >= 0.0 {
+            c
+        } else {
+            c * income_credit.clamp(0.0, 1.0)
+        }
+    };
+    cost(position_before_units - incremental_delta_units) - cost(position_before_units)
 }
 
 /// Direction-aware expected funding for one fill's incremental hedge
@@ -64,14 +148,15 @@ pub fn expected_funding_cost(
     holding_years: f64,
     income_credit: f64,
 ) -> f64 {
-    // Signed LONG-hedge notional for this fill: hedge_units × spot.
-    let hedge_notional = -incremental_delta_units * spot;
-    let cost = funding_rate_annual * hedge_notional * holding_years;
-    if cost >= 0.0 {
-        cost
-    } else {
-        cost * income_credit.clamp(0.0, 1.0)
-    }
+    // The from-flat special case of the position-aware form.
+    expected_funding_cost_from_position(
+        0.0,
+        incremental_delta_units,
+        spot,
+        funding_rate_annual,
+        holding_years,
+        income_credit,
+    )
 }
 
 /// V1 bid parameters (plan "V1 starting parameters"). Requires
@@ -333,9 +418,64 @@ mod tests {
 
     #[test]
     fn hedge_cost_total_floors_at_zero() {
-        let c = ExpectedHedgeCost { funding: -50.0, venue_fees: 10.0, slippage: 5.0, fixed_cost: 0.0 };
+        let c = ExpectedHedgeCost {
+            funding: -50.0,
+            venue_fees: 10.0,
+            slippage: 5.0,
+            fixed_cost: 0.0,
+            margin_financing: 0.0,
+        };
         close(c.total(), 0.0, 1e-12);
-        let c = ExpectedHedgeCost { funding: -5.0, venue_fees: 10.0, slippage: 5.0, fixed_cost: 1.0 };
-        close(c.total(), 11.0, 1e-12);
+        let c = ExpectedHedgeCost {
+            funding: -5.0,
+            venue_fees: 10.0,
+            slippage: 5.0,
+            fixed_cost: 1.0,
+            margin_financing: 2.0,
+        };
+        close(c.total(), 13.0, 1e-12);
+    }
+
+    // ── position-aware hedge cost (doc 09 G2, SO-437) ──────────────────
+
+    fn params() -> HedgeCostParams {
+        HedgeCostParams {
+            slippage_bps: 2.0,
+            taker_fee_bps: 3.5,
+            fixed_fee_per_fill: 0.03,
+            rebalance_turnover_per_year: 0.0,
+            margin_financing_rate_annual: 0.05,
+            initial_margin_fraction: 0.10,
+        }
+    }
+
+    #[test]
+    fn reducing_fill_is_not_charged_as_a_fresh_position() {
+        // Call-heavy book: hedge is short 100. A put fill (delta −20)
+        // REDUCES the short to 80. Under positive funding the short still
+        // receives; with income uncredited the funding change is zero and
+        // no new margin is parked — only the reducing trade's own fees.
+        let c = expected_hedge_cost(-100.0, -20.0, 10.0, 0.10, 0.1, 0.0, &params());
+        close(c.funding, 0.0, 1e-12);
+        close(c.margin_financing, 0.0, 1e-12);
+        close(c.venue_fees, 200.0 * 3.5 / 10_000.0, 1e-12);
+        // The same put from FLAT opens a long: funding and margin both bite.
+        let o = expected_hedge_cost(0.0, -20.0, 10.0, 0.10, 0.1, 0.0, &params());
+        close(o.funding, 0.10 * 20.0 * 10.0 * 0.1, 1e-12);
+        close(o.margin_financing, 200.0 * 0.10 * 0.05 * 0.1, 1e-12);
+        assert!(o.total() > c.total());
+        // With income credited, reducing the short gives up income: a cost.
+        let credited = expected_funding_cost_from_position(-100.0, -20.0, 10.0, 0.10, 0.1, 1.0);
+        close(credited, 2.0, 1e-12);
+    }
+
+    #[test]
+    fn turnover_scales_fees_slippage_and_fixed_cost() {
+        let mut p = params();
+        p.rebalance_turnover_per_year = 100.0; // ×0.1y → 10 extra fills
+        let c = expected_hedge_cost(0.0, 100.0, 10.0, 0.0, 0.1, 0.0, &p);
+        close(c.venue_fees, 1000.0 * 11.0 * 3.5 / 10_000.0, 1e-9);
+        close(c.slippage, 1000.0 * 11.0 * 2.0 / 10_000.0, 1e-9);
+        close(c.fixed_cost, 0.03 * 11.0, 1e-12);
     }
 }

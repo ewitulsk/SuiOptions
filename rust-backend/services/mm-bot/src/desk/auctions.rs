@@ -443,7 +443,7 @@ async fn tick(
         };
 
         // Max bid: the SAME V1 writer-flow decision as the WS channel.
-        let ctx = p.shared.flow_context(spot).await;
+        let ctx = p.shared.flow_context(spot, &p.models[mi].coin_type).await;
         let inputs = RfqInputs {
             write_amount: view.amount,
             is_put: bucket.is_put,
