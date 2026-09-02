@@ -10,6 +10,7 @@ step not done — see §6.
 | S0 telemetry | **live** | SO-402 (#488) |
 | S1 DeepBook + Coinbase/HL SUI | **live, capturing** | SO-403 (#489) |
 | S1b Aftermath router ladder | **live, capturing** | SO-403 (#489) |
+| S1c buy-base ladder + `quote_ladder` silver | **merged, config pending on host** | SO-446 |
 | S2 Bluefin SUI-PERP | **merged** | SO-404 (#490) |
 | S3 Vision backfill + timers | **backfill running, timers live** | SO-406 (#492) |
 | S4 bookTicker adapter | **merged** | SO-405 (#491) |
@@ -234,6 +235,12 @@ interval_secs = 300
 Ladder: ~$10k / $50k / $250k / $1M of SUI. Both directions if the vault
 will ever buy underlying, not just sell it. 5-minute cadence is ample —
 this is a depth-regime series, not a tick feed.
+
+**S1c (SO-446):** the buy-base direction is the mirrored five rungs as
+**fixed USDC** (`route.USDC-SUI.<usdc>`, 6 decimals) — see
+`deploy/collector.toml.example`. Silver is `quote_ladder`, one partition
+per pair with a `direction` column (`l2-silver-schema-plan.md` §4);
+`normalizer aftermath` promotes it daily.
 
 **Effort:** ~1 hour including the Poller extension. **Gate:** bronze
 landing per rung; output amounts parse and track spot sensibly.

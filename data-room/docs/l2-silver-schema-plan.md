@@ -127,21 +127,41 @@ silver/v1/quote_ladder/exchange=<x>/pair=<p>/date=<d>/part-00.parquet
 
 | column | type | notes |
 |---|---|---|
-| `ts_recv` | i64 ns | |
+| `ts_recv` | i64 ns | never null — live capture only |
 | `exchange` | dict str | `aftermath`, later others |
-| `pair` | dict str | e.g. `SUI-USDC` |
-| `side` | dict str | `sell_base` \| `buy_base` |
-| `amount_in` | f64 | human units |
-| `amount_out` | f64 | human units |
-| `route` | str, nullable | protocols traversed, e.g. `Bluefin,Cetus` — diagnostic |
+| `pair` | dict str | `BASE-QUOTE`, e.g. `SUI-USDC`, **for both directions** |
+| `direction` | dict str | `sell_base` (base in, quote out) \| `buy_base` (quote in, base out) |
+| `amount_in` | f64 | human units of the coin sent in |
+| `amount_out` | f64 | human units of the coin quoted out |
+| `route` | str, nullable | protocols traversed in order of first appearance, e.g. `Cetus,Bluefin` — diagnostic |
 | `src_file`, `src_line` | | lineage |
+
+**Shipped (SO-446, S1c).** `schema::QuoteLadder` / `quote_ladder_batch`,
+`adapters::aftermath::parse`, `normalizer aftermath`. Decisions taken
+while shipping, recorded so they are not re-litigated:
+
+- The column is `direction`, not `side` — `side` already means bid/ask
+  in `book_l2`, and the two tables are joined in `gold/depth`.
+- Direction is derived from the **payload**, not the stream name: the
+  coin type on `coinIn` / `coinOut` decides. USDC is the quote coin; the
+  other leg is the base. Every `route.SUI-USDC.*` row captured before
+  the buy-base pollers existed therefore normalizes as `sell_base` with
+  no migration — there were no silver rows to default.
+- Coin decimals come from a fixed coin-type table (`SUI` 9, `USDC` 6)
+  matched on the `::module::Name` suffix. An unknown coin is a reject,
+  never a guess.
+- Row order: `(ts_recv, direction, src_file, src_line, amount_in)`.
+- Buy-base rungs are **fixed USDC** (`route.USDC-SUI.<usdc>`), so those
+  stream names are dollar sizes; sell-base rungs stay fixed SUI. The
+  stream name is never read by the normalizer.
 
 Slippage is derived, not stored: it needs a reference mid, which is a
 gold-layer join. Keep silver a faithful record of what the venue quoted.
 
 Note the response quirk recorded in `sui-collection-plan.md` §1.1b —
 Aftermath returns BigInt-style strings with a trailing `n`. The adapter
-strips it; a golden fixture must cover it.
+strips it; the golden fixtures (`aftermath-trade-route-{sui-usdc,
+usdc-sui}.json`, real responses) cover both directions.
 
 ---
 

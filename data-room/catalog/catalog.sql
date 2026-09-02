@@ -19,6 +19,12 @@ CREATE OR REPLACE VIEW book_top AS
 SELECT *
 FROM read_parquet(getvariable('root') || '/silver/v1/book_top/**/*.parquet', hive_partitioning = true);
 
+-- Router execution curve: one row per (poll, direction, rung); partition
+-- key is `pair`, not `symbol`.
+CREATE OR REPLACE VIEW quote_ladder AS
+SELECT *
+FROM read_parquet(getvariable('root') || '/silver/v1/quote_ladder/**/*.parquet', hive_partitioning = true);
+
 CREATE OR REPLACE VIEW instruments AS
 SELECT *
 FROM read_parquet(getvariable('root') || '/silver/v1/instruments/**/*.parquet', hive_partitioning = true);

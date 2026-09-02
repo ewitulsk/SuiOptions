@@ -101,6 +101,27 @@ pub struct OptionsQuote {
     pub src_line: i32,
 }
 
+/// One router quote-ladder rung: a measured execution curve point, not a
+/// book (`docs/l2-silver-schema-plan.md` §4). Live-capture only, so
+/// `ts_recv` is never null.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuoteLadder {
+    pub ts_recv: i64,
+    pub exchange: String,
+    /// `BASE-QUOTE`, e.g. `SUI-USDC`, regardless of direction.
+    pub pair: String,
+    /// `sell_base` (base in, quote out) | `buy_base` (quote in, base out).
+    pub direction: String,
+    /// Human units of the coin sent in.
+    pub amount_in: f64,
+    /// Human units of the coin quoted out.
+    pub amount_out: f64,
+    /// Protocols traversed, e.g. `Cetus,Bluefin` — diagnostic.
+    pub route: Option<String>,
+    pub src_file: String,
+    pub src_line: i32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Marker {
     pub ts_recv: i64,
@@ -401,6 +422,67 @@ pub fn vol_index_schema() -> Schema {
 
 pub fn vol_index_key(exchange: &str, symbol: &str, date: &str) -> String {
     format!("silver/v1/vol_index/exchange={exchange}/symbol={symbol}/date={date}/part-00.parquet")
+}
+
+pub fn quote_ladder_schema() -> Schema {
+    let mut f = vec![
+        Field::new("ts_recv", DataType::Int64, false),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("pair", DataType::Utf8, false),
+        Field::new("direction", DataType::Utf8, false),
+        Field::new("amount_in", DataType::Float64, false),
+        Field::new("amount_out", DataType::Float64, false),
+        Field::new("route", DataType::Utf8, true),
+    ];
+    f.extend(lineage_fields());
+    Schema::new(f)
+}
+
+/// Row order: capture time, then direction and rung so the two ladders
+/// of one poll cycle interleave deterministically.
+pub fn quote_ladder_batch(mut rows: Vec<QuoteLadder>) -> anyhow::Result<RecordBatch> {
+    rows.sort_by(|a, b| {
+        (a.ts_recv, &a.direction, &a.src_file, a.src_line)
+            .cmp(&(b.ts_recv, &b.direction, &b.src_file, b.src_line))
+            .then(a.amount_in.total_cmp(&b.amount_in))
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(quote_ladder_schema()),
+        vec![
+            Arc::new(Int64Array::from_iter_values(rows.iter().map(|r| r.ts_recv))),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.exchange.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.pair.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.direction.as_str()),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.amount_in),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.amount_out),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.route.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.src_file.as_str()),
+            )),
+            Arc::new(Int32Array::from_iter_values(
+                rows.iter().map(|r| r.src_line),
+            )),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// quote_ladder partitions by PAIR (both directions in one file), not by
+/// the venue's per-rung stream, so a day of ladder is one small parquet.
+pub fn quote_ladder_key(exchange: &str, pair: &str, date: &str) -> String {
+    format!("silver/v1/quote_ladder/exchange={exchange}/pair={pair}/date={date}/part-00.parquet")
 }
 
 /// funding_rates partitions split by row kind so the live (predicted)
