@@ -80,6 +80,7 @@ impl OptionKind {
 
 /// The economics of one option line.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OptionSpec {
     pub kind: OptionKind,
     /// Strike in settlement per underlying unit (scaled).
@@ -90,6 +91,7 @@ pub struct OptionSpec {
 /// One long call / put line: exact quantity, cost basis of the units
 /// still held, the last mark, and the units whose exercise is in flight.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OptionPosition {
     pub spec: OptionSpec,
     /// Underlying units held.
@@ -115,6 +117,7 @@ impl OptionPosition {
 /// collateral posted, realized so far, and the traded cash flow the
 /// realized + unrealized reconciliation is checked against.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PerpPosition {
     /// Signed units: positive long, negative short.
     pub units: f64,
@@ -180,6 +183,7 @@ impl PerpPosition {
 
 /// Spot (underlying) inventory of one asset.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UnderlyingBalance {
     pub units: f64,
     /// Settlement per unit.
@@ -195,6 +199,7 @@ impl UnderlyingBalance {
 /// Queued withdrawal shares and what they are owed at the last
 /// observation (the settlement-value liability).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueuedWithdrawals {
     pub shares: f64,
     /// `None` when the queue could not be valued (missing pps): the
@@ -205,6 +210,7 @@ pub struct QueuedWithdrawals {
 
 /// The vault's external (hedge-venue) account as the chain attests it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExternalAccount {
     /// Settlement released to the venue and not yet returned.
     pub exposure: f64,
@@ -256,6 +262,7 @@ pub enum ExercisePath {
 /// exactly `flash_repaid ≥ flash_borrowed`; the ledger applies the whole
 /// plan atomically or not at all.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExercisePlan {
     pub option: OptionId,
     pub path: ExercisePath,
@@ -278,6 +285,7 @@ pub struct ExercisePlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingHedge {
     pub market: Market,
     pub size_units: f64,
@@ -286,6 +294,7 @@ pub struct PendingHedge {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingMargin {
     pub market: Market,
     /// Settlement already debited, credited to the venue when it lands.
@@ -294,6 +303,7 @@ pub struct PendingMargin {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingResale {
     pub option: OptionId,
     pub qty: f64,
@@ -302,6 +312,7 @@ pub struct PendingResale {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingExercise {
     pub plan: ExercisePlan,
     pub submitted_ms: u64,
@@ -309,6 +320,7 @@ pub struct PendingExercise {
 
 /// Everything submitted and not yet resolved.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Pending {
     /// Signed quotes out with the taker, not yet accepted / closed.
     pub quotes: BTreeSet<String>,
@@ -342,6 +354,7 @@ impl Pending {
 /// (a cost is negative) except the `*_paid` / fee / gas / penalty
 /// figures, which are the classic positive-cost sums the reports print.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Lines {
     /// Gross premium paid for options (positive).
     pub premium_paid: f64,
@@ -406,6 +419,7 @@ impl Lines {
 /// said on re-sync that the ledger had not predicted (deposits,
 /// withdrawals, unmodeled fees) and the withdrawal-queue liability.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EquityFlows {
     pub resync_settlement: f64,
     pub resync_underlying: f64,
@@ -429,6 +443,7 @@ impl EquityFlows {
 
 /// One re-synced option line (custody truth).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OptionSync {
     pub option: OptionId,
     pub spec: OptionSpec,
@@ -578,6 +593,7 @@ impl std::error::Error for LedgerError {}
 
 /// One violated invariant.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Violation {
     pub invariant: &'static str,
     pub detail: String,
@@ -587,6 +603,7 @@ pub struct Violation {
 /// policy counts it: each reservation and each marked line lands once in
 /// the total, once on its side, once at its expiry.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PremiumUsage {
     pub call: f64,
     pub put: f64,
@@ -602,6 +619,7 @@ pub struct PremiumUsage {
 // ── the ledger ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Ledger {
     /// NAV the ledger opened at (all of it settlement until re-synced).
     pub nav0: f64,

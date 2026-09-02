@@ -1160,18 +1160,18 @@ fn spawn_book_refresher(mut p: RefresherParams) {
             };
             // Queued withdrawals valued at the tranche's observed pps;
             // `None` (unvaluable) declines new quotes.
-            let queued_withdrawal_value = match &vault_view {
+            let (queued_withdrawal_value, queued_withdrawal_shares) = match &vault_view {
                 Some(v) => {
                     let vault_pt = protocol_types::ids::ObjectId::new(p.vault_id.into_bytes());
                     match p.indexer.vault_positions(vault_pt).await {
-                        Ok(positions) => queued_withdrawal_value(v, &positions),
+                        Ok(positions) => (queued_withdrawal_value(v, &positions), queued_withdrawal_shares(&positions)),
                         Err(e) => {
                             tracing::debug!(error = %format!("{e:#}"), "vault_positions read failed");
-                            None
+                            (None, 0.0)
                         }
                     }
                 }
-                None => None,
+                None => (None, 0.0),
             };
 
             // The observations, as one event; the kernel marks the book,
@@ -1189,6 +1189,7 @@ fn spawn_book_refresher(mut p: RefresherParams) {
                 free_underlying_by_asset: free.1,
                 external,
                 queued_withdrawal_value,
+                queued_withdrawal_shares,
             };
             let cmds = p.kernel.write().on_event(Event::MarkUpdate(Box::new(update)));
             p.sinks.apply(&p.kernel, &cmds);
@@ -1246,6 +1247,12 @@ fn queued_withdrawal_value(
         total += pos.shares as f64 * pps as f64 / 1e12 / OFFSET;
     }
     Some(total)
+}
+
+/// Shares across every `queued` VaultPosition (the ledger's withdrawal
+/// queue detail).
+fn queued_withdrawal_shares(positions: &[indexer_graphql::VaultPosition]) -> f64 {
+    positions.iter().filter(|p| p.status == "queued").map(|p| p.shares as f64).sum()
 }
 
 // ── fill poller (spread-line P&L attribution) ──────────────────────────

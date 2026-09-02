@@ -127,6 +127,7 @@ pub fn mark_update(nav: u64, spot: f64, at_ms: u64) -> desk_core::Event {
         free_underlying_by_asset: HashMap::new(),
         external: None,
         queued_withdrawal_value: Some(0.0),
+        queued_withdrawal_shares: 0.0,
     }))
 }
 

@@ -222,7 +222,7 @@ fn at_ms(ev: &Event) -> u64 {
 /// Live-shaped adapter: each I/O task hands its event to the kernel the
 /// moment it has it and executes the commands inline — a submitted
 /// hedge order comes straight back as the venue's synchronous events.
-fn run_live_shaped(trace: &[Event]) -> Vec<Command> {
+fn run_live_shaped(trace: &[Event]) -> (Vec<Command>, crate::ledger::Ledger) {
     let mut k = kernel(1_000_000_000);
     let mut out = Vec::new();
     fn apply(k: &mut DeskKernel, ev: Event, out: &mut Vec<Command>) {
@@ -242,13 +242,15 @@ fn run_live_shaped(trace: &[Event]) -> Vec<Command> {
     for ev in trace {
         apply(&mut k, ev.clone(), &mut out);
     }
-    out
+    assert_eq!(k.reconciliation(), Vec::new());
+    assert!(k.ledger_rejections.is_empty(), "{:?}", k.ledger_rejections);
+    (out, k.ledger().clone())
 }
 
 /// Simulation-shaped adapter: a clock-ordered event queue; the trace is
 /// scheduled up front and venue responses are scheduled at their
 /// actionable time, FIFO within a timestamp.
-fn run_sim_shaped(trace: &[Event]) -> Vec<Command> {
+fn run_sim_shaped(trace: &[Event]) -> (Vec<Command>, crate::ledger::Ledger) {
     let mut k = kernel(1_000_000_000);
     let mut out = Vec::new();
     let mut seq = 0u64;
@@ -286,20 +288,38 @@ fn run_sim_shaped(trace: &[Event]) -> Vec<Command> {
             out.push(cmd);
         }
     }
-    out
+    assert_eq!(k.reconciliation(), Vec::new());
+    (out, k.ledger().clone())
 }
 
 /// P1 gate: live adapter and simulation adapter produce identical
-/// commands for identical event traces.
+/// commands for identical event traces — and end with identical exact
+/// ledgers (SO-451).
 #[test]
 fn live_and_simulation_harnesses_yield_byte_identical_commands() {
     let trace = trace();
-    let live = run_live_shaped(&trace);
-    let sim = run_sim_shaped(&trace);
+    let (live, live_ledger) = run_live_shaped(&trace);
+    let (sim, sim_ledger) = run_sim_shaped(&trace);
     let (live_s, sim_s) = (format!("{live:#?}"), format!("{sim:#?}"));
     assert_eq!(live_s, sim_s, "live vs sim command sequences differ");
+    assert_eq!(
+        serde_json::to_string(&live_ledger).unwrap(),
+        serde_json::to_string(&sim_ledger).unwrap(),
+        "live vs sim ledgers differ"
+    );
     // Determinism (doc 08 §1 item 7): the same trace again is byte-identical.
-    assert_eq!(format!("{:#?}", run_live_shaped(&trace)), live_s);
+    assert_eq!(format!("{:#?}", run_live_shaped(&trace).0), live_s);
+    // The ledger saw the trace: the fill, the hedge fills, the funding,
+    // the exercise PTB, the venue's position readback.
+    assert_eq!(live_ledger.lines.fills, 1);
+    assert_eq!(live_ledger.lines.premium_paid, 6_000_000.0);
+    assert!(live_ledger.lines.hedge_fills >= 1);
+    assert_eq!(live_ledger.lines.funding_paid, 3.0);
+    assert_eq!(live_ledger.pending.exercises.len(), 1, "the call PTB is in flight");
+    // The −5M readback re-synced the perp, then the tick hedged it back
+    // toward neutral through the venue.
+    assert!(live_ledger.lines.hedge_fills >= 2 && live_ledger.perps["TSUI"].units > -5_000_000.0);
+    assert_eq!(live_ledger.reservations.len(), 0, "r1 filled, r3 reverted, nothing else reserved");
 
     // The trace exercised every command family it was built to.
     let has = |f: &dyn Fn(&Command) -> bool| live.iter().any(f);

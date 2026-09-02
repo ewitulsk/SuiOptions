@@ -63,6 +63,10 @@ pub struct DeskStateDto {
     pub written: Vec<WrittenDto>,
     pub reservations: ReservationsDto,
     pub pnl: PnlDto,
+    /// The exact ledger (doc 08 §5.3, SO-451): NAV from balances and
+    /// its reconciliation status. Additive; every field above is
+    /// unchanged.
+    pub ledger: LedgerDto,
     pub hedge: HedgeDto,
     pub markets: Vec<MarketDto>,
     pub config: ConfigEchoDto,
@@ -318,6 +322,43 @@ pub struct PnlDto {
     pub total: f64,
 }
 
+/// The exact ledger's headline figures and reconciliation status
+/// (`desk_core::ledger`). Settlement raw units.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerDto {
+    /// `assets − liabilities` (doc 08 §2.3).
+    pub nav: f64,
+    /// `nav0 + realized lines + option mark change + perp unrealized +
+    /// equity flows` — equal to `nav` when reconciled.
+    pub nav_explained: f64,
+    pub assets: f64,
+    pub liabilities: f64,
+    pub settlement: f64,
+    pub underlying_value: f64,
+    pub option_marks: f64,
+    pub perp_collateral: f64,
+    pub perp_unrealized: f64,
+    pub perp_realized: f64,
+    pub reserved: f64,
+    pub available_capital: f64,
+    pub withdrawal_liability: f64,
+    pub flash_outstanding: f64,
+    pub pending_ops: usize,
+    /// What custody / venue re-syncs said that the ledger had not
+    /// predicted (deposits, withdrawals, unmodeled fees).
+    pub residual: f64,
+    pub lines: desk_core::ledger::Lines,
+    pub equity_flows: desk_core::ledger::EquityFlows,
+    pub events_applied: u64,
+    pub last_event_ms: u64,
+    /// `violations` is empty.
+    pub reconciled: bool,
+    pub violations: Vec<desk_core::ledger::Violation>,
+    /// Ledger events the kernel could not apply (newest last).
+    pub rejections: Vec<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VenueDto {
@@ -460,7 +501,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
     // Book reads + net greeks off the refresher's per-unit marks.
     let per_unit: HashMap<protocol_types::ids::ObjectId, Greeks> =
         marks.iter().map(|(id, m)| (*id, m.greeks)).collect();
-    let (holdings, written, reservations, pnl, naked_written_units, by_expiry, total_greeks, listed_by_bucket) = {
+    let (holdings, written, reservations, pnl, naked_written_units, by_expiry, total_greeks, listed_by_bucket, ledger) = {
         let k = desk.kernel.read();
         let b = &k.book;
         let (by_expiry, total) = b.net_greeks(&per_unit);
@@ -478,6 +519,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             by_expiry,
             total,
             listed,
+            ledger_dto(&k),
         )
     };
 
@@ -728,6 +770,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             funding: pnl.funding,
             total: pnl.spread + pnl.scalp + pnl.theta + pnl.funding,
         },
+        ledger,
         hedge: HedgeDto {
             band_pct_nav: desk.cfg.hedge.band_pct_nav,
             band_wide_pct_nav: desk.cfg.hedge.band_wide_pct_nav,
@@ -748,6 +791,38 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             exits_enabled: desk.cfg.exits.enabled,
             listings_enabled: desk.cfg.listings.enabled,
         },
+    }
+}
+
+/// The ledger's headline figures + reconciliation, read under the
+/// kernel lock.
+fn ledger_dto(k: &desk_core::DeskKernel) -> LedgerDto {
+    let l = k.ledger();
+    let violations = k.reconciliation();
+    LedgerDto {
+        nav: l.nav(),
+        nav_explained: l.nav_explained(),
+        assets: l.assets(),
+        liabilities: l.liabilities(),
+        settlement: l.settlement,
+        underlying_value: l.underlying_value(),
+        option_marks: l.option_marks(),
+        perp_collateral: l.perp_collateral(),
+        perp_unrealized: l.perp_unrealized(),
+        perp_realized: l.perp_realized(),
+        reserved: l.reserved_total(),
+        available_capital: l.available_capital(),
+        withdrawal_liability: l.withdrawal_liability(),
+        flash_outstanding: l.flash_outstanding,
+        pending_ops: l.pending.len(),
+        residual: l.equity_flows.residual(),
+        lines: l.lines,
+        equity_flows: l.equity_flows,
+        events_applied: l.events_applied,
+        last_event_ms: l.last_event_ms,
+        reconciled: violations.is_empty(),
+        violations,
+        rejections: k.ledger_rejections.clone(),
     }
 }
 
