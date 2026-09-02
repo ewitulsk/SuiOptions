@@ -679,6 +679,22 @@ mod tests {
         assert!(b.reserve(900, 10_000, 20_000).is_ok());
     }
 
+    /// The ledger's capital rule (doc 08 §5.3) backstops the NAV rule: a
+    /// reservation the free settlement cannot back is refused even when
+    /// `reservations + deployed ≤ NAV` would allow it.
+    #[test]
+    fn ledger_capital_rule_backstops_the_nav_rule() {
+        let mut b = Book::new(1_000);
+        b.ledger
+            .apply(&LedgerEvent::ResyncBalances { settlement: Some(100.0), underlying: vec![], at_ms: 0 })
+            .unwrap();
+        assert_eq!(b.reserve(500, 30_000, 0), Err(ReserveError::ExceedsAvailableCapital));
+        assert!(b.reserve(100, 30_000, 0).is_ok());
+        assert_eq!(b.reserved_total(), 100);
+        assert_eq!(b.ledger.reserved_total(), 100.0, "one store");
+        assert!(b.drain_reservation_transitions().len() == 1);
+    }
+
     // ── keyed, durable reservations (SO-444) ───────────────────────────
 
     fn quote_res(key: &str, nonce: u64, amount: u64, is_put: bool, expiry: u64) -> QuoteReservation {

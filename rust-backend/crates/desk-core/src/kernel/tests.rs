@@ -12,6 +12,7 @@ use vol_forecast::RollingVolBuffer;
 
 use super::*;
 use crate::book::Holding;
+use crate::ledger::OptionKind;
 use crate::exits::put::PutExerciseConfig;
 use crate::hedge::Fill;
 use crate::model::SurfaceConfig;
@@ -340,6 +341,63 @@ fn live_and_simulation_harnesses_yield_byte_identical_commands() {
     assert!(has(&|c| matches!(c, Command::Decline { request_id, reason } if request_id == "r4" && reason.contains("kill switch"))));
     assert!(has(&|c| matches!(c, Command::ActivatePolicy(PolicyState::RiskOff))));
     assert!(has(&|c| matches!(c, Command::Decline { request_id, reason } if request_id == "r5" && reason.contains("risk-off"))));
+}
+
+/// The ledger follows the mark pass — chain balances and custody become
+/// its balances and option lines (residuals on the equity lines), the
+/// withdrawal queue its liability — and its capital rule declines a
+/// quote the free settlement cannot back (doc 08 §5.3).
+#[test]
+fn ledger_follows_the_mark_pass_and_gates_reservations_on_free_settlement() {
+    let mut k = kernel(1_000_000_000);
+    let call = holding(1, false, 100, T0 + 30 * DAY_MS, 1_200_000, 0);
+    let put = holding(2, true, 100, T0 + 30 * DAY_MS, 0, 500_000);
+    let _ = k.on_event(Event::Spot { market: 0, spot: 100.0, at_ms: T0 });
+    let _ = k.on_event(mark_update(T0, Some((vec![call, put], Vec::new()))));
+    let l = k.ledger();
+    assert_eq!(l.settlement, 1e9);
+    assert_eq!(l.underlying["TSUI"].units, 5e6, "5e8 of value at spot 100");
+    assert_eq!(l.options.len(), 2);
+    let c = &l.options[&oid(1).to_hex()];
+    assert_eq!((c.spec.kind, c.qty, c.spec.strike), (OptionKind::Call, 1_200_000.0, 100.0));
+    assert!(c.mark_per_unit > 0.0, "marked by the pass");
+    // The opening NAV was all settlement; custody added value the ledger
+    // had not predicted — booked as resync flows, and it reconciles.
+    assert!(l.equity_flows.residual() > 0.0);
+    assert_eq!(k.reconciliation(), Vec::new());
+    let nav_after_sync = l.nav();
+
+    // A quote reserves on the ledger; the withdrawal queue is a liability.
+    let Decision::Quote { premium, .. } = k.decide_rfq(Side::Writer, 0, atm(false), 100.0, Some(("q1", 1)), T0 + 1) else {
+        panic!()
+    };
+    assert_eq!(k.ledger().reserved_total(), premium as f64);
+    let update = |at_ms: u64, free_settlement: f64, queued: f64, shares: f64| {
+        let Event::MarkUpdate(mut u) = mark_update(at_ms, None) else { unreachable!() };
+        u.free_settlement = free_settlement;
+        u.queued_withdrawal_value = Some(queued);
+        u.queued_withdrawal_shares = shares;
+        Event::MarkUpdate(u)
+    };
+    let _ = k.on_event(update(T0 + 2, 1e9, 2.5e8, 7.0));
+    let l = k.ledger();
+    assert_eq!(l.queued_withdrawals.shares, 7.0);
+    // (2 ms of theta on the re-mark.)
+    assert!((l.nav() - (nav_after_sync - 2.5e8)).abs() < 1e-2, "nav {} after sync {nav_after_sync}", l.nav());
+    assert_eq!(k.reconciliation(), Vec::new());
+
+    // Free settlement collapses below the live reservation: the capital
+    // rule is reported, and the next quote declines (the capital policy's
+    // free-quote-cash gate fires first; the ledger's own rule is the
+    // backstop — `book::tests::ledger_capital_rule_backstops_the_nav_rule`).
+    let _ = k.on_event(update(T0 + 3, 1_000.0, 0.0, 0.0));
+    let v = k.reconciliation();
+    assert_eq!(v.len(), 1, "{v:?}");
+    assert_eq!(v[0].invariant, "reservations + committed spend ≤ available capital");
+    let d = k.decide_rfq(Side::Writer, 0, atm(false), 100.0, Some(("q2", 2)), T0 + 4);
+    assert!(matches!(&d, Decision::Decline { .. }), "{d:?}");
+    assert_eq!(k.ledger().reserved_total(), premium as f64, "nothing new reserved");
+    assert!(k.ledger_rejections.is_empty(), "{:?}", k.ledger_rejections);
 }
 
 /// The kernel's RFQ decision IS `quote::price_writer_flow` under the

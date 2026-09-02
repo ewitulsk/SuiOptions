@@ -979,6 +979,21 @@ mod tests {
         assert_eq!((z.premium, z.vega, z.theta), (0.0, 0.0, 0.0));
     }
 
+    /// The additive `ledger` block: a fresh kernel reconciles at its
+    /// opening NAV and the JSON is camelCase like the rest of the DTO.
+    #[test]
+    fn ledger_block_reconciles_and_serializes_camel_case() {
+        let kernel = crate::desk::testkit::kernel(1e9);
+        let dto = ledger_dto(&kernel.read());
+        assert!(dto.reconciled && dto.violations.is_empty() && dto.rejections.is_empty());
+        assert_eq!((dto.nav, dto.nav_explained, dto.settlement), (1e9, 1e9, 1e9));
+        let v = serde_json::to_value(&dto).unwrap();
+        assert_eq!(v["navExplained"], 1e9);
+        assert_eq!(v["lines"]["premiumPaid"], 0.0);
+        assert_eq!(v["equityFlows"]["resyncSettlement"], 0.0);
+        assert_eq!(v["pendingOps"], 0);
+    }
+
     #[test]
     fn state_dto_serializes_camel_case_with_string_strikes() {
         let dto = HoldingDto {
