@@ -34,3 +34,20 @@ sample_interval_s = 900
 [hedge]
 band_pct_nav = 20.0
 band_wide_pct_nav = 30.0
+
+# Doc 08 §6.3/§6.4 (PR K): per-stage latencies (all assumed until the
+# data room captures inclusion/detection timestamps) and the gap policy.
+# Omitted stages take the code defaults; `[latency]` is labeled in every
+# summary as `latency_assumptions`.
+[latency]
+strategy = { mean_ms = 200, jitter_ms = 100, assumed = true }
+venue_submit = { mean_ms = 150, jitter_ms = 100, assumed = true }
+venue_fill_report = { mean_ms = 200, jitter_ms = 100, assumed = true }
+sui_inclusion = { mean_ms = 1500, jitter_ms = 1000, assumed = true }
+indexer_detection = { mean_ms = 2000, jitter_ms = 1000, assumed = true }
+seed = 1
+
+[gaps]
+required_feeds = ["spot"]
+max_gap_ms = 300_000
+policy = "invalidate"

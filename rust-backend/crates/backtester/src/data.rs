@@ -157,3 +157,138 @@ pub async fn load_vol_index(store: &Store, exchange: &str, symbol: &str, from: &
     out.sort_by_key(|r| r.0);
     Ok(out)
 }
+
+// ── streaming sources (doc 08 §6.5) ────────────────────────────────────
+
+use std::collections::VecDeque;
+
+use arrow::array::RecordBatch;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
+
+use crate::merge::{EventSource, External};
+
+/// Decode one Arrow batch of a lake table into external rows.
+type Decode = fn(&RecordBatch) -> Result<Vec<External>>;
+
+/// One lake table as a pull source: one parquet object open at a time,
+/// one Arrow batch decoded at a time (the data-room `gold/read.rs`
+/// pattern), so a multi-year replay is bounded by the batch, not the
+/// span. Missing partitions are simply absent.
+pub struct LakeSource {
+    name: String,
+    store: Store,
+    keys: VecDeque<String>,
+    reader: Option<ParquetRecordBatchReader>,
+    batch: VecDeque<External>,
+    decode: Decode,
+    yielded: u64,
+}
+
+impl LakeSource {
+    fn new(name: &str, store: &Store, keys: Vec<String>, decode: Decode) -> Self {
+        Self { name: name.into(), store: store.clone(), keys: keys.into(), reader: None, batch: VecDeque::new(), decode, yielded: 0 }
+    }
+
+    /// Gold 60-second bars.
+    pub fn bars(store: &Store, exchange: &str, symbol: &str, from: &str, to: &str) -> Result<Self> {
+        let keys = dates(from, to)?
+            .into_iter()
+            .map(|d| format!("gold/v1/bars/freq=60s/exchange={exchange}/symbol={symbol}/date={d}/part-00.parquet"))
+            .collect();
+        Ok(Self::new("spot", store, keys, decode_bars))
+    }
+
+    /// Silver settled funding rows.
+    pub fn funding(store: &Store, exchange: &str, symbol: &str, from: &str, to: &str) -> Result<Self> {
+        let keys = dates(from, to)?
+            .into_iter()
+            .map(|d| format!("silver/v1/funding_rates/exchange={exchange}/symbol={symbol}/date={d}/part-settled.parquet"))
+            .collect();
+        Ok(Self::new("funding", store, keys, decode_funding))
+    }
+
+    /// Silver vol index closes; an empty symbol is an empty source.
+    pub fn vol_index(store: &Store, exchange: &str, symbol: &str, from: &str, to: &str) -> Result<Self> {
+        let keys = if symbol.is_empty() {
+            Vec::new()
+        } else {
+            dates(from, to)?
+                .into_iter()
+                .map(|d| format!("silver/v1/vol_index/exchange={exchange}/symbol={symbol}/date={d}/part-00.parquet"))
+                .collect()
+        };
+        Ok(Self::new("vol_index", store, keys, decode_vol_index))
+    }
+
+    /// Open the next existing object; false when the roster is done.
+    fn open_next(&mut self) -> Result<bool> {
+        while let Some(key) = self.keys.pop_front() {
+            let store = self.store.clone();
+            let bytes = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(get_bytes(&store, &key)))?;
+            if let Some(bytes) = bytes {
+                self.reader = Some(ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()?);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+impl EventSource for LakeSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn next_row(&mut self) -> Result<Option<External>> {
+        loop {
+            if let Some(r) = self.batch.pop_front() {
+                self.yielded += 1;
+                return Ok(Some(r));
+            }
+            match self.reader.as_mut().and_then(|r| r.next()) {
+                Some(batch) => {
+                    let mut rows = (self.decode)(&batch?)?;
+                    rows.sort_by_key(|r| r.ts_ms());
+                    self.batch = rows.into();
+                }
+                None => {
+                    self.reader = None;
+                    if !self.open_next()? {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    fn rows(&self) -> u64 {
+        self.yielded
+    }
+}
+
+fn decode_bars(b: &RecordBatch) -> Result<Vec<External>> {
+    let ts = col_i64(b, "ts_open")?;
+    let (o, h, l, c, v) = (col_f64(b, "open")?, col_f64(b, "high")?, col_f64(b, "low")?, col_f64(b, "close")?, col_f64(b, "volume")?);
+    Ok((0..b.num_rows())
+        .map(|i| External::Bar(Bar { ts_ms: to_ms(ts.value(i)), open: o.value(i), high: h.value(i), low: l.value(i), close: c.value(i), volume: v.value(i) }))
+        .collect())
+}
+
+fn decode_funding(b: &RecordBatch) -> Result<Vec<External>> {
+    let ts_event = col_i64(b, "ts_event")?;
+    let ts_recv = col_i64(b, "ts_recv")?;
+    let rate = col_f64(b, "rate")?;
+    let hours = col_f64(b, "interval_hours")?;
+    let mut out = Vec::with_capacity(b.num_rows());
+    for i in 0..b.num_rows() {
+        let ts = if ts_event.is_valid(i) { ts_event.value(i) } else if ts_recv.is_valid(i) { ts_recv.value(i) } else { continue };
+        out.push(External::Funding(FundingRow { ts_ms: to_ms(ts), rate: rate.value(i), interval_hours: hours.value(i) }));
+    }
+    Ok(out)
+}
+
+fn decode_vol_index(b: &RecordBatch) -> Result<Vec<External>> {
+    let ts = col_i64(b, "ts")?;
+    let close = col_f64(b, "close")?;
+    Ok((0..b.num_rows()).map(|i| External::VolIndex { ts_ms: to_ms(ts.value(i)), pct: close.value(i) }).collect())
+}

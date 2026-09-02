@@ -91,6 +91,8 @@ pub struct Lines {
     pub declines_capacity: u64,
     pub declines_stale: u64,
     pub declines_priced_zero: u64,
+    /// Venue rejections of hedge orders (doc 08 §7.2).
+    pub hedge_rejects: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]

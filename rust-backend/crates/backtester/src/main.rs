@@ -84,8 +84,9 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Run { scenario, out } => {
             let s = Scenario::load(&scenario)?;
-            let (bars, funding, index) = load(&store, &s).await?;
-            let o = engine::run(&s, &bars, &funding, &index)?;
+            // Streamed: one parquet object and one Arrow batch per source
+            // in memory (doc 08 §6.5); sweeps and the solver load once.
+            let o = engine::run_sources(&s, lake_sources(&store, &s)?)?;
             let summary = report::summarize(&s, &o);
             report::write_all(&out, &s, &o, &summary)?;
             println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -156,13 +157,26 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn load(store: &data::Store, s: &Scenario) -> Result<(Vec<data::Bar>, Vec<data::FundingRow>, Vec<(i64, f64)>)> {
-    // Warm the estimator: read the long window before `from`.
+/// Warm the estimator: the long window (or HAR calibration) before `from`.
+fn warm_from(s: &Scenario) -> Result<String> {
     let mut warm_days = (s.estimator.long_window_hours / 24.0).ceil() as i64 + 1;
     if s.estimator.kind == "har" {
         warm_days = warm_days.max(s.estimator.calibration_days as i64 + 2);
     }
-    let from = (chrono::NaiveDate::parse_from_str(&s.from, "%Y-%m-%d")? - chrono::Duration::days(warm_days)).format("%Y-%m-%d").to_string();
+    Ok((chrono::NaiveDate::parse_from_str(&s.from, "%Y-%m-%d")? - chrono::Duration::days(warm_days)).format("%Y-%m-%d").to_string())
+}
+
+fn lake_sources(store: &data::Store, s: &Scenario) -> Result<engine::Sources> {
+    let from = warm_from(s)?;
+    Ok(engine::Sources {
+        bars: Box::new(data::LakeSource::bars(store, &s.spot_exchange, &s.spot_symbol, &from, &s.to)?),
+        funding: Box::new(data::LakeSource::funding(store, &s.funding_exchange, &s.funding_symbol, &s.from, &s.to)?),
+        vol_index: Box::new(data::LakeSource::vol_index(store, &s.vol_index_exchange, &s.vol_index_symbol, &from, &s.to)?),
+    })
+}
+
+async fn load(store: &data::Store, s: &Scenario) -> Result<(Vec<data::Bar>, Vec<data::FundingRow>, Vec<(i64, f64)>)> {
+    let from = warm_from(s)?;
     let bars = data::load_bars(store, &s.spot_exchange, &s.spot_symbol, &from, &s.to).await?;
     let funding = data::load_funding(store, &s.funding_exchange, &s.funding_symbol, &s.from, &s.to).await?;
     let index = if s.vol_index_symbol.is_empty() {
