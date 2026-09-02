@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, VecDeque};
 use anyhow::Result;
 use pricing::american::{forgone_carry, remaining_time_value_call, AmericanInputs};
 use pricing::desk::{expected_hedge_cost, v1_bid, BidContext, HedgeCostParams, V1BidParams};
+use desk_core::book::{Reservation, ReservationState};
 use serde::Serialize;
 
 use crate::acceptance::{displayed_apy, AcceptanceModel, LiveQuote, Outcome};
@@ -44,7 +45,7 @@ use crate::exercise::{self, CallPath, ExerciseStats, PlanReject, PtbHazard, PutL
 use crate::flow_gen::{ConstantSource, FlowCtx, FlowGen, FlowSource, RfqEvent};
 use crate::gaps::{Coverage, GapTracker};
 use crate::latency::{LatencyConfig, LatencyModel, LatencyStage};
-use crate::ledger::{Ledger, Position};
+use crate::ledger::{self, option_id, Counters, ExercisePath, ExercisePlan, Ledger, LedgerEvent, OptionKind, OptionSpec, PerpPosition, Study};
 use crate::margin::{entry_margin, topup_amount, IsolatedPosition};
 use crate::merge::{EventSource, External, Merge, SliceSource};
 use crate::model::{fair_per_unit, greeks_per_unit};
@@ -112,7 +113,10 @@ pub struct VenueLabels {
 pub struct RunOutput {
     pub nav_path: Vec<NavPoint>,
     pub settled: Vec<SettledOption>,
+    /// The exact ledger (doc 08 §5.3): reconciled after every event.
     pub ledger: Ledger,
+    /// Strategy declines that move no balance.
+    pub counters: Counters,
     pub minutes_total: u64,
     pub minutes_with_bar: u64,
     pub minutes_stale: u64,
@@ -270,6 +274,8 @@ const CRR_STEPS: usize = 128;
 /// the desk saw, settled at detection.
 #[derive(Clone, Debug)]
 struct ExerciseCmd {
+    /// The ledger's pending-exercise op.
+    op: u64,
     position_id: u64,
     units: f64,
     is_put: bool,
@@ -330,6 +336,17 @@ struct Engine<'a> {
     est: WindowsEstimator,
     oracle: OracleProxy,
     ledger: Ledger,
+    /// Per-option study data keyed by position id (the ledger holds the
+    /// quantities and marks).
+    studies: BTreeMap<u64, Study>,
+    counters: Counters,
+    next_id: u64,
+    next_op: u64,
+    /// The ledger's perp market key.
+    perp_key: String,
+    /// Sent top-ups awaiting their venue outcome (FIFO: the transfer
+    /// latency is constant).
+    topup_ops: VecDeque<u64>,
     v1: V1BidParams,
     hedge_cost: HedgeCostParams,
     acceptance: AcceptanceModel,
@@ -381,6 +398,27 @@ fn bump(map: &mut BTreeMap<String, u64>, key: &str) {
     *map.entry(key.to_string()).or_insert(0) += 1;
 }
 
+/// Engine instants are `i64` ms; the ledger's are `u64`.
+fn ms_u64(ms: i64) -> u64 {
+    ms.max(0) as u64
+}
+
+/// The ledger's reservation key of one live quote.
+fn quote_key(q: &LiveQuote) -> String {
+    format!("{}:{}:{}:{}", q.rfq.key.minute, q.rfq.key.is_put as u8, q.rfq.key.k, q.sent_ms)
+}
+
+/// The route label the exercise model chose → the ledger's PTB path.
+fn ledger_path(label: &str) -> ExercisePath {
+    match label {
+        "call_cash" => ExercisePath::CallCash,
+        "call_quote_flash" => ExercisePath::CallFlash,
+        "vault_underlying" => ExercisePath::PutVaultUnderlying,
+        "base_flash" => ExercisePath::PutBaseFlash,
+        _ => ExercisePath::PutQuoteFlash,
+    }
+}
+
 impl<'a> Engine<'a> {
     fn trace(&mut self, ms: i64, stage: Stage, sub: u8) {
         let mut h = self.trace_hash;
@@ -411,8 +449,27 @@ impl<'a> Engine<'a> {
         self.venue.mark(&self.market)
     }
 
+    fn perp(&self) -> PerpPosition {
+        self.ledger.perps.get(&self.perp_key).copied().unwrap_or_default()
+    }
+
+    /// Apply one ledger event; a refusal is an engine bug (the one
+    /// expected refusal, a reservation over capital, is handled in
+    /// `on_flow`).
+    fn apply(&mut self, ev: LedgerEvent) {
+        if let Err(e) = self.ledger.apply(&ev) {
+            panic!("ledger refused {ev:?}: {e}");
+        }
+    }
+
+    fn next_op(&mut self) -> u64 {
+        self.next_op += 1;
+        self.next_op
+    }
+
     fn account(&self) -> IsolatedPosition {
-        IsolatedPosition { size: self.ledger.perp.position, entry: self.ledger.perp.avg_entry, margin: self.ledger.perp.collateral }
+        let p = self.perp();
+        IsolatedPosition { size: p.units, entry: p.entry, margin: p.collateral }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -424,14 +481,18 @@ impl<'a> Engine<'a> {
         let fair_pu = fair_per_unit(is_put, spot, strike, t, sigma, carry);
         let g = greeks_per_unit(is_put, spot, strike, t, sigma, carry);
         let fair = fair_pu * qty;
-        let vega_book: f64 = self.ledger.positions.iter().map(|p| p.vega_open * p.qty / 100.0).sum();
+        let vega_book: f64 = self
+            .studies
+            .values()
+            .map(|st| st.vega_open * self.ledger.options.get(&option_id(st.id)).map_or(0.0, |p| p.qty) / 100.0)
+            .sum();
         let vega_util = if s.limits.vega_cap_nav_per_volpt > 0.0 { vega_book / (s.limits.vega_cap_nav_per_volpt * nav) } else { 0.0 };
         let ctx = BidContext {
             nav,
             premium_notional: fair,
             vega_utilization: vega_util,
             hedge_cost: expected_hedge_cost(
-                self.ledger.perp.position,
+                self.perp().units,
                 g.delta * qty,
                 spot,
                 self.funding_annual,
@@ -476,6 +537,8 @@ impl<'a> Engine<'a> {
         self.last_spot = bar.close;
         self.spot_start.get_or_insert(bar.close);
         self.market = MarketState::from_bar(&bar);
+        let mark = self.mark();
+        self.apply(LedgerEvent::MarkPerp { market: self.perp_key.clone(), mark, at_ms: ms_u64(at.ms()) });
         let extra = self.lat.draw(LatencyStage::Observation);
         if let Some(obs) = self.oracle.observe(at.ms(), bar.close, extra) {
             let actionable = ActionableTime(obs.actionable_ms);
@@ -495,11 +558,10 @@ impl<'a> Engine<'a> {
 
     /// Funding settles at the venue against the signed position at the
     /// venue mark (doc 08 §1 item 4, §7.4).
-    fn on_funding(&mut self, _at: EventTime, row: FundingRow) {
+    fn on_funding(&mut self, at_: EventTime, row: FundingRow) {
         self.funding_annual = annualize(&row);
-        let paid = row.rate * self.ledger.perp.position * self.mark();
-        self.ledger.cash -= paid;
-        self.ledger.lines.funding_paid += paid;
+        let paid = row.rate * self.perp().units * self.mark();
+        self.apply(LedgerEvent::Funding { market: self.perp_key.clone(), paid, at_ms: ms_u64(at_.ms()) });
         self.funding_settlements += 1;
     }
 
@@ -543,37 +605,13 @@ impl<'a> Engine<'a> {
             self.last_revalue_ms = now;
         }
 
-        // Mark every open option at the surface sigma (at the revalue
-        // cadence); settle expiries every minute.
+        // Settle expiries every minute: whatever is still held expires
+        // worthless (a slice included before expiry but not yet detected
+        // keeps a worthless shell in the ledger until it lands); then
+        // mark every open option at the surface sigma (at the revalue
+        // cadence).
         let carry = s.carry_yield;
-        let mut expired: Vec<Position> = Vec::new();
-        let mut i = 0;
-        while i < self.ledger.positions.len() {
-            let p = &mut self.ledger.positions[i];
-            if now >= p.expiry_ms {
-                if p.pending_units > 1e-12 {
-                    // A slice included before expiry is still awaiting
-                    // detection; the rest expires worthless now.
-                    let mut shell = p.clone();
-                    shell.qty = p.pending_units;
-                    shell.mark = 0.0;
-                    p.qty -= p.pending_units;
-                    p.pending_units = 0.0;
-                    let dead = std::mem::replace(p, shell);
-                    expired.push(dead);
-                    i += 1;
-                    continue;
-                }
-                expired.push(self.ledger.positions.remove(i));
-                continue;
-            }
-            if revalue_now {
-                let t = (p.expiry_ms - now) as f64 / MS_PER_YEAR_F;
-                let sigma = readout.surface.vol(spot, p.strike, t);
-                p.mark = fair_per_unit(p.is_put, spot, p.strike, t, sigma, carry);
-            }
-            i += 1;
-        }
+        let expired: Vec<u64> = self.studies.values().filter(|st| now >= st.expiry_ms).map(|st| st.id).collect();
         let book_changed = !expired.is_empty();
         if book_changed && self.gaps.in_gap("spot", now) {
             // The settlement price is a cached value inside a capture
@@ -581,8 +619,30 @@ impl<'a> Engine<'a> {
             // reported as bounded or invalidated per the gap policy.
             self.gaps.needed_truth("spot", now, "expiry settlement");
         }
-        for p in expired {
-            self.expire_worthless(now, spot, p);
+        for id in expired {
+            let (held, pending) =
+                self.ledger.options.get(&option_id(id)).map_or((0.0, 0.0), |p| (p.free_units(), p.pending_units));
+            let st = self.studies[&id].clone();
+            self.expire_worthless(held, spot, &st);
+            if pending <= 1e-12 {
+                self.studies.remove(&id);
+                self.close_position(now, spot, st);
+            }
+        }
+        self.apply(LedgerEvent::ExpireOptions { at_ms: ms_u64(now) });
+        if revalue_now {
+            let marks: Vec<(String, f64)> = self
+                .ledger
+                .options
+                .iter()
+                .filter(|(_, p)| p.spec.expiry_ms > ms_u64(now))
+                .map(|(k, p)| {
+                    let t = (p.spec.expiry_ms as i64 - now) as f64 / MS_PER_YEAR_F;
+                    let sigma = readout.surface.vol(spot, p.spec.strike, t);
+                    (k.clone(), fair_per_unit(p.spec.kind.is_put(), spot, p.spec.strike, t, sigma, carry))
+                })
+                .collect();
+            self.apply(LedgerEvent::MarkOptions { marks, at_ms: ms_u64(now) });
         }
 
         // Resale: a labeled upside scenario, off by default (doc 08 §8.5).
@@ -590,27 +650,30 @@ impl<'a> Engine<'a> {
         if s.resale.enabled && revalue_now && !stale {
             let dt_days = self.revalue_ms as f64 / MS_PER_DAY as f64;
             let min_hold = (s.resale.min_holding_days * MS_PER_DAY as f64) as i64;
-            let mut i = 0;
-            while i < self.ledger.positions.len() {
-                let p = &self.ledger.positions[i];
-                if now - p.opened_ms < min_hold + s.resale.latency_ms {
-                    i += 1;
+            let ids: Vec<u64> = self.studies.keys().copied().collect();
+            for id in ids {
+                let st = &self.studies[&id];
+                if now - st.opened_ms < min_hold + s.resale.latency_ms {
                     continue;
                 }
-                let demand = if p.is_put { s.resale.put_demand_per_day } else { s.resale.call_demand_per_day };
+                let key = option_id(id);
+                let Some(pos) = self.ledger.options.get(&key) else { continue };
+                if pos.spec.expiry_ms <= ms_u64(now) || pos.pending_units > 1e-12 || pos.qty <= 1e-12 {
+                    continue;
+                }
+                let demand = if st.is_put { s.resale.put_demand_per_day } else { s.resale.call_demand_per_day };
                 let p_sell = 1.0 - (-demand * s.resale.fill_prob * dt_days).exp();
-                let u = Pcg32::keyed(s.seed, &[p.id, (now / self.revalue_ms) as u64, 0x72]).uniform();
+                let u = Pcg32::keyed(s.seed, &[id, (now / self.revalue_ms) as u64, 0x72]).uniform();
                 if u < p_sell {
-                    let p = self.ledger.positions.remove(i);
-                    let proceeds = p.mark * p.qty * (1.0 - s.resale.price_discount);
-                    self.ledger.cash += proceeds;
-                    self.ledger.lines.option_payoff += proceeds;
+                    let (qty, proceeds, premium_paid) = (pos.qty, pos.value() * (1.0 - s.resale.price_discount), st.premium_paid);
+                    let op = self.next_op();
+                    self.apply(LedgerEvent::ResaleSubmitted { op, option: key, qty, expected_proceeds: proceeds, at_ms: ms_u64(now) });
+                    self.apply(LedgerEvent::ResaleSettled { op, proceeds: Some(proceeds), at_ms: ms_u64(now) });
+                    self.studies.remove(&id);
                     self.stats.resales += 1;
-                    self.stats.resale_pnl += proceeds - p.premium_paid;
+                    self.stats.resale_pnl += proceeds - premium_paid;
                     resold = true;
-                    continue;
                 }
-                i += 1;
             }
         }
 
@@ -620,7 +683,7 @@ impl<'a> Engine<'a> {
                 self.apy_call = None;
                 self.apy_put = None;
             } else {
-                let nav_now = self.ledger.nav(self.mark());
+                let nav_now = self.ledger.nav();
                 let ctx0 = self.flow_ctx(now, spot, &readout, nav_now, stale);
                 for (is_put, strike, expiry_ms) in self.source.indicative_specs(&ctx0) {
                     let qty = s.flow_gen.apy_reference_notional / spot;
@@ -655,7 +718,7 @@ impl<'a> Engine<'a> {
         let Some(ctx) = self.cur.filter(|c| c.ms == now) else { return };
         let (spot, stale, readout) = (ctx.spot, ctx.stale, ctx.readout);
         let carry = s.carry_yield;
-        let nav_now = self.ledger.nav(self.mark());
+        let nav_now = self.ledger.nav();
         let fctx = self.flow_ctx(now, spot, &readout, nav_now, stale);
         let reserved_total: f64 = self.live.iter().map(|q| q.bid).sum();
         for rfq in self.source.rfqs(&fctx) {
@@ -663,7 +726,7 @@ impl<'a> Engine<'a> {
             if rfq.is_put { self.stats.rfqs_put += 1 } else { self.stats.rfqs_call += 1 }
             self.stats.volumes.offered_earn_notional += rfq.offered_notional;
             if stale {
-                self.ledger.lines.declines_stale += 1;
+                self.counters.declines_stale += 1;
                 self.stats.declined.count_stale += 1;
                 self.stats.declined.stale += rfq.offered_notional;
                 continue;
@@ -671,15 +734,16 @@ impl<'a> Engine<'a> {
             let pr = self.price(&readout, now, spot, nav_now, rfq.is_put, rfq.strike, rfq.expiry_ms, rfq.qty);
             // Limits (doc 08 §0.4): total, per type, per expiry — live
             // reservations counted once in each numerator.
-            let deployed = self.ledger.premium_deployed() + reserved_total;
-            let by_type = self.ledger.premium_by_type(rfq.is_put) + self.live.iter().filter(|q| q.rfq.is_put == rfq.is_put).map(|q| q.bid).sum::<f64>();
-            let by_expiry = self.ledger.premium_by_expiry(rfq.expiry_ms) + self.live.iter().filter(|q| q.rfq.expiry_ms == rfq.expiry_ms).map(|q| q.bid).sum::<f64>();
+            let deployed = self.ledger.option_marks() + reserved_total;
+            let by_type = ledger::premium_by_type(&self.ledger, rfq.is_put) + self.live.iter().filter(|q| q.rfq.is_put == rfq.is_put).map(|q| q.bid).sum::<f64>();
+            let by_expiry = ledger::premium_by_expiry(&self.ledger).get(&rfq.expiry_ms).copied().unwrap_or(0.0)
+                + self.live.iter().filter(|q| q.rfq.expiry_ms == rfq.expiry_ms).map(|q| q.bid).sum::<f64>();
             let type_cap = if rfq.is_put { s.limits.put_premium_max } else { s.limits.call_premium_max };
             let over_total = deployed + pr.fair > s.limits.premium_budget_hard * nav_now;
             let over_type = by_type + pr.fair > type_cap * nav_now;
             let over_expiry = by_expiry + pr.fair > s.limits.per_expiry_max * nav_now;
             if over_total || over_type || over_expiry {
-                self.ledger.lines.declines_capacity += 1;
+                self.counters.declines_capacity += 1;
                 self.stats.declined.count_capacity += 1;
                 self.stats.declined.capacity += rfq.offered_notional;
                 self.stats.declined.count_total_cap += over_total as u64;
@@ -690,14 +754,35 @@ impl<'a> Engine<'a> {
                 continue;
             }
             let Some(bid) = pr.bid else {
-                self.ledger.lines.declines_priced_zero += 1;
+                self.counters.declines_priced_zero += 1;
                 self.stats.declined.count_priced_zero += 1;
                 self.stats.declined.priced_zero += rfq.offered_notional;
                 continue;
             };
+            let q = self.acceptance.open(rfq, now, bid, bid * self.fee_wedge, spot, pr.fair, pr.sigma, pr.sigma_paid, (pr.delta, pr.gamma, pr.vega));
+            // The premium is reserved on the ledger for the quote's life;
+            // free settlement that cannot back it is a capacity decline.
+            let reservation = Reservation {
+                key: quote_key(&q),
+                nonce: None,
+                amount: bid.round() as u64,
+                is_put: rfq.is_put,
+                expiry_ms: ms_u64(rfq.expiry_ms),
+                exercise_cash: 0.0,
+                hedge_notional: 0.0,
+                quoted_at_ms: ms_u64(q.sent_ms),
+                expires_ms: ms_u64(q.valid_until_ms),
+                state: ReservationState::Quoted,
+                state_at_ms: ms_u64(now),
+            };
+            if self.ledger.apply(&LedgerEvent::Reserve(reservation)).is_err() {
+                self.counters.declines_capacity += 1;
+                self.stats.declined.count_capacity += 1;
+                self.stats.declined.capacity += rfq.offered_notional;
+                continue;
+            }
             self.stats.quotes_sent += 1;
             self.stats.volumes.quoted_earn_notional += rfq.offered_notional;
-            let q = self.acceptance.open(rfq, now, bid, bid * self.fee_wedge, spot, pr.fair, pr.sigma, pr.sigma_paid, (pr.delta, pr.gamma, pr.vega));
             self.stats.sample_apy(rfq.is_put, q.displayed_apy);
             self.live.push(q);
         }
@@ -711,34 +796,45 @@ impl<'a> Engine<'a> {
                 let sigma = readout.surface.vol(spot, q.rfq.strike, t);
                 fair_per_unit(q.rfq.is_put, spot, q.rfq.strike, t, sigma, carry) * q.rfq.qty
             };
-            match self.acceptance.step(&mut self.live[i], now, current_fair) {
-                None => i += 1,
-                Some(Outcome::Expired) => {
-                    self.live.remove(i);
+            let outcome = self.acceptance.step(&mut self.live[i], now, current_fair);
+            let Some(outcome) = outcome else {
+                i += 1;
+                continue;
+            };
+            let q = self.live.remove(i);
+            let key = quote_key(&q);
+            match outcome {
+                Outcome::Expired => {
+                    self.apply(LedgerEvent::ReservationTransition { key, state: ReservationState::Expired, at_ms: ms_u64(now) });
                     self.stats.quotes_expired += 1;
                 }
-                Some(Outcome::Reverted) => {
-                    self.live.remove(i);
+                Outcome::Reverted => {
+                    self.apply(LedgerEvent::ReservationTransition { key, state: ReservationState::Reverted, at_ms: ms_u64(now) });
                     self.stats.quotes_reverted += 1;
                 }
-                Some(Outcome::Filled(_)) => {
-                    let q = self.live.remove(i);
+                Outcome::Filled(_) => {
                     let rfq: RfqEvent = q.rfq;
                     filled = true;
                     self.stats.quotes_accepted += 1;
                     self.stats.volumes.accepted_earn_notional += rfq.offered_notional;
                     self.stats.volumes.premium_turnover += q.bid;
                     if rfq.is_put { self.stats.fills_put += 1 } else { self.stats.fills_call += 1 }
-                    self.ledger.cash -= q.bid;
-                    self.ledger.lines.premium_paid += q.bid;
-                    self.ledger.lines.fills += 1;
-                    let id = self.ledger.next_id;
-                    self.ledger.next_id += 1;
-                    self.ledger.positions.push(Position {
-                        id, is_put: rfq.is_put, strike: rfq.strike, expiry_ms: rfq.expiry_ms, qty: rfq.qty, premium_paid: q.bid,
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    self.apply(LedgerEvent::OptionBought {
+                        option: option_id(id),
+                        spec: Some(OptionSpec { kind: OptionKind::of(rfq.is_put), strike: rfq.strike, expiry_ms: ms_u64(rfq.expiry_ms) }),
+                        qty: rfq.qty,
+                        premium: q.bid,
+                        mark_per_unit: current_fair / rfq.qty,
+                        at_ms: ms_u64(now),
+                    });
+                    self.apply(LedgerEvent::ReservationTransition { key, state: ReservationState::Filled, at_ms: ms_u64(now) });
+                    self.studies.insert(id, Study {
+                        id, is_put: rfq.is_put, strike: rfq.strike, expiry_ms: rfq.expiry_ms, premium_paid: q.bid,
                         sigma_paid: q.sigma_paid, sigma_surface: q.sigma_quote, opened_ms: now, spot_open: spot, delta_open: q.delta,
                         gamma_open: q.gamma, vega_open: q.vega, writer_net_premium: q.writer_net,
-                        mark: current_fair / rfq.qty, qty_open: rfq.qty, pending_units: 0.0, last_check_ms: i64::MIN / 2, exercise_net: 0.0,
+                        qty_open: rfq.qty, last_check_ms: i64::MIN / 2, exercise_net: 0.0,
                     });
                 }
             }
@@ -762,12 +858,12 @@ impl<'a> Engine<'a> {
         if ctx.revalue_now || ctx.filled || ctx.book_changed || ctx.resold {
             self.net_delta_units = self
                 .ledger
-                .positions
-                .iter()
+                .options
+                .values()
                 .map(|p| {
-                    let t = (p.expiry_ms - now) as f64 / MS_PER_YEAR_F;
-                    let sigma = ctx.readout.surface.vol(spot, p.strike, t);
-                    greeks_per_unit(p.is_put, spot, p.strike, t, sigma, carry).delta * p.qty
+                    let t = (p.spec.expiry_ms as i64 - now) as f64 / MS_PER_YEAR_F;
+                    let sigma = ctx.readout.surface.vol(spot, p.spec.strike, t);
+                    greeks_per_unit(p.spec.kind.is_put(), spot, p.spec.strike, t, sigma, carry).delta * p.qty
                 })
                 .sum::<f64>();
         }
@@ -777,16 +873,16 @@ impl<'a> Engine<'a> {
         for id in self.open.stale(now, s.venue.order_timeout_secs * 1000) {
             let at = CommandTime(now + self.lat.draw(LatencyStage::Strategy));
             self.schedule(at.ms(), Stage::Command, 0, Queued::Command(Command::Hedge(HedgeCommand::Cancel(id), OrderKind::Taker)));
-            self.ledger.lines.cancels += 1;
             if s.venue.passive_timeout_to_taker {
                 self.escalate = true;
             }
         }
-        let nav_now = self.ledger.nav(self.mark());
+        let nav_now = self.ledger.nav();
+        let perp = self.perp();
         let pct = if self.funding_annual < s.hedge.funding_widen_threshold { s.hedge.band_wide_pct_nav } else { s.hedge.band_pct_nav };
         let band_units = (pct / 100.0) * nav_now / spot;
         let working = self.open.working_units();
-        if let Some(mut size) = plan_hedge_order(self.net_delta_units, self.ledger.perp.position, working, band_units) {
+        if let Some(mut size) = plan_hedge_order(self.net_delta_units, perp.units, working, band_units) {
             // Venue capacity: an assumption until measured. The target is
             // clamped once the band has decided to trade.
             let cap = s.venue.max_hedge_notional;
@@ -794,7 +890,7 @@ impl<'a> Engine<'a> {
             if cap > 0.0 && target.abs() * spot > cap {
                 target = target.signum() * cap / spot;
                 self.stats.venue_cap_hits += 1;
-                size = target - (self.ledger.perp.position + working);
+                size = target - (perp.units + working);
                 if size == 0.0 {
                     return;
                 }
@@ -802,11 +898,11 @@ impl<'a> Engine<'a> {
             // No risk without margin: an order that grows the exposure must
             // be fundable from free cash at the entry ratio, else it is not
             // sent (counted; the band re-plans next minute).
-            let after = self.ledger.perp.position + working + size;
-            if after.abs() > (self.ledger.perp.position + working).abs() {
-                let need = entry_margin(after.abs() * self.mark(), &s.margin) - self.ledger.perp.collateral;
-                if need > self.ledger.cash {
-                    self.ledger.lines.hedge_declines_margin += 1;
+            let after = perp.units + working + size;
+            if after.abs() > (perp.units + working).abs() {
+                let need = entry_margin(after.abs() * self.mark(), &s.margin) - perp.collateral;
+                if need > self.ledger.settlement {
+                    self.counters.hedge_declines_margin += 1;
                     return;
                 }
             }
@@ -837,10 +933,10 @@ impl<'a> Engine<'a> {
             self.topups.pop_front();
         }
         let used: f64 = self.topups.iter().map(|(_, a)| a).sum();
-        let cap = s.margin.max_topup_24h_pct_nav * self.ledger.nav(self.mark()) - used;
-        let amount = want.min(cap).min(self.ledger.cash);
+        let cap = s.margin.max_topup_24h_pct_nav * self.ledger.nav() - used;
+        let amount = want.min(cap).min(self.ledger.settlement);
         if amount <= 0.0 {
-            self.ledger.lines.topup_declines += 1;
+            self.counters.topup_declines += 1;
             return;
         }
         self.topups.push_back((now, amount));
@@ -872,12 +968,13 @@ impl<'a> Engine<'a> {
         // Free settlement for call cash exercises this tick (reservations
         // and in-flight slices already spent).
         let reserved: f64 = self.live.iter().map(|q| q.bid).sum();
-        let mut free_cash = (self.ledger.cash - reserved).max(0.0);
+        let mut free_cash = (self.ledger.settlement - reserved).max(0.0);
         let mut own_underlying = exercise::units_raw(x.vault_free_underlying_units);
-        let ids: Vec<usize> = (0..self.ledger.positions.len()).collect();
-        for i in ids {
-            let p = self.ledger.positions[i].clone();
-            let held = p.qty - p.pending_units;
+        let ids: Vec<u64> = self.studies.keys().copied().collect();
+        for id in ids {
+            let p = self.studies[&id].clone();
+            let key = option_id(id);
+            let held = self.ledger.options.get(&key).map_or(0.0, |o| o.free_units());
             if held <= 0.0 || now >= p.expiry_ms {
                 continue;
             }
@@ -886,7 +983,7 @@ impl<'a> Engine<'a> {
             if !near && now - p.last_check_ms < x.check_interval_secs * 1000 {
                 continue;
             }
-            self.ledger.positions[i].last_check_ms = now;
+            self.studies.get_mut(&id).expect("present").last_check_ms = now;
             let itm = if p.is_put { spot < p.strike } else { spot > p.strike };
             if !itm {
                 continue;
@@ -951,15 +1048,42 @@ impl<'a> Engine<'a> {
                 // the own balance is unchanged for the next slice.
                 let _ = &mut own_underlying;
                 let units = slice as f64 / 10f64.powi(exercise::UNDERLYING_DECIMALS as i32);
-                self.ledger.positions[i].pending_units += units;
+                let (net, turnover) = (exercise::raw_settle(net_raw), exercise::raw_settle(turnover_raw as i128));
+                let ledger_path = ledger_path(path);
+                // The modeled route: net settlement after every cost; a
+                // flash path borrows and repays the route notional inside
+                // the PTB. The cash call path sells the received spot on
+                // the route (`call_cash_path_sells_spot`), so no
+                // underlying lands.
+                let flash = if matches!(ledger_path, ExercisePath::CallCash | ExercisePath::PutVaultUnderlying) { 0.0 } else { turnover };
+                let op = self.next_op();
+                self.apply(LedgerEvent::ExerciseSubmitted {
+                    op,
+                    plan: ExercisePlan {
+                        option: key.clone(),
+                        path: ledger_path,
+                        qty: units,
+                        asset: s.asset.clone(),
+                        settlement_out: (-net).max(0.0),
+                        settlement_in: net.max(0.0),
+                        underlying_in: 0.0,
+                        underlying_out: 0.0,
+                        flash_borrowed: flash,
+                        flash_repaid: flash,
+                        route_notional: turnover,
+                        gas: 0.0,
+                    },
+                    at_ms: ms_u64(now),
+                });
                 self.xstats.slices_submitted += 1;
                 let cmd = ExerciseCmd {
+                    op,
                     position_id: p.id,
                     units,
                     is_put: p.is_put,
                     path,
-                    net: exercise::raw_settle(net_raw),
-                    turnover: exercise::raw_settle(turnover_raw as i128),
+                    net,
+                    turnover,
                     delta_per_unit: delta,
                     spot,
                     failed: false,
@@ -979,31 +1103,30 @@ impl<'a> Engine<'a> {
 
     /// The PTB lands (or fails) at Sui inclusion; the desk sees it at
     /// indexer detection. A failed PTB aborts atomically: no balance moves.
-    fn on_exercised(&mut self, at: FillTime, x: ExerciseCmd) {
-        let Some(i) = self.ledger.positions.iter().position(|p| p.id == x.position_id) else { return };
-        let p = &mut self.ledger.positions[i];
-        p.pending_units = (p.pending_units - x.units).max(0.0);
+    fn on_exercised(&mut self, at_: FillTime, x: ExerciseCmd) {
+        let key = option_id(x.position_id);
+        if !self.studies.contains_key(&x.position_id) {
+            return;
+        }
+        self.apply(LedgerEvent::ExerciseSettled { op: x.op, ok: !x.failed, actual: None, at_ms: ms_u64(at_.ms()) });
         if x.failed {
             self.xstats.ptb_failed += 1;
             self.stats.exercise_failed += 1;
-            if p.qty <= 1e-12 && p.pending_units <= 1e-12 {
-                let p = self.ledger.positions.remove(i);
-                self.close_position(at.ms(), x.spot, p);
+            if !self.ledger.options.contains_key(&key) {
+                let st = self.studies.remove(&x.position_id).expect("present");
+                self.close_position(at_.ms(), x.spot, st);
             }
             return;
         }
-        p.qty = (p.qty - x.units).max(0.0);
-        p.exercise_net += x.net;
-        self.ledger.cash += x.net;
-        self.ledger.lines.option_payoff += x.net;
-        self.ledger.lines.exercise_turnover_notional += x.turnover;
+        self.studies.get_mut(&x.position_id).expect("present").exercise_net += x.net;
         self.stats.volumes.exercise_spot_turnover += x.turnover;
         if x.is_put { self.stats.exercised_put += 1 } else { self.stats.exercised_call += 1 }
         self.xstats.path(x.path);
-        if p.qty <= 1e-12 && p.pending_units <= 1e-12 {
-            let p = self.ledger.positions.remove(i);
-            self.close_position(at.ms(), x.spot, p);
+        if !self.ledger.options.contains_key(&key) {
+            let st = self.studies.remove(&x.position_id).expect("present");
+            self.close_position(at_.ms(), x.spot, st);
         }
+        let at = at_;
         // The Sui PTB is atomic; the perp close is not: send it now, after
         // the configured extra delay, through the normal hedge path (the
         // working order counts against the band so the rebalancer does
@@ -1022,7 +1145,7 @@ impl<'a> Engine<'a> {
 
     /// A position leaves the book: exercised in full, or expired (an
     /// unexercised option is worthless on chain — `burn_expired_option`).
-    fn close_position(&mut self, now: i64, spot: f64, p: Position) {
+    fn close_position(&mut self, now: i64, spot: f64, p: Study) {
         self.stats.expiries_settled += 1;
         let payoff = p.exercise_net;
         let life: Vec<(i64, f64)> = self.price_samples.iter().copied().filter(|(t, _)| *t >= p.opened_ms && *t <= now).collect();
@@ -1038,8 +1161,7 @@ impl<'a> Engine<'a> {
 
     /// Expiry: whatever is still held expires worthless; the intrinsic
     /// value it carried is reported as the exercise model's miss.
-    fn expire_worthless(&mut self, now: i64, spot: f64, mut p: Position) {
-        let held = p.qty;
+    fn expire_worthless(&mut self, held: f64, spot: f64, p: &Study) {
         if held > 1e-12 {
             self.xstats.expired_unexercised += 1;
             let intrinsic = if p.is_put { (p.strike - spot).max(0.0) } else { (spot - p.strike).max(0.0) };
@@ -1050,8 +1172,6 @@ impl<'a> Engine<'a> {
                 self.xstats.expired_itm_value += intrinsic * held;
             }
         }
-        p.qty = 0.0;
-        self.close_position(now, spot, p);
     }
 
     // ── commands and outcomes ──────────────────────────────────────────
@@ -1059,6 +1179,15 @@ impl<'a> Engine<'a> {
     fn on_command(&mut self, at: CommandTime, cmd: Command) {
         match cmd {
             Command::Hedge(c, kind) => {
+                if let HedgeCommand::Submit(o) = &c {
+                    self.apply(LedgerEvent::HedgeSubmitted {
+                        op: o.id,
+                        market: self.perp_key.clone(),
+                        size_units: o.size_units,
+                        spot: o.spot,
+                        at_ms: ms_u64(at.ms()),
+                    });
+                }
                 let arrival = at.ms() + self.lat.draw(LatencyStage::VenueSubmit);
                 let market = self.market;
                 let account = self.account();
@@ -1075,7 +1204,9 @@ impl<'a> Engine<'a> {
             }
             Command::TopUp(amount) => {
                 // Cash leaves the vault now; it is margin once it lands.
-                self.ledger.cash -= amount;
+                let op = self.next_op();
+                self.topup_ops.push_back(op);
+                self.apply(LedgerEvent::MarginTopUpSent { op, market: self.perp_key.clone(), amount, at_ms: ms_u64(at.ms()) });
                 let arrival = at.ms() + self.s.margin.topup_transfer_ms.max(0);
                 let timed = self.venue.topup(amount, arrival);
                 self.schedule_outcomes(timed);
@@ -1087,46 +1218,41 @@ impl<'a> Engine<'a> {
         match t.ev {
             VenueEvent::Hedge(ev) => {
                 match &ev {
-                    HedgeEvent::Rejected { .. } => self.ledger.lines.hedge_rejects += 1,
-                    HedgeEvent::PartiallyFilled(_) => self.ledger.lines.partial_fills += 1,
+                    HedgeEvent::Rejected { order, .. } => {
+                        self.apply(LedgerEvent::HedgeResolved { op: *order, rejected: true, at_ms: ms_u64(at.ms()) });
+                    }
+                    HedgeEvent::Cancelled(order) => {
+                        self.apply(LedgerEvent::HedgeResolved { op: *order, rejected: false, at_ms: ms_u64(at.ms()) });
+                    }
                     _ => {}
                 }
+                let partial = matches!(ev, HedgeEvent::PartiallyFilled(_));
                 if let Some((fill, _)) = self.open.apply(&ev) {
-                    self.apply_fill(at, fill.size_units, fill.price, t.fee, t.reference);
+                    self.apply_fill(at, fill.order, partial, fill.size_units, fill.price, t.fee, t.reference);
                 }
             }
             VenueEvent::Liquidated { size_closed, price, penalty, full } => {
-                let l = &mut self.ledger;
-                let realized = l.perp.fill(size_closed, price);
-                l.cash += realized;
-                l.lines.hedge_realized += realized;
-                l.lines.hedge_turnover_notional += size_closed.abs() * price;
+                let before = self.perp().units;
+                self.apply(LedgerEvent::Liquidation {
+                    market: self.perp_key.clone(),
+                    size_closed,
+                    price,
+                    penalty,
+                    full,
+                    at_ms: ms_u64(at.ms()),
+                });
                 self.stats.volumes.hedge_turnover += size_closed.abs() * price;
-                // The penalty leaves the margin account.
-                l.perp.collateral -= penalty;
-                l.lines.liquidation_loss += penalty;
-                l.lines.liquidations += 1;
                 self.stats.liquidations += 1;
                 self.first_liquidation_ms.get_or_insert(at.ms());
-                if full {
-                    l.cash += l.perp.collateral;
-                    l.perp.collateral = 0.0;
-                } else {
-                    let before = l.perp.position - size_closed;
+                if !full {
                     self.sync_collateral(before, size_closed, price);
                 }
                 // The venue dropped every working order.
                 self.open = OpenOrders::default();
             }
-            VenueEvent::TopUp { amount, accepted } => {
-                if accepted {
-                    self.ledger.perp.collateral += amount;
-                    self.ledger.lines.margin_topups += 1;
-                    self.ledger.lines.topup_total += amount;
-                } else {
-                    self.ledger.cash += amount;
-                    self.ledger.lines.topup_rejects += 1;
-                }
+            VenueEvent::TopUp { accepted, .. } => {
+                let op = self.topup_ops.pop_front().expect("a top-up outcome matches a sent transfer");
+                self.apply(LedgerEvent::MarginTopUpLanded { op, accepted, at_ms: ms_u64(at.ms()) });
             }
         }
     }
@@ -1135,28 +1261,31 @@ impl<'a> Engine<'a> {
     /// venue's fee, slippage as the signed distance from the mark at
     /// execution (a passive fill inside the mark is negative), gas per
     /// rebalance, then the isolated margin is re-synced to the position.
-    fn apply_fill(&mut self, _at: FillTime, size: f64, price: f64, fee: f64, reference: f64) {
+    #[allow(clippy::too_many_arguments)]
+    fn apply_fill(&mut self, at_: FillTime, op: u64, partial: bool, size: f64, price: f64, fee: f64, reference: f64) {
         let s = self.s;
         let notional = size.abs() * reference;
         let slip = (price - reference) * size.signum();
-        let before = self.ledger.perp.position;
-        let realized = self.ledger.perp.fill(size, price);
-        self.ledger.cash += realized - fee - s.exercise.gas_per_rebalance;
-        self.ledger.lines.hedge_realized += realized;
-        if slip < 0.0 {
-            self.ledger.lines.maker_fees += fee;
-            self.ledger.lines.passive_fills += 1;
-        } else {
-            self.ledger.lines.hedge_fees += fee;
-            self.ledger.lines.taker_fills += 1;
-        }
-        self.ledger.lines.hedge_slippage += size.abs() * slip;
-        self.ledger.lines.gas += s.exercise.gas_per_rebalance;
-        self.ledger.lines.hedge_turnover_notional += notional;
-        self.ledger.lines.hedge_fills += 1;
+        let before = self.perp().units;
+        self.apply(LedgerEvent::PerpFill {
+            op: Some(op),
+            market: self.perp_key.clone(),
+            size_units: size,
+            price,
+            fee,
+            reference,
+            gas: s.exercise.gas_per_rebalance,
+            passive: slip < 0.0,
+            partial,
+            at_ms: ms_u64(at_.ms()),
+        });
+        // The fill carried the mark at execution; the account is marked
+        // at the current bar.
+        let mark = self.mark();
+        self.apply(LedgerEvent::MarkPerp { market: self.perp_key.clone(), mark, at_ms: ms_u64(at_.ms()) });
         self.stats.volumes.hedge_turnover += notional;
         if self.ledger.lines.hedge_fills == 1 {
-            self.stats.initial_hedge_margin = self.ledger.perp.position.abs() * reference * s.hedge.initial_margin_fraction;
+            self.stats.initial_hedge_margin = self.perp().units.abs() * reference * s.hedge.initial_margin_fraction;
         }
         self.sync_collateral(before, size, price);
     }
@@ -1168,18 +1297,16 @@ impl<'a> Engine<'a> {
     /// both. Losses erode the ratio — only a top-up (or the risk engine)
     /// restores it.
     fn sync_collateral(&mut self, before: f64, size: f64, price: f64) {
-        let l = &mut self.ledger;
         let closed = if before == 0.0 || before.signum() == size.signum() { 0.0 } else { size.abs().min(before.abs()) };
+        let market = self.perp_key.clone();
         if closed > 0.0 {
-            let release = l.perp.collateral * closed / before.abs();
-            l.perp.collateral -= release;
-            l.cash += release;
+            let release = self.perp().collateral * closed / before.abs();
+            self.apply(LedgerEvent::MarginMoved { market: market.clone(), amount: -release, at_ms: self.ledger.last_event_ms });
         }
         let added = size.abs() - closed;
         if added > 0.0 {
-            let post = entry_margin(added * price, &self.s.margin).min(l.cash.max(0.0));
-            l.cash -= post;
-            l.perp.collateral += post;
+            let post = entry_margin(added * price, &self.s.margin).min(self.ledger.settlement.max(0.0));
+            self.apply(LedgerEvent::MarginMoved { market, amount: post, at_ms: self.ledger.last_event_ms });
         }
     }
 
@@ -1194,22 +1321,19 @@ impl<'a> Engine<'a> {
         let reserved: f64 = self.live.iter().map(|q| q.bid).sum();
         self.stats.sample_reserved(reserved);
         // The margin actually posted at the venue (doc 08 §7.3).
-        let margin_req = self.ledger.perp.collateral;
+        let margin_req = self.perp().collateral;
         self.stats.peak_hedge_margin = self.stats.peak_hedge_margin.max(margin_req);
         self.stats.peak_24h_margin_topup = self.stats.peak_24h_margin_topup.max(self.topup.push(now, margin_req));
-        let free = self.ledger.cash - reserved;
+        let free = self.ledger.settlement - reserved;
         self.stats.min_free_settlement = self.stats.min_free_settlement.min(free);
         self.stats.min_margin_headroom = self.stats.min_margin_headroom.min(free);
         if ctx.revalue_now || ctx.filled {
             let marks = self.ledger.option_marks();
             self.stats.peak_premium_at_risk_total = self.stats.peak_premium_at_risk_total.max(marks + reserved);
             let call_res: f64 = self.live.iter().filter(|q| !q.rfq.is_put).map(|q| q.bid).sum();
-            self.stats.peak_premium_at_risk_call = self.stats.peak_premium_at_risk_call.max(self.ledger.premium_by_type(false) + call_res);
-            self.stats.peak_premium_at_risk_put = self.stats.peak_premium_at_risk_put.max(self.ledger.premium_by_type(true) + reserved - call_res);
-            let mut by_expiry: BTreeMap<i64, f64> = BTreeMap::new();
-            for p in &self.ledger.positions {
-                *by_expiry.entry(p.expiry_ms).or_default() += p.mark * p.qty;
-            }
+            self.stats.peak_premium_at_risk_call = self.stats.peak_premium_at_risk_call.max(ledger::premium_by_type(&self.ledger, false) + call_res);
+            self.stats.peak_premium_at_risk_put = self.stats.peak_premium_at_risk_put.max(ledger::premium_by_type(&self.ledger, true) + reserved - call_res);
+            let mut by_expiry: BTreeMap<i64, f64> = ledger::premium_by_expiry(&self.ledger);
             for q in &self.live {
                 *by_expiry.entry(q.rfq.expiry_ms).or_default() += q.bid;
             }
@@ -1218,7 +1342,7 @@ impl<'a> Engine<'a> {
             self.stats.peak_capital_deployed = self.stats.peak_capital_deployed.max(marks + reserved + margin_req);
         }
 
-        let nav = self.ledger.nav(mark);
+        let nav = self.ledger.nav();
         self.peak = self.peak.max(nav);
         if self.peak > 0.0 {
             self.max_dd = self.max_dd.max((self.peak - nav) / self.peak);
@@ -1227,9 +1351,9 @@ impl<'a> Engine<'a> {
         if day != self.last_nav_day {
             self.last_nav_day = day;
             self.nav_path.push(NavPoint {
-                ts_ms: now, spot, nav, cash: self.ledger.cash, option_marks: self.ledger.option_marks(),
-                perp_position: self.ledger.perp.position, net_delta_units: self.net_delta_units,
-                premium_deployed_pct: if nav > 0.0 { self.ledger.premium_deployed() / nav } else { 0.0 },
+                ts_ms: now, spot, nav, cash: self.ledger.settlement, option_marks: self.ledger.option_marks(),
+                perp_position: self.perp().units, net_delta_units: self.net_delta_units,
+                premium_deployed_pct: if nav > 0.0 { self.ledger.option_marks() / nav } else { 0.0 },
                 sigma_surface: if ctx.readout.fallback { None } else { Some(ctx.readout.surface.atm(self.tenor_years)) },
                 stale: ctx.stale,
                 margin_ratio: self.account().margin_ratio(mark),
@@ -1298,6 +1422,12 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
         est: WindowsEstimator::new(s.estimator.clone(), s.flow.tenor_days),
         oracle: OracleProxy::new(s.oracle.clone()),
         ledger: Ledger::new(s.nav0),
+        studies: BTreeMap::new(),
+        counters: Counters::default(),
+        next_id: 0,
+        next_op: 0,
+        perp_key: s.asset.clone(),
+        topup_ops: VecDeque::new(),
         v1: v1_params(s),
         hedge_cost: hedge_cost_params(s),
         acceptance,
@@ -1377,16 +1507,17 @@ pub fn run_sources_with(s: &Scenario, sources: Sources, source: &mut dyn FlowSou
     anyhow::ensure!(e.spot_start.is_some(), "no bars for {}/{} in {}..{}", s.spot_exchange, s.spot_symbol, s.from, s.to);
     // Quotes still live at the end never reached a terminal event.
     e.stats.quotes_expired += e.live.len() as u64;
-    e.ledger.lines.declines_stale += e.source.stale_declines();
+    e.counters.declines_stale += e.source.stale_declines();
     let pending_outcomes = e.queue.len() as u64;
     let spot_end = e.last_spot;
-    let nav_end = e.ledger.nav(e.mark());
+    let nav_end = e.ledger.nav();
     let spot_start = e.spot_start.unwrap_or(spot_end);
     let coverage = e.gaps.finish();
     Ok(RunOutput {
         nav_path: e.nav_path,
         settled: e.settled,
         ledger: e.ledger,
+        counters: e.counters,
         minutes_total: ((end_ms - start_ms) / 60_000) as u64,
         minutes_with_bar: e.minutes_with_bar,
         minutes_stale: e.minutes_stale,
@@ -1460,8 +1591,12 @@ mod tests {
         let l = &a.ledger.lines;
         let cash_expected = s.nav0 - l.premium_paid + l.option_payoff + l.hedge_realized - l.funding_paid - l.hedge_fees - l.maker_fees - l.gas
             - l.liquidation_loss
-            - a.ledger.perp.collateral;
-        assert!((a.ledger.cash - cash_expected).abs() < 1e-6, "cash {} vs identity {}", a.ledger.cash, cash_expected);
+            - a.ledger.perp_collateral();
+        assert!((a.ledger.settlement - cash_expected).abs() < 1e-6, "cash {} vs identity {}", a.ledger.settlement, cash_expected);
+        // The exact ledger reconciles after the full replay (doc 08 §12
+        // item 1; every event is asserted in debug builds).
+        assert_eq!(a.ledger.check_accounting(), Vec::new(), "nav {} explained {}", a.ledger.nav(), a.ledger.nav_explained());
+        assert!((a.nav_end - a.ledger.nav()).abs() < 1e-6);
     }
 
     #[test]
@@ -1475,14 +1610,14 @@ mod tests {
         assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap(), "not deterministic");
         assert_eq!(a.trace_hash, b.trace_hash);
         assert!(a.turns >= 2, "{}", a.turns);
-        assert!(a.ledger.lines.fills >= 2, "fills {} declines cap {} stale {} zero {}", a.ledger.lines.fills, a.ledger.lines.declines_capacity, a.ledger.lines.declines_stale, a.ledger.lines.declines_priced_zero);
+        assert!(a.ledger.lines.fills >= 2, "fills {} declines cap {} stale {} zero {}", a.ledger.lines.fills, a.counters.declines_capacity, a.counters.declines_stale, a.counters.declines_priced_zero);
         assert!(a.funding_settlements > 0);
         assert!(a.ledger.lines.hedge_fills > 0, "hedge never traded");
         assert_cash_identity(&s, &a);
         for p in &a.nav_path {
             assert!(p.nav.is_finite() && p.cash.is_finite());
         }
-        assert!((a.nav_end - (a.ledger.cash + a.ledger.option_marks() + a.ledger.perp.collateral + a.ledger.perp.unrealized(a.spot_end))).abs() < 1e-6);
+        assert!((a.nav_end - (a.ledger.settlement + a.ledger.option_marks() + a.ledger.perp_collateral() + a.ledger.perp_unrealized())).abs() < 1e-6);
         assert!(a.settled.iter().all(|o| o.sigma_realized > 0.0));
         assert_eq!(a.pending_outcomes, 0);
         assert_eq!(a.ledger.lines.liquidations, 0);
@@ -1565,7 +1700,7 @@ mod tests {
         assert_eq!(a.stage_counts["ledger"], 7 * 1440);
         // One turn at the start (retried once: the first minute is stale
         // under the 2 s oracle latency) — the next turn is past the week.
-        assert_eq!((a.turns, a.ledger.lines.declines_stale), (1, 1));
+        assert_eq!((a.turns, a.counters.declines_stale), (1, 1));
         assert!(a.coverage.gaps.is_empty());
         assert_eq!(a.latency_draws, 0);
         let b = run(&s, &bars, &funding, &index).unwrap();
@@ -1620,7 +1755,7 @@ mod tests {
         assert_eq!(out.funding_settlements, 210, "funding settled through the hole");
         // The turn that lands in the hole is declined every minute until
         // the price is fresh again, then filled — never skipped in time.
-        assert!(out.ledger.lines.declines_stale > 1000, "{}", out.ledger.lines.declines_stale);
+        assert!(out.counters.declines_stale > 1000, "{}", out.counters.declines_stale);
         assert!(out.turns >= 2);
         // The first turn's expiry (day 30 + the stale first minute)
         // settled inside the hole on the cached price.
@@ -1744,7 +1879,7 @@ mod tests {
         assert!(out2.venue_labels.basis_configured);
         assert_cash_identity(&s, &out2);
         // A desk that cannot fund entry margin sends no order (no cascade).
-        assert!(out.ledger.lines.hedge_declines_margin + out.ledger.lines.hedge_fills > 0);
+        assert!(out.counters.hedge_declines_margin + out.ledger.lines.hedge_fills > 0);
     }
 
     /// Margin top-ups keep the hedge alive through a slow slide when the

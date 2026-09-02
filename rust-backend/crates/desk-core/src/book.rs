@@ -15,12 +15,18 @@
 //! re-installs the still-live rows after reconciling them against chain
 //! fills ([`reconcile_reservations`]). P&L records queue the same way
 //! ([`Book::drain_pnl_records`]).
+//!
+//! The reservation STORE is the exact ledger's ([`Ledger::reservations`],
+//! SO-451): the book keeps its NAV rule (`reservations + deployed ≤ NAV`)
+//! and the persistence outbox on top of it, so there is one source of
+//! truth for what capacity is held.
 
 use std::collections::HashMap;
 
 use protocol_types::ids::ObjectId;
 use serde::{Deserialize, Serialize};
 
+use crate::ledger::{Ledger, LedgerError, LedgerEvent};
 use crate::model::Greeks;
 
 /// One VaultMm coin-custody position: option coins stored AS a vault
@@ -221,6 +227,9 @@ pub enum ReserveError {
     ExceedsNav,
     /// A live reservation already holds this key.
     DuplicateKey,
+    /// The ledger's rule: reservations + committed spend + amount would
+    /// exceed the free settlement (doc 08 §5.3).
+    ExceedsAvailableCapital,
 }
 
 /// Boot reconciliation of durable reservations against chain fills
@@ -263,9 +272,11 @@ pub struct Book {
     pub deployed: u64,
     pub holdings: Vec<Holding>,
     pub written: Vec<Written>,
-    /// LIVE reservations by key. Terminal transitions leave the map via
-    /// the outbox ([`Book::drain_reservation_transitions`]).
-    reservations: HashMap<String, Reservation>,
+    /// The exact ledger (SO-451): balances, positions, the LIVE
+    /// reservations by key, pending operations and liabilities.
+    /// Terminal reservation transitions leave it via the outbox
+    /// ([`Book::drain_reservation_transitions`]).
+    pub ledger: Ledger,
     /// Transitions not yet persisted (quoted rows included) — the desk
     /// drains and writes them to the history DB.
     reservation_outbox: Vec<Reservation>,
@@ -301,7 +312,7 @@ impl Book {
             deployed: 0,
             holdings: Vec::new(),
             written: Vec::new(),
-            reservations: HashMap::new(),
+            ledger: Ledger::new(nav as f64),
             reservation_outbox: Vec::new(),
             listed_units: HashMap::new(),
             next_reservation_id: 1,
@@ -313,7 +324,7 @@ impl Book {
     // ── reservation ledger ────────────────────────────────────────────
 
     pub fn reserved_total(&self) -> u64 {
-        self.reservations.values().map(|r| r.amount).sum()
+        self.ledger.reservations.values().map(|r| r.amount).sum()
     }
 
     /// Reserve premium for an outstanding signed quote under its
@@ -321,7 +332,7 @@ impl Book {
     /// NAV` and one live reservation per key.
     pub fn reserve_quote(&mut self, q: QuoteReservation, now_ms: u64) -> Result<(), ReserveError> {
         self.expire_reservations(now_ms);
-        if self.reservations.contains_key(&q.key) {
+        if self.ledger.reservations.contains_key(&q.key) {
             return Err(ReserveError::DuplicateKey);
         }
         let committed = self.reserved_total() as u128 + self.deployed as u128 + q.amount as u128;
@@ -341,8 +352,11 @@ impl Book {
             state: ReservationState::Quoted,
             state_at_ms: now_ms,
         };
-        self.reservation_outbox.push(r.clone());
-        self.reservations.insert(r.key.clone(), r);
+        self.ledger.apply(&LedgerEvent::Reserve(r.clone())).map_err(|e| match e {
+            LedgerError::DuplicateReservation(_) => ReserveError::DuplicateKey,
+            _ => ReserveError::ExceedsAvailableCapital,
+        })?;
+        self.reservation_outbox.push(r);
         Ok(())
     }
 
@@ -397,6 +411,7 @@ impl Book {
     /// Returns the key it closed, if a live reservation carried the nonce.
     pub fn fill_reservation_by_nonce(&mut self, nonce: u64, now_ms: u64) -> Option<String> {
         let key = self
+            .ledger
             .reservations
             .values()
             .find(|r| r.nonce == Some(nonce))
@@ -406,14 +421,14 @@ impl Book {
     }
 
     fn transition(&mut self, key: &str, to: ReservationState, now_ms: u64) -> bool {
-        let Some(mut r) = self.reservations.remove(key) else {
+        let Some(mut r) = self.ledger.reservations.get(key).cloned() else {
             return false;
         };
         r.state = to;
         r.state_at_ms = now_ms;
-        if to.is_live() {
-            self.reservations.insert(r.key.clone(), r.clone());
-        }
+        self.ledger
+            .apply(&LedgerEvent::ReservationTransition { key: key.to_string(), state: to, at_ms: now_ms })
+            .expect("a reservation transition is never refused");
         self.reservation_outbox.push(r);
         true
     }
@@ -421,9 +436,7 @@ impl Book {
     /// Re-install a still-live reservation from durable state at boot
     /// (no capacity check — it was already granted).
     pub fn restore_reservation(&mut self, r: Reservation) {
-        if r.state.is_live() {
-            self.reservations.insert(r.key.clone(), r);
-        }
+        self.ledger.apply(&LedgerEvent::RestoreReservation(r)).expect("a restore is never refused");
     }
 
     /// Take every transition recorded since the last drain, oldest
@@ -435,7 +448,7 @@ impl Book {
     /// Snapshot of the live reservations (`/desk/state`), soonest-expiry
     /// first.
     pub fn reservations_snapshot(&self) -> Vec<Reservation> {
-        let mut out: Vec<Reservation> = self.reservations.values().cloned().collect();
+        let mut out: Vec<Reservation> = self.ledger.reservations.values().cloned().collect();
         out.sort_by(|a, b| a.expires_ms.cmp(&b.expires_ms).then_with(|| a.key.cmp(&b.key)));
         out
     }
@@ -443,6 +456,7 @@ impl Book {
     /// Move TTL-elapsed live reservations to `expired`.
     pub fn expire_reservations(&mut self, now_ms: u64) {
         let stale: Vec<String> = self
+            .ledger
             .reservations
             .values()
             .filter(|r| r.expires_ms <= now_ms)
@@ -457,7 +471,7 @@ impl Book {
     /// lands once in the total, once on its side, once at its expiry.
     pub fn reserved_split(&self) -> super::limits::ReservedSplit {
         let mut s = super::limits::ReservedSplit::default();
-        for r in self.reservations.values() {
+        for r in self.ledger.reservations.values() {
             let a = r.amount as f64;
             s.total += a;
             if r.is_put {
@@ -663,6 +677,22 @@ mod tests {
         assert_eq!(b.reserve(900, 10_000, 5_000), Err(ReserveError::ExceedsNav));
         // Past the TTL the stale reservation frees its budget.
         assert!(b.reserve(900, 10_000, 20_000).is_ok());
+    }
+
+    /// The ledger's capital rule (doc 08 §5.3) backstops the NAV rule: a
+    /// reservation the free settlement cannot back is refused even when
+    /// `reservations + deployed ≤ NAV` would allow it.
+    #[test]
+    fn ledger_capital_rule_backstops_the_nav_rule() {
+        let mut b = Book::new(1_000);
+        b.ledger
+            .apply(&LedgerEvent::ResyncBalances { settlement: Some(100.0), underlying: vec![], at_ms: 0 })
+            .unwrap();
+        assert_eq!(b.reserve(500, 30_000, 0), Err(ReserveError::ExceedsAvailableCapital));
+        assert!(b.reserve(100, 30_000, 0).is_ok());
+        assert_eq!(b.reserved_total(), 100);
+        assert_eq!(b.ledger.reserved_total(), 100.0, "one store");
+        assert!(b.drain_reservation_transitions().len() == 1);
     }
 
     // ── keyed, durable reservations (SO-444) ───────────────────────────
