@@ -20,6 +20,7 @@ sui-tx         = { workspace = true }
 pyth-client    = { workspace = true }
 oracle-client  = { workspace = true }
 pricing        = { workspace = true }
+vol-forecast   = { workspace = true }
 token-info-client = { workspace = true }
 api-service-client = { workspace = true }
 indexer-graphql = { workspace = true }

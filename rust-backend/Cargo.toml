@@ -7,6 +7,7 @@ members = [
     "crates/pyth-client",
     "crates/sui-tx",
     "crates/pricing",
+    "crates/vol-forecast",
     "crates/deployments",
     "crates/token-info-client",
     "crates/oracle-client",
@@ -66,6 +67,7 @@ cli-spec       = { path = "crates/cli-spec" }
 pyth-client    = { path = "crates/pyth-client" }
 sui-tx         = { path = "crates/sui-tx" }
 pricing        = { path = "crates/pricing" }
+vol-forecast   = { path = "crates/vol-forecast" }
 deployments    = { path = "crates/deployments" }
 token-info-client = { path = "crates/token-info-client" }
 oracle-client  = { path = "crates/oracle-client" }

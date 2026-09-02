@@ -6085,6 +6085,7 @@ dependencies = [
  "tower-http 0.6.10",
  "tracing",
  "tracing-subscriber",
+ "vol-forecast",
 ]
 
 [[package]]
@@ -8240,6 +8241,7 @@ dependencies = [
  "chrono",
  "libm",
  "tracing",
+ "vol-forecast",
 ]
 
 [[package]]
@@ -13101,6 +13103,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "vol-forecast"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -29,6 +29,16 @@
 //! away over `term_decay_years`. The multiplier clamp is the same [0.25, 4.0]
 //! as `smile.rs`, for the same reason: a mis-calibrated wing must never price
 //! vol to zero.
+//!
+//! [`VolSurface::from_forecast`] (SO-440, doc 09 §2) is the buyer-side
+//! alternative to the max-leaning blend: the ATM sigma is the forecaster's
+//! `quantile(q_bid)` — a distribution quantile, no spike lift — and the
+//! wing convexity can come from the asset's own daily excess kurtosis
+//! (`convexity_from_kurtosis`) instead of a constant: a Gram–Charlier
+//! wing, `convexity(τ) = κ_τ / 24` with `κ_τ = κ_1d · min(1, 1d/τ)`, the
+//! kurtosis of iid daily returns aggregated to the tenor.
+
+pub use vol_forecast::{Regime, VolForecast};
 
 /// One realized-vol window observation (e.g. the 1d EWMA). `None` = the
 /// window is still cold (not enough samples to trust). `weight` is the
@@ -63,6 +73,9 @@ pub struct SurfaceParams {
     pub floor_vol: f64,
     /// Upper clamp on every returned vol.
     pub cap_vol: f64,
+    /// `from_forecast` only: derive `convexity` per tenor from the
+    /// forecast's daily excess kurtosis instead of the constant above.
+    pub convexity_from_kurtosis: bool,
 }
 
 /// A frozen surface: the blended base ATM sigma plus the shape parameters it
@@ -73,8 +86,12 @@ pub struct VolSurface {
     /// Blended base ATM sigma, already including risk premium, anchor ratio,
     /// and the [floor, cap] clamp.
     sigma_atm: f64,
-    /// True when every window was cold and `fallback_vol` was used.
+    /// True when every window was cold and `fallback_vol` was used (or the
+    /// forecast was cold / unusable).
     fallback: bool,
+    /// Daily excess kurtosis driving tenor-dependent convexity, when the
+    /// surface was built from a forecast with `convexity_from_kurtosis`.
+    kurtosis: Option<f64>,
     params: SurfaceParams,
 }
 
@@ -124,6 +141,37 @@ impl VolSurface {
         VolSurface {
             sigma_atm: sigma.clamp(params.floor_vol, params.cap_vol),
             fallback,
+            kurtosis: None,
+            params: *params,
+        }
+    }
+
+    /// Build the surface from a realized-vol forecast (SO-440).
+    ///
+    /// Base sigma = `forecast.quantile(q_bid)`: the vol level realized vol
+    /// exceeds with probability `1 − q_bid`, so a buyer bids low by policy
+    /// rather than lifting to a spike. No max-lean. Then `+ risk_premium`,
+    /// `× anchor_ratio`, and the [floor, cap] clamp exactly as
+    /// [`from_windows`](Self::from_windows). A `Cold` or unusable forecast
+    /// is reported via [`is_fallback`](Self::is_fallback) (the sigma still
+    /// comes from the forecast when it has one; the caller decides whether
+    /// to fall back to windows). With `params.convexity_from_kurtosis` the
+    /// wing convexity is derived per tenor from the forecast's daily excess
+    /// kurtosis (module docs).
+    pub fn from_forecast(forecast: &VolForecast, q_bid: f64, params: &SurfaceParams) -> VolSurface {
+        let usable = forecast.is_usable();
+        let base = if usable { forecast.quantile(q_bid) } else { params.floor_vol };
+        let fallback = !usable || forecast.regime == Regime::Cold;
+        let mut sigma = base + params.risk_premium;
+        if let Some(ratio) = params.anchor_ratio {
+            sigma *= ratio;
+        }
+        VolSurface {
+            sigma_atm: sigma.clamp(params.floor_vol, params.cap_vol),
+            fallback,
+            kurtosis: params
+                .convexity_from_kurtosis
+                .then_some(forecast.excess_kurtosis.max(0.0)),
             params: *params,
         }
     }
@@ -132,6 +180,16 @@ impl VolSurface {
     /// the configured fallback vol.
     pub fn is_fallback(&self) -> bool {
         self.fallback
+    }
+
+    /// Quadratic smile coefficient at tenor `t_years`: the constant
+    /// `params.convexity`, or `κ_τ / 24` from the forecast's daily excess
+    /// kurtosis with `κ_τ = κ_1d · min(1, 1d/τ)`.
+    fn convexity_at(&self, t_years: f64) -> f64 {
+        match self.kurtosis {
+            Some(k) => k * (1.0 / (365.0 * t_years.max(1.0 / 365.0))).min(1.0) / 24.0,
+            None => self.params.convexity,
+        }
     }
 
     /// Short-tenor boost multiplier: `1 + boost·exp(−τ/decay)`. Disabled
@@ -164,7 +222,7 @@ impl VolSurface {
         }
         let p = &self.params;
         let z = (strike / spot).ln() / denom;
-        let mult = (1.0 + p.skew * z + p.convexity * z * z).clamp(0.25, 4.0);
+        let mult = (1.0 + p.skew * z + self.convexity_at(t_years) * z * z).clamp(0.25, 4.0);
         (self.sigma_atm * self.term(t_years) * mult).clamp(p.floor_vol, p.cap_vol)
     }
 }
@@ -188,6 +246,7 @@ mod tests {
             anchor_ratio: None,
             floor_vol: 0.05,
             cap_vol: 3.0,
+            convexity_from_kurtosis: false,
         }
     }
 
@@ -327,5 +386,152 @@ mod tests {
         close(s.vol(100.0, 130.0, -1.0), s.atm(-1.0), 1e-12);
         close(s.vol(0.0, 130.0, 0.5), s.atm(0.5), 1e-12);
         close(s.vol(100.0, 0.0, 0.5), s.atm(0.5), 1e-12);
+    }
+
+    // ── from_forecast (SO-440) ─────────────────────────────────────────
+
+    use vol_forecast::synthetic::{sv_jump_path, SvJumpParams};
+    use vol_forecast::{
+        fit, forecast, realized_vol_between, ForecastConfig, ForecastInput, Horizon, MS_PER_DAY,
+    };
+
+    fn forecast_with(sigma: f64, residuals: Vec<f64>, regime: Regime, kurt: f64) -> VolForecast {
+        VolForecast {
+            sigma_mean: sigma,
+            sigma_continuous: sigma,
+            sigma_jump: 0.0,
+            regime,
+            sample_interval_ms: 900_000,
+            coverage: 1.0,
+            staleness_ms: 0,
+            horizon_ms: 7 * MS_PER_DAY,
+            rv_short: sigma,
+            rv_long: sigma,
+            excess_kurtosis: kurt,
+            jump_intensity_per_day: 0.0,
+            calibrated: true,
+            residuals,
+            cold_residual_std: 0.3,
+        }
+    }
+
+    #[test]
+    fn from_forecast_uses_the_bid_quantile_without_a_spike_lift() {
+        // Residuals ln(real/fc) uniform on [-0.4, 0.4]: quantile(0.35) is
+        // below the mean, quantile(0.5) is the mean itself.
+        let res: Vec<f64> = (0..81).map(|i| -0.4 + 0.01 * i as f64).collect();
+        let f = forecast_with(0.8, res, Regime::Calm, 0.0);
+        let s = VolSurface::from_forecast(&f, 0.35, &flat_params());
+        assert!(!s.is_fallback());
+        close(s.atm(1.0), 0.8 * (-0.12f64).exp(), 1e-9);
+        let s = VolSurface::from_forecast(&f, 0.5, &flat_params());
+        close(s.atm(1.0), 0.8, 1e-9);
+        // Premium / anchor / clamp stack exactly as from_windows.
+        let mut p = flat_params();
+        p.risk_premium = 0.05;
+        p.anchor_ratio = Some(1.2);
+        let s = VolSurface::from_forecast(&f, 0.5, &p);
+        close(s.atm(1.0), 0.85 * 1.2, 1e-9);
+    }
+
+    #[test]
+    fn from_forecast_labels_cold_and_unusable_as_fallback() {
+        let f = forecast_with(0.7, Vec::new(), Regime::Cold, 0.0);
+        let s = VolSurface::from_forecast(&f, 0.5, &flat_params());
+        assert!(s.is_fallback());
+        close(s.atm(1.0), 0.7, 1e-12); // cold still carries its own sigma
+        let f = forecast_with(0.0, Vec::new(), Regime::Calm, 0.0);
+        let s = VolSurface::from_forecast(&f, 0.5, &flat_params());
+        assert!(s.is_fallback());
+        close(s.atm(1.0), 0.05, 1e-12); // floored, never NaN
+    }
+
+    #[test]
+    fn convexity_from_kurtosis_lifts_wings_and_fades_with_tenor() {
+        let mut p = flat_params();
+        p.convexity_from_kurtosis = true;
+        p.convexity = 0.5; // ignored when derived
+        let f = forecast_with(0.6, Vec::new(), Regime::Calm, 6.0);
+        let s = VolSurface::from_forecast(&f, 0.5, &p);
+        // κ_1d = 6 → at a 1-day tenor convexity = 0.25; at 30 days 6/30/24.
+        let one_day = 1.0 / 365.0;
+        let z = |k: f64, t: f64| (k / 100.0f64).ln() / (0.6 * t.sqrt());
+        let zd = z(103.0, one_day); // ~1σ: inside the smile clamp
+        close(s.vol(100.0, 103.0, one_day), 0.6 * (1.0 + 0.25 * zd * zd), 1e-9);
+        let t30 = 30.0 * one_day;
+        let z30 = z(120.0, t30);
+        close(s.vol(100.0, 120.0, t30), 0.6 * (1.0 + 6.0 / 30.0 / 24.0 * z30 * z30), 1e-9);
+        // Both wings lift; ATM untouched; negative kurtosis never dents.
+        assert!(s.vol(100.0, 80.0, t30) > s.atm(t30));
+        close(s.vol(100.0, 100.0, t30), s.atm(t30), 1e-12);
+        let f = forecast_with(0.6, Vec::new(), Regime::Calm, -1.0);
+        let s = VolSurface::from_forecast(&f, 0.5, &p);
+        close(s.vol(100.0, 120.0, t30), s.atm(t30), 1e-12);
+        // Windows surfaces keep the constant.
+        let s = VolSurface::from_windows(&[live(0.6, 1.0)], 0.9, &p);
+        close(s.vol(100.0, 120.0, t30), 0.6 * (1.0 + 0.5 * z30 * z30).min(4.0), 1e-9);
+    }
+
+    /// Doc 09 §2.3 / §2.5 gate 1: after a spike the max-leaning window
+    /// blend holds the bid above what is then realized (the surface sits
+    /// above realized, i.e. the buyer overpays); the forecast surface does
+    /// not.
+    #[test]
+    fn post_shock_bias_windows_overpay_forecast_does_not() {
+        let p = SvJumpParams {
+            days: 700,
+            interval_ms: 300_000,
+            jumps_per_day: 0.02,
+            jump_size: 0.15,
+            ..Default::default()
+        };
+        let path = sv_jump_path(17, &p);
+        let hist = &path.history;
+        let end = path.end_ms();
+        let cfg = ForecastConfig::default();
+        let h = 7u64;
+        let horizon = Horizon::from_days(h as f64);
+        let params = flat_params();
+        let mut cal = None;
+        let (mut old_bias, mut new_bias, mut n_shock) = (0.0, 0.0, 0usize);
+        let (mut new_all, mut n_all) = (0.0, 0usize);
+        for d in (h..=300).rev() {
+            let origin = end - d * MS_PER_DAY;
+            let n = hist.partition_point(|s| s.0 <= origin);
+            let input = ForecastInput { asset: "SYN", history: &hist[..n] };
+            if d % 30 == 0 || cal.is_none() {
+                cal = Some(fit(&cfg, &input, horizon));
+            }
+            let c = cal.as_ref().unwrap();
+            let fc = forecast(c, &input, origin);
+            let interval = c.sample_interval_ms;
+            let realized = realized_vol_between(hist, origin, origin + h * MS_PER_DAY, interval);
+            let w1 = realized_vol_between(hist, origin - MS_PER_DAY, origin, interval);
+            let w7 = realized_vol_between(hist, origin - 7 * MS_PER_DAY, origin, interval);
+            let old = VolSurface::from_windows(&[live(w1, 1.0), live(w7, 1.0)], 0.9, &params);
+            let new = VolSurface::from_forecast(&fc, 0.35, &params);
+            let t = h as f64 / 365.0;
+            let (ob, nb) = (old.atm(t) - realized, fc.sigma_mean - realized);
+            new_all += nb;
+            n_all += 1;
+            let post_shock = path
+                .jump_times
+                .iter()
+                .any(|&j| j <= origin && origin < j + MS_PER_DAY);
+            if post_shock {
+                old_bias += ob;
+                new_bias += nb;
+                n_shock += 1;
+                // The bid after a shock is below what the current surface
+                // would have paid (doc 09 §2.5).
+                assert!(new.atm(t) < old.atm(t), "{} vs {}", new.atm(t), old.atm(t));
+            }
+        }
+        assert!(n_shock >= 3, "{n_shock} post-shock days");
+        let (old_bias, new_bias) = (old_bias / n_shock as f64, new_bias / n_shock as f64);
+        let new_all = new_all / n_all as f64;
+        assert!(old_bias > 0.25, "windows post-shock bias {old_bias}");
+        assert!(new_bias.abs() < 0.12, "forecast post-shock bias {new_bias}");
+        assert!(new_all.abs() < 0.05, "forecast bias {new_all}");
     }
 }

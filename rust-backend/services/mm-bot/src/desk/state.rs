@@ -323,6 +323,14 @@ pub struct MarketDto {
     pub fallback_vol: f64,
     pub surface_is_fallback: bool,
     pub carry_yield: f64,
+    /// Which estimator quotes the surface (`"windows"` | `"har"`) and the
+    /// vol-forecast (live or shadow) it shows (SO-440). Forecast fields
+    /// are `None` until the history buffer has a sample.
+    pub estimator: &'static str,
+    pub regime: Option<String>,
+    pub sample_interval_ms: Option<u64>,
+    pub sigma_mean: Option<f64>,
+    pub sigma_q_bid: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -532,6 +540,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
         .enumerate()
         .map(|(i, m)| {
             let (short, long) = desk.models[i].window_vols();
+            let est = desk.models[i].estimator_state();
             let spot = spots.get(&m.symbol);
             MarketDto {
                 symbol: m.symbol.clone(),
@@ -544,6 +553,11 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
                 fallback_vol: m.fallback_vol,
                 surface_is_fallback: desk.models[i].surface_is_fallback(),
                 carry_yield: desk.models[i].carry_yield,
+                estimator: est.estimator,
+                regime: est.regime,
+                sample_interval_ms: est.sample_interval_ms,
+                sigma_mean: est.sigma_mean,
+                sigma_q_bid: est.sigma_q_bid,
             }
         })
         .collect();

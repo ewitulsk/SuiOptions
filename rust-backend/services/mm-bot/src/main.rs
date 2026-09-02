@@ -41,6 +41,7 @@ use protocol_types::SigningScheme;
 
 use api_service_client::ApiServiceClient;
 use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
+use vol_forecast::PriceHistory;
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::mm_collateral::balance_of as collateral_balance_of;
@@ -322,6 +323,8 @@ struct Market {
     vol_buf: Arc<RwLock<RollingVolBuffer>>,
     /// Long-window buffer (same samples).
     vol_buf_long: Arc<RwLock<RollingVolBuffer>>,
+    /// Long price history for the vol forecaster (same samples, SO-440).
+    history: Arc<RwLock<PriceHistory>>,
     /// Sigma used while the buffers are cold.
     fallback_vol: f64,
 }
@@ -538,6 +541,9 @@ async fn main() -> Result<()> {
             decimals: spec.decimals,
             vol_buf: Arc::new(RwLock::new(RollingVolBuffer::new(vol_window_ms))),
             vol_buf_long: Arc::new(RwLock::new(RollingVolBuffer::new(vol_long_window_ms))),
+            history: Arc::new(RwLock::new(PriceHistory::new(
+                vol_forecast::ForecastConfig::default().required_history_ms(),
+            ))),
             fallback_vol: cfg
                 .pyth
                 .fallback_vols
@@ -625,6 +631,7 @@ async fn main() -> Result<()> {
             m.feed,
             price_cache.clone(),
             vec![Arc::clone(&m.vol_buf), Arc::clone(&m.vol_buf_long)],
+            Arc::clone(&m.history),
         );
     }
 
@@ -751,6 +758,7 @@ async fn main() -> Result<()> {
                 decimals: m.decimals,
                 vol_buf: Arc::clone(&m.vol_buf),
                 vol_buf_long: Arc::clone(&m.vol_buf_long),
+                history: Arc::clone(&m.history),
                 fallback_vol: m.fallback_vol,
             })
             .collect();
@@ -1747,6 +1755,7 @@ fn spawn_vol_sampler(
     feed: PriceFeedId,
     cache: PriceCache,
     bufs: Vec<Arc<RwLock<RollingVolBuffer>>>,
+    history: Arc<RwLock<PriceHistory>>,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_millis(cfg.vol_sample_interval_ms));
@@ -1770,6 +1779,7 @@ fn spawn_vol_sampler(
             for buf in &bufs {
                 buf.write().push(now, cp.price);
             }
+            history.write().push(now, cp.price);
             if let Some(sigma) = bufs.first().and_then(|b| b.read().current_annualized()) {
                 vol_log_counter += 1;
                 if vol_log_counter % 60 == 1 {
