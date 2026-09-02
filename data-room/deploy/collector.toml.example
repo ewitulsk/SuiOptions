@@ -158,3 +158,16 @@ exchange = "bluefin"
 url = "wss://stream.api.sui-prod.bluefin.io/ws/market"
 products = ["SUI-PERP"]
 channels = ["Diff_Depth_200_ms", "Recent_Trade", "Ticker"]
+
+# Funding settlements (SO-446). Public, unauthenticated; newest first,
+# default 100 rows (max 1000) — settlements are hourly, so one poll
+# covers ~4 days and an hourly cadence gives every settlement several
+# captures. The endpoint also takes startTimeAtMillis/endTimeAtMillis, so
+# history is repairable if capture ever lapses. Normalized by
+# `normalizer bluefin` and cross-checked against the ticker stream's
+# nextFundingTimeAtMillis rollovers.
+[[pollers]]
+exchange = "bluefin"
+url = "https://api.sui-prod.bluefin.io/v1/exchange/fundingRateHistory?symbol=SUI-PERP&limit=100"
+stream = "funding.SUI-PERP"
+interval_secs = 3600

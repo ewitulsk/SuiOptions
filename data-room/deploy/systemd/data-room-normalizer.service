@@ -15,6 +15,7 @@ ExecStart=/usr/bin/docker compose run --rm batch normalizer hyperliquid --lookba
 ExecStart=/usr/bin/docker compose run --rm batch normalizer funding-settled --coins BTC,SUI --days 3
 ExecStart=/usr/bin/docker compose run --rm batch normalizer deribit --lookback-days 3
 ExecStart=/usr/bin/docker compose run --rm batch normalizer aftermath --lookback-days 3
+ExecStart=/usr/bin/docker compose run --rm batch normalizer bluefin --lookback-days 3
 # dvol stays BTC-only: Deribit has no SUI options, which is the whole
 # reason doc 07's IV ablation runs on BTC.
 ExecStart=/usr/bin/docker compose run --rm batch normalizer dvol --currencies BTC --days 3

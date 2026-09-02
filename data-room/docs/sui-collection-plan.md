@@ -11,6 +11,7 @@ step not done — see §6.
 | S1 DeepBook + Coinbase/HL SUI | **live, capturing** | SO-403 (#489) |
 | S1b Aftermath router ladder | **live, capturing** | SO-403 (#489) |
 | S1c buy-base ladder + `quote_ladder` silver | **merged, config pending on host** | SO-446 |
+| S2b Bluefin funding (REST history poller + ticker-rollover derivation) | **merged, config pending on host** | SO-446 |
 | S2 Bluefin SUI-PERP | **merged** | SO-404 (#490) |
 | S3 Vision backfill + timers | **backfill running, timers live** | SO-406 (#492) |
 | S4 bookTicker adapter | **merged** | SO-405 (#491) |
@@ -327,6 +328,29 @@ channels = ["orderbookDepthDiff200ms", "trades", "ticker"]   # confirm names
 landing for all three streams; a captured frame committed as a fixture in
 `crates/adapters/fixtures/`; reconnect drill per the spec's R1 gate
 (kill the socket, confirm marker rows **and** a gaps row).
+
+**Funding (SO-446, doc 08 §3.2).** Two sources, cross-checked in
+`normalizer bluefin`:
+
+- `GET /v1/exchange/fundingRateHistory?symbol=SUI-PERP&limit=100`
+  (public; default 100, max 1000; also takes `startTimeAtMillis` /
+  `endTimeAtMillis`, so history is repairable) polled hourly into
+  `funding.SUI-PERP` → `part-settled.parquet`, `kind = settled`.
+  Settlements are **hourly** (`fundingTimeAtMillis` rows 3600 s apart,
+  applied ~6 s after the hour). The partition for day D reads the bronze
+  of D and D+1 and keeps rows whose settlement falls on D.
+- `nextFundingTimeAtMillis` rollovers on `ticker.SUI-PERP` →
+  `part-derived.parquet`, `kind = derived`: `ts_event` is the scheduled
+  hour, `ts_recv` the first post-rollover frame, `rate` that frame's
+  `lastFundingRateE9`, mark/oracle from the same frame. The clock is
+  seeded from hour 23 of D-1 so the 00:00 settlement is not lost.
+  Distinct `kind` so `kind = 'settled'` never double counts.
+- Cross-check: each derived row is matched to a REST row within ±5 min;
+  the run logs `matched / mismatched / rest_only / ticker_only` and warns
+  on any mismatch. The untested assumption — that the first
+  post-rollover frame's `lastFundingRateE9` is the rate just settled —
+  is exactly what the mismatch counter will confirm or refute once real
+  rollovers replay.
 
 ### 1.3 Aftermath SUI-PERP — **optional, defer**
 

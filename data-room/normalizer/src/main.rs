@@ -45,6 +45,14 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         lookback_days: u32,
     },
+    /// Normalize Bluefin bronze for a UTC day: funding settlements from
+    /// the REST-history poller plus ticker-rollover derivation.
+    Bluefin {
+        #[arg(long)]
+        date: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        lookback_days: u32,
+    },
     /// Fetch Deribit DVOL hourly candles into vol_index partitions
     /// (full history is free; re-runs repair gaps).
     Dvol {
@@ -153,6 +161,15 @@ async fn main() -> anyhow::Result<()> {
             for day in ws_days(date, lookback_days)? {
                 let n = normalizer::aftermath::normalize_day(&store, &day).await?;
                 tracing::info!(day, partitions = n, "aftermath day normalized");
+            }
+        }
+        Cmd::Bluefin {
+            date,
+            lookback_days,
+        } => {
+            for day in ws_days(date, lookback_days)? {
+                let n = normalizer::bluefin_funding::normalize_day(&store, &day).await?;
+                tracing::info!(day, funding_parts = n, "bluefin day normalized");
             }
         }
         Cmd::Dvol {

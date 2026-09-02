@@ -3,6 +3,7 @@
 //! exactly (idempotent), and output is deterministic byte-for-byte.
 
 pub mod aftermath;
+pub mod bluefin_funding;
 pub mod deribit;
 pub mod funding;
 pub mod instruments;
