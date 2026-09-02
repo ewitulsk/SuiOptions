@@ -476,6 +476,9 @@ pub struct DeskParams {
     pub deepbook: Option<DeepBookHandles>,
     /// The deployment's DEEP token type (token-info `deep_coin_type`).
     pub deep_coin_type: Option<String>,
+    /// deepbook-adapter package + shared `PoolAllowlist` — the
+    /// vault-custody put repurchase (SO-443) is disabled when absent.
+    pub deepbook_adapter: Option<exits::put::AdapterRefs>,
     /// Desk history DB — the fill poller closes RFQ-funnel rows through
     /// it (SO-425). `None` ⇒ funnel recording off, trading unaffected.
     pub history: Option<Arc<history::History>>,
@@ -767,6 +770,8 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         core_package: p.core_package,
         vault_address,
         curator: curator_refs,
+        deepbook_adapter: p.deepbook_adapter,
+        hedge_venues: primary_venues.clone(),
     });
 
     // Exchange listings (SO-416): rest asks for the desk's option

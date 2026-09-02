@@ -670,7 +670,7 @@ async fn submit(
 
 /// Same as [`submit`] for an already-finished PTB (callers that dev-inspect
 /// the transaction first need the `ProgrammableTransaction` twice).
-async fn submit_programmable(
+pub(crate) async fn submit_programmable(
     client: &ChainClient,
     signer: &Signer,
     programmable: sui_types::transaction::ProgrammableTransaction,
@@ -711,7 +711,10 @@ async fn submit_programmable(
 // ── SO-299 desk exits: coin-based swap + flash-exercise ────────────────
 
 /// `Coin<T>::zero()` as a PTB argument (fee legs on whitelisted pools).
-fn zero_coin(pt: &mut ProgrammableTransactionBuilder, coin_type: &str) -> Result<Argument> {
+pub(crate) fn zero_coin(
+    pt: &mut ProgrammableTransactionBuilder,
+    coin_type: &str,
+) -> Result<Argument> {
     let tag = TypeTag::from_str(coin_type).with_context(|| format!("parsing {coin_type}"))?;
     Ok(pt.programmable_move_call(
         ObjectID::from_hex_literal("0x2").unwrap(),
@@ -722,7 +725,7 @@ fn zero_coin(pt: &mut ProgrammableTransactionBuilder, coin_type: &str) -> Result
     ))
 }
 
-fn nested(arg: Argument, i: u16) -> Argument {
+pub(crate) fn nested(arg: Argument, i: u16) -> Argument {
     match arg {
         Argument::Result(cmd) => Argument::NestedResult(cmd, i),
         other => other,

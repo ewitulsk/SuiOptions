@@ -19,9 +19,12 @@
 //!      pays the strike) — skipped when the vault's free settlement
 //!      doesn't cover it (the flash fallback is wallet-only).
 //!
-//! Puts: offset closes work; put EXERCISE is TODO(SO-299) — held puts
-//! otherwise hold to expiry (their resale channel is the listings
-//! engine's resting asks).
+//! Puts: offset closes work; put EXERCISE (SO-443) runs the three-path
+//! atomic waterfall in [`put`] — own/vault underlying → base flash →
+//! quote flash — gated on the §0.4 minimum profit, laddered inside
+//! expiry, with the LONG-perp hedge close scheduled right after each
+//! slice. The near-expiry rung doubles as the redundant keeper sweep:
+//! every ITM put inside the window is attempted before expiry.
 //!
 //! Vault free-balance coins (auction-win redemptions) cannot be
 //! exercised: `exercise_call_coin` takes a coin-custody POSITION and
@@ -54,7 +57,9 @@ use super::book::{self, Book, CoinPosition, Holding, Written};
 use super::model::MarketModel;
 use super::{CuratorRefs, DeskShared};
 
-const ALERT_ID: &str = "tx-failed-mm-bot-desk";
+pub mod put;
+
+pub(crate) const ALERT_ID: &str = "tx-failed-mm-bot-desk";
 
 /// `[desk.exits]` knobs. Defaults per 00-plan §5.
 #[derive(Debug, Clone, Deserialize)]
@@ -77,6 +82,8 @@ pub struct ExitsConfig {
     /// underlying (cash exercise only).
     pub spot_pools: HashMap<String, String>,
     pub gas_budget: u64,
+    /// Put exercise policy (SO-443).
+    pub put: put::PutExerciseConfig,
 }
 
 impl Default for ExitsConfig {
@@ -90,6 +97,7 @@ impl Default for ExitsConfig {
             max_slice: 1_000_000_000,
             spot_pools: HashMap::new(),
             gas_budget: 200_000_000,
+            put: put::PutExerciseConfig::default(),
         }
     }
 }
@@ -102,11 +110,13 @@ pub enum ExitAction {
     ExerciseCash,
     /// Exercise via the DeepBook flash-loan PTB.
     FlashExercise,
+    /// Put: run the [`put`] waterfall (route chosen per slice).
+    ExercisePut,
 }
 
-/// Pure ladder decision for one held option. Puts only ever hold — put
-/// exercise is TODO(SO-299). (Resale is not decided here: the listings
-/// engine keeps a standing ask resting on the exchange instead.)
+/// Pure ladder decision for one held option. (Resale is not decided
+/// here: the listings engine keeps a standing ask resting on the
+/// exchange instead.)
 #[allow(clippy::too_many_arguments)]
 pub fn decide_exit(
     cfg: &ExitsConfig,
@@ -122,7 +132,16 @@ pub fn decide_exit(
     let t = (expiry_ms.saturating_sub(now_ms)) as f64 / 1000.0 / 86_400.0 / 365.0;
     let (sigma, _) = model.sigma(spot, strike, t);
     if is_put {
-        return ExitAction::Hold; // TODO(SO-299): put exercise.
+        if !cfg.put.enabled {
+            return ExitAction::Hold;
+        }
+        let hours = (expiry_ms.saturating_sub(now_ms)) as f64 / 3_600_000.0;
+        let (carry, tv) = put::put_carry_and_time_value(model, spot, strike, t);
+        return if put::put_exercise_wanted(cfg, spot, strike, hours, carry, tv) {
+            ExitAction::ExercisePut
+        } else {
+            ExitAction::Hold
+        };
     }
     // Exercise when optimal: forgone carry beats remaining time value
     // with margin, or near-expiry ITM.
@@ -176,6 +195,12 @@ pub struct ExitsParams {
     /// Curator-session refs — `None` disables the vault-custody paths
     /// (offset closes, vault exercise).
     pub curator: Option<CuratorRefs>,
+    /// deepbook-adapter package + `PoolAllowlist` — `None` disables the
+    /// vault-custody put repurchase (SO-443).
+    pub deepbook_adapter: Option<put::AdapterRefs>,
+    /// Per-market PRIMARY hedge venue, aligned with `models`; put
+    /// exercise schedules its hedge close here.
+    pub hedge_venues: Vec<Arc<dyn super::hedge::HedgeVenue>>,
 }
 
 pub fn spawn_exits(p: ExitsParams) {
@@ -277,9 +302,27 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             ExitAction::Hold => "hold",
             ExitAction::ExerciseCash => "exercise_cash",
             ExitAction::FlashExercise => "flash_exercise",
+            ExitAction::ExercisePut => "exercise_put",
         })
         .increment(1);
         if action == ExitAction::Hold {
+            continue;
+        }
+        if action == ExitAction::ExercisePut {
+            // Both legs + laddering + hedge close live in the put module;
+            // every tx failure is alert-logged at its handler there.
+            match put::run(p, wrap, &h, mi, spot, now).await {
+                Ok(0) => {}
+                Ok(units) => {
+                    metrics::counter!("mm_desk_put_exercised_units_total").increment(units)
+                }
+                Err(e) => tracing::error!(
+                    alert_id = ALERT_ID,
+                    bucket = %h.bucket_id.to_hex(),
+                    error = %format!("{e:#}"),
+                    "put exercise failed before any tx"
+                ),
+            }
             continue;
         }
 
@@ -288,7 +331,7 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             let res = match action {
                 ExitAction::ExerciseCash => exercise_cash(p, wrap, &h, h.amount_wallet).await,
                 ExitAction::FlashExercise => flash_exercise(p, wrap, &h, spot).await,
-                ExitAction::Hold => unreachable!(),
+                ExitAction::Hold | ExitAction::ExercisePut => unreachable!(),
             };
             if let Err(e) = res {
                 tracing::error!(
@@ -308,8 +351,8 @@ async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
             .amount_vault
             .saturating_add(h.amount_coin_positions())
             .saturating_sub(listed);
-        if vault_units == 0 || h.is_put {
-            continue; // puts never pick exercise today
+        if vault_units == 0 {
+            continue;
         }
         let Some(refs) = p.curator.as_ref() else {
             tracing::info!(

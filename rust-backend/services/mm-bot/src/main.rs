@@ -733,6 +733,15 @@ async fn main() -> Result<()> {
             ),
             None => (None, None),
         };
+        // Vault-custody put repurchase (SO-443): the adapter's taker swap
+        // on an allowlisted pool.
+        let deepbook_adapter = match (snapshot.deepbook_adapter(), tv_objects) {
+            (Some(a), Some(o)) => Some(mm_bot::desk::exits::put::AdapterRefs {
+                package: a.package()?,
+                pool_allowlist: o.pool_allowlist()?,
+            }),
+            _ => None,
+        };
         let desk_markets = markets
             .iter()
             .map(|m| mm_bot::desk::DeskMarket {
@@ -776,6 +785,7 @@ async fn main() -> Result<()> {
             integration_registry,
             deepbook,
             deep_coin_type,
+            deepbook_adapter,
             history: history.clone(),
         })
         .await?;
