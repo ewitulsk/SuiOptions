@@ -72,9 +72,10 @@ TWAL = 1.0
 # adopt a vault someone else created.
 [desk]
 enabled = true
-# SO-465: pin the desk vault — discovery drops the desk's own vault once it wires
-# direct exchange custody (SO-463) and provisions a new one on every restart.
-vault_id = "0x3e2356574c990126472ed4cc1a1cee1346d914860a0a2a7126f26090e9c30a5f"
+# SO-465 tried to pin the desk vault here; the pinned path fails its indexer
+# lookup ("not a trading vault of this deployment") and the boot crash-loops,
+# minting a QuoteSigner every restart. Left on auto until SO-463 fixes
+# discovery and the pinned lookup.
 # mm_release_enabled is now consent to flip the vault_mm release gate when
 # the chain says it is off, not an attestation that it is on — chain state
 # decides, and the bot holds its own CuratorCap.
