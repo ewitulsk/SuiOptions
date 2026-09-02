@@ -89,7 +89,8 @@ pub fn summarize(s: &Scenario, out: &RunOutput) -> Summary {
         asset: s.asset.clone(),
         labels: Labels {
             proxy_oracle: true, proxy_venue: true, taker_only: true, no_resale: true, constant_flow: true,
-            exercise: "at_expiry", estimator: s.estimator.kind.clone(),
+            exercise: "at_expiry",
+            estimator: if s.estimator.kind == "har" { format!("har(q_bid={})", s.estimator.q_bid) } else { s.estimator.kind.clone() },
         },
         from: s.from.clone(),
         to: s.to.clone(),
