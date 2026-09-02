@@ -1,0 +1,4 @@
+band_pct_nav,risk_premium,max_lean,sample_interval_s,fills,turns,coverage,nav_end,desk_gross_return,depositor_net_return_annualized,max_drawdown,hedge_turnover_nav_per_30d,hedge_fees,hedge_slippage,funding_paid,premium_paid,option_payoff,hedge_realized,mean_sigma_paid,mean_sigma_realized,mean_vol_bias,vol_pnl_proxy_total,liquidations,bankrupt,hash
+5,0.05,0.8,900,8,13,0.9998,15593.14,-0.98441,-0.98441,0.9922,8.508,33049.79,32964.31,-20917.33,743709.51,72218.80,-79863.33,0.6853,0.9388,0.2535,449788.76,5,false,e4cc46bbfe3a8de5
+20,0.05,0.8,900,8,13,0.9998,26958.36,-0.97304,-0.97304,0.9871,6.978,26970.40,26953.39,-25557.17,886970.89,154663.31,-65536.67,0.6602,0.9176,0.2574,649516.15,5,false,ef645faf53240d65
+30,0.05,0.8,900,8,13,0.9998,151368.66,-0.84863,-0.84863,0.9131,4.681,18430.97,18421.07,-24866.24,872581.60,148588.82,-49078.56,0.6853,0.9382,0.2529,486448.05,2,false,adb024eec39b6392

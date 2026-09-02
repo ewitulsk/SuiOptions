@@ -634,10 +634,12 @@ pub fn capacity_sweep(base: &Scenario, data: &Data, volumes: &[f64], mixes: &[Mi
                 std::fs::write(d.join("summary.json"), serde_json::to_string_pretty(&r)?)?;
             }
             results.push(r);
+            // The frontier is rewritten after every point so a cut-short
+            // sweep still leaves a complete table for the points it solved.
+            if let Some(dir) = out {
+                std::fs::write(dir.join("frontier.csv"), capacity_frontier_csv(&results))?;
+            }
         }
-    }
-    if let Some(dir) = out {
-        std::fs::write(dir.join("frontier.csv"), capacity_frontier_csv(&results))?;
     }
     Ok(results)
 }

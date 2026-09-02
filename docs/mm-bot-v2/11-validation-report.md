@@ -10,9 +10,10 @@ generated flow from **stated priors** (doc 08 §3.1: no RFQ history exists),
 capacity, latencies assumed. Nothing here is an APY claim; §12 at the end
 says which "definition of validated" items pass.
 
-Machine-readable: `results/results.json` + `results/report.md` from
-`desk-backtester report --dir <study>`; the study is reproduced by
-`crates/backtester/studies/run_doc11.sh`.
+Machine-readable: `11-results/results.json` + `11-results/report.md`
+(the generated doc 08 §9.6 report with the §12 checklist evaluated by the
+assembler) plus the stage CSVs, from `desk-backtester report --dir
+<study>`; the study is reproduced by `crates/backtester/studies/run_doc11.sh`.
 
 ## 0. TL;DR
 
@@ -78,7 +79,7 @@ Machine-readable: `results/results.json` + `results/report.md` from
 | BTC walk-forward | `studies/wf_btc_estimator.toml` (4 candidates) | folds 2021 → 2024, holdout sealed | 16 | 25 min |
 | stress suite ×2 | `sui_mixed_halfyear.toml`, at 2025-10-10, leverage 10 and 3 | 2025-08-01 → 2026-01-31 | 34 | 6 min |
 | break-even grid | `studies/grid_sui_halfyear.toml`: band × execution × leverage × mix, 2 seeds | half-year | 48 | 10 min |
-| capacity frontier | `sui_mixed_halfyear.toml`, V = 25 k / 100 k per day, balanced, 2 seeds | half-year | ~60 | 30 min |
+| capacity frontier | `sui_mixed_halfyear.toml`, V = 25 k per day, balanced, 2 seeds (cut from two volumes: the second point would have pushed the serial bisection past 45 min) | half-year | 28 + 6 | 12 min |
 
 The expensive stages run on the **half-year SUI window** (2025-08-01 →
 2026-01-31, the 2025-10-10 cascade in-sample) on purpose: the mixed-book
@@ -395,7 +396,40 @@ Reading:
 
 ## 7. Capacity frontier (doc 08 §8.6)
 
-_(filled from `capacity/frontier.csv`)_
+One point, not a frontier: the solver was cut to **V = 25 k/day accepted
+spot notional, balanced mix, two flow seeds** on the half-year window
+after the second volume (100 k/day) would have pushed the serial
+bisection past 45 minutes; the 100 k point and the log sweep of doc 08
+§8.1 are the first thing to run when the study is repeated with time.
+Capacity mode injects the target inelastically (`acceptance = instant`),
+so a point is never `demand_limited`.
+
+| target accepted/day | mix | min NAV (95 % of seeds) | per seed | binding (simulated) | next | §8.6 lower bound | agrees | net (ann.) at min NAV | hurdle | max DD | liq | label |
+|---:|---|---:|---|---|---|---:|---|---:|---|---:|---:|---|
+| 25,000 | balanced | **743,180** | 649 k / 743 k | **liquidation** | premium_per_expiry, drawdown | 506,459 (peak-expiry premium) | no | +15.1 % | 2/2 pass | 0.066 | 0 | capital_limited |
+
+At the solved NAV (28 bisection runs + 6 probes): accepted 4.61 M over
+the half year (4,412 RFQs, 2,207 calls / 2,206 puts, 4,066 expiries),
+premium turnover 131 k, hedge turnover 287 k, exercise spot turnover
+1.55 M (556 calls / 978 puts exercised, none laddered or failed); peak
+premium at risk 75 k total (call 51 k, put 74 k, one expiry 51 k);
+initial hedge margin 16 k, peak 24 h top-up 28 k (38 % of the daily
+release fraction), external budget usage 19 %; displayed writer-net APY
+106 % calls / 104 % puts; depositor-net **+15.1 % annualized, 6.6 %
+drawdown, zero liquidations at both seeds**. Net profit per accepted
+notional ≈ +1.2 % over six months; return on peak capital deployed
+(80 k of marks + reservations + margin) is large because the solved NAV
+is ten times the capital the book ever ties up.
+
+Reading: the binding constraint is **liquidation**, not premium — just
+below 650–740 k of NAV the 10× hedge liquidates on the cascade, while the
+doc 08 §8.6 lower bound (which has no liquidation term; its
+`synthetic_stress_loss` is still zero) says 506 k on the peak-expiry cap.
+The bound and the simulator disagree (`lower_bound_agrees = false`), which
+is the §8.6 "necessary, not sufficient" case made concrete: the required
+NAV is set by how much cash must sit idle to survive a margin call, not by
+the premium caps. Every column doc 08 §8.6 asks for is in
+`capacity/capacity-V25000-balanced/summary.json` and `frontier.csv`.
 
 ## 8. Labels carried by every published result
 
@@ -424,10 +458,10 @@ distributions carry n, sd, quantiles, a Student-t interval and CVaR.
 | 8 | The lower confidence bound clears the hurdle | **fail** | one validation fold (n = 1, no interval) on SUI; grid points: see §6 |
 | 9 | Historical and synthetic stresses inside drawdown and liquidation limits | **fail** | drawdowns pass everywhere; liquidations fail 14/17 at 10× and 3/17 at 3× |
 | 10 | Margin top-ups feasible without violating premium/liquidity constraints | **pass at 3×, fail at 10×** | historical replay: 0 declines / 0 rejects / 0 liquidations at 3× |
-| 11 | Acceptable across call-heavy, put-heavy and mixed flow | see §6 | |
+| 11 | Acceptable across call-heavy, put-heavy and mixed flow | **fail** | §6: 0/24 grid points break even; call-heavy is liquidation-free but below the hurdle, put-heavy clears the hurdle and liquidates |
 | 12 | Profit does not depend on one latency, queue, IV, resale or seed assumption | **fail** | §4: the estimator ordering flips between folds; §6 sensitivity |
 | 13 | Capacity bounded by measured depth, flash balances, router depth, expiry concentration | **fail** | every capacity result is `venue_capacity=assumed` / `flash_capacity_assumed` (doc 08 §10) |
-| 14 | Every target volume has min-NAV, CI, binding constraint, feasibility label | see §7 | |
+| 14 | Every target volume has min-NAV, CI, binding constraint, feasibility label | **pass (one volume)** | §7: min NAV, per-seed interval, simulated binding + next two, §8.6 bound, `capital_limited`; only V = 25 k/day was run |
 | 15 | Model edge is never presented as realized revenue | by construction | one line, `model_edge_at_entry_non_realized`, outside every return figure |
 | 16 | Every published result includes uncertainty, coverage and proxy labels | pass | §8 |
 
@@ -448,3 +482,5 @@ any fold; and every capacity statement rests on assumed venue depth.
 - Market-mode arrivals at the stated priors accept ~11–15 M of notional in
   six months on a 1 M vault; that is the prior, not demand.
 - The constant injector still consumes a declined turn (doc 10 §6).
+- The capacity stage is one volume (25 k/day); the 100 k point and the
+  log sweep were cut for runtime (§7).
