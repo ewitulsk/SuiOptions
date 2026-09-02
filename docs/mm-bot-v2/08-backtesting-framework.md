@@ -290,10 +290,12 @@ may read it. Proper own-venue capture (exchange order flow and the Earn
 RFQ funnel) is a mainnet-launch prerequisite to be designed separately;
 until it exists, §8 runs on stated priors and sweeps.
 
-Follow-up (decided 2026-09-01, not yet implemented): gate the PR A
-recorder behind a config flag that defaults off, so testnet deployments
-write no RFQ rows at all. Keep the table, migration, and code for mainnet.
-Not a revert.
+Follow-up (decided 2026-09-01, implemented (SO-447)): the PR A recorder
+is gated behind `[desk.history] record_rfq_outcomes`, default off, so
+testnet deployments write no RFQ rows at all (quotes, declines, fills and
+the TTL sweep are all skipped; state/P&L samples and the SO-444
+reservation ledger keep recording). The table, migration, and code stay
+for mainnet. Not a revert.
 
 ### 3.2 Continue live source collection
 

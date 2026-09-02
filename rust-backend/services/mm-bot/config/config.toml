@@ -148,10 +148,18 @@ enabled            = false
 # price-charting Tiger Data secret); the TOML field is for local dev
 # (e.g. `docker run -p 5432:5432 timescale/timescaledb:latest-pg16`).
 # Neither set ⇒ history disabled; the bot trades regardless.
+#
+# record_rfq_outcomes gates the RFQ funnel (desk_rfq_outcomes) and
+# defaults OFF (doc 08 §3.1, decided 2026-09-01, SO-447): nothing
+# observed on our own Earn RFQ channel while it runs on testnet is
+# calibration data — it is telemetry only, and we are the only
+# participants — so testnet deployments write no RFQ rows at all. State,
+# P&L and reservation history are unaffected. Flip it on for mainnet.
 # [desk.history]
 # database_url = "postgres://postgres:password@127.0.0.1:5432/tsdb"
 # db_pool_size = 2
 # sample_secs  = 60
+# record_rfq_outcomes = false
 
 # [desk.surface]              # vol surface shaping
 # risk_premium = 0.05         # +5 vol pts over realized
