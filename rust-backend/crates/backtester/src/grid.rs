@@ -53,21 +53,29 @@ impl GridConfig {
     }
 }
 
-/// Doc 08 §9.3: the required portfolio variants as flow overrides.
+/// Doc 08 §9.3: the required portfolio variants as flow overrides. The
+/// share drives the constant injector and capacity mode directly; in
+/// market mode arrivals come from the per-type base rates, so those are
+/// rescaled to the share at the same total intensity.
 pub fn apply_mix(s: &mut Scenario, mix: &str) -> Result<()> {
     let g = &mut s.flow_gen;
-    match mix {
-        "call_only" => g.call_share = 1.0,
-        "put_only" => g.call_share = 0.0,
-        "balanced" => g.call_share = 0.5,
+    let prior = g.call.base_rate_per_day / (g.call.base_rate_per_day + g.put.base_rate_per_day).max(1e-9);
+    let share = match mix {
+        "call_only" => 1.0,
+        "put_only" => 0.0,
+        "balanced" => 0.5,
         // No RFQ history exists (doc 08 §3.1): the "historically
         // calibrated" mix is the stated prior's base rates.
-        "prior_calibrated" => g.call_share = g.call.base_rate_per_day / (g.call.base_rate_per_day + g.put.base_rate_per_day),
-        "call_heavy" => g.call_share = 0.85,
-        "put_heavy" => g.call_share = 0.15,
+        "prior_calibrated" => prior,
+        "call_heavy" => 0.85,
+        "put_heavy" => 0.15,
         other => anyhow::bail!("unknown mix {other} (call_only|put_only|balanced|prior_calibrated|call_heavy|put_heavy)"),
-    }
-    s.flow.call_share = g.call_share;
+    };
+    let total = g.call.base_rate_per_day + g.put.base_rate_per_day;
+    g.call_share = share;
+    g.call.base_rate_per_day = total * share;
+    g.put.base_rate_per_day = total * (1.0 - share);
+    s.flow.call_share = share;
     Ok(())
 }
 
@@ -306,11 +314,18 @@ mod tests {
 
     #[test]
     fn mixes_cover_the_required_variants() {
+        let total = Scenario::default().flow_gen.call.base_rate_per_day + Scenario::default().flow_gen.put.base_rate_per_day;
         for m in ["call_only", "put_only", "balanced", "prior_calibrated", "call_heavy", "put_heavy"] {
             let mut s = Scenario::default();
             apply_mix(&mut s, m).unwrap();
-            assert!((0.0..=1.0).contains(&s.flow_gen.call_share));
+            let g = &s.flow_gen;
+            assert!((0.0..=1.0).contains(&g.call_share));
+            assert!((g.call.base_rate_per_day + g.put.base_rate_per_day - total).abs() < 1e-9, "{m}: total intensity preserved");
+            assert!((g.call.base_rate_per_day / total - g.call_share).abs() < 1e-9);
         }
+        let mut s = Scenario::default();
+        apply_mix(&mut s, "put_heavy").unwrap();
+        assert!(s.flow_gen.put.base_rate_per_day > s.flow_gen.call.base_rate_per_day);
         assert!(apply_mix(&mut Scenario::default(), "nope").is_err());
     }
 }

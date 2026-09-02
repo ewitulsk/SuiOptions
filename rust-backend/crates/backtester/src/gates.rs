@@ -195,8 +195,9 @@ mod tests {
         assert!(turnovers[0] > turnovers[1] * 1.3, "5% band {} should turn over more than 20% band {}", turnovers[0], turnovers[1]);
     }
 
-    /// Doc 07 §5 / doc 10 §2 reproduction on the real SUI year, gated on
-    /// the lake mirror (`DESK_LAKE_MIRROR=/path`), release build.
+    /// Doc 07 §5 / doc 10 §2 reproduction on the real SUI year (Aug 2025
+    /// → Jul 2026, band 20, doc 07's no-margin assumption), gated on the
+    /// lake mirror (`DESK_LAKE_MIRROR=/path`); ~1 min in a release build.
     #[test]
     fn doc07_call_turnover_reproduces_within_tolerance_on_the_lake_mirror() {
         let Ok(mirror) = std::env::var("DESK_LAKE_MIRROR") else {
@@ -206,7 +207,6 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios/sui_doc07_calls.toml");
         let mut s = Scenario::load(&path).unwrap();
         s.margin.enabled = false;
-        s.to = "2025-10-31".into();
         let store = crate::data::open_store(&format!("file://{mirror}")).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (bars, funding) = rt.block_on(async {
@@ -218,7 +218,7 @@ mod tests {
         let m = Metric::from_run(&s, &out);
         let (_, d07, _, d10) = crate::results::DOC07_REFERENCE[4];
         let t = m.hedge_turnover_nav_per_30d;
-        eprintln!("doc07 reproduction (Aug–Oct 2025, band 20): turnover {t:.2} vs doc07 {d07} / doc10 {d10}, fills {}, nav_end {:.0}", m.fills, m.nav_end);
+        eprintln!("doc07 reproduction (Aug 2025 – Jul 2026, band 20): turnover {t:.2} vs doc07 {d07} / doc10 {d10}, fills {}, nav_end {:.0}", m.fills, m.nav_end);
         assert!((t / d07 - 1.0).abs() <= crate::results::DOC07_TURNOVER_TOL, "turnover {t} vs doc 07 {d07}");
         assert!((t / d10 - 1.0).abs() <= crate::results::DOC10_TURNOVER_TOL, "turnover {t} vs doc 10 {d10}");
         assert_eq!(m.liquidations, 0);
