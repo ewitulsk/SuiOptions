@@ -1169,12 +1169,17 @@ async fn main() -> Result<()> {
                         strike_scale: spec.exp,
                         expiry_ms: spec.expiry_ms,
                     };
+                    // The nonce is fixed BEFORE pricing so the reservation
+                    // the desk takes under this request id already carries
+                    // its chain join key (SO-444).
+                    let nonce = nonce_counter.wrapping_add(1);
+                    let quote_key = mm_bot::desk::QuoteKey { request_id: request_id.clone(), nonce };
                     match desk_ref
-                        .price_ws_rfq(payload.side, mi, inputs, spot, true, now)
+                        .price_ws_rfq(payload.side, mi, inputs, spot, Some(quote_key), now)
                         .await
                     {
-                        Decision::Quote { premium, model_fair, surface_vol } => {
-                            nonce_counter = nonce_counter.wrapping_add(1);
+                        Decision::Quote { premium, model_fair, surface_vol, .. } => {
+                            nonce_counter = nonce;
                             // Vault-only routing: collateral from the vault's
                             // `vault_mm` release; outputs to the vault.
                             let quote = Quote {
@@ -1215,7 +1220,7 @@ async fn main() -> Result<()> {
                             if let Err(e) = ws_client::send_json(
                                 &mut ws,
                                 &MmToService::Quote {
-                                    request_id,
+                                    request_id: request_id.clone(),
                                     payload: MmQuotePayload {
                                         quote,
                                         signature: sig,
@@ -1224,6 +1229,10 @@ async fn main() -> Result<()> {
                             )
                             .await
                             {
+                                // The quote never reached the taker: its
+                                // reservation reverts rather than waiting
+                                // out the TTL.
+                                desk_ref.revert_quote(&request_id, now_ms());
                                 tracing::warn!(error = %e, "ws send (quote) failed; reconnecting");
                                 break 'serve;
                             }
@@ -1327,7 +1336,7 @@ async fn main() -> Result<()> {
                             // Indicative only: nothing is signed, no nonce is
                             // burned, no premium is reserved.
                             if let Decision::Quote { premium, .. } = desk_ref
-                                .price_ws_rfq(payload.side, mi, inputs, spot, false, now)
+                                .price_ws_rfq(payload.side, mi, inputs, spot, None, now)
                                 .await
                             {
                                 premiums.push(BulkViewMmPremium {

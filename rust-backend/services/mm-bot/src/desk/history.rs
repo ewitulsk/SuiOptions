@@ -33,6 +33,7 @@ use diesel::sql_types::{BigInt, Bool, Double, Nullable, Text, Timestamptz};
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use serde::{Deserialize, Serialize};
 
+use super::book::{Reservation, ReservationState};
 use super::state::DeskStateDto;
 use super::Desk;
 
@@ -172,6 +173,23 @@ diesel::table! {
         outcome_at          -> Nullable<Timestamptz>,
         reason              -> Nullable<Text>,
         fill_sequence       -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
+    desk_reservations (request_id) {
+        request_id     -> Text,
+        nonce          -> Nullable<Int8>,
+        amount         -> Int8,
+        is_put         -> Bool,
+        expiry_ms      -> Int8,
+        exercise_cash  -> Double,
+        hedge_notional -> Double,
+        quoted_at_ms   -> Int8,
+        expires_ms     -> Int8,
+        state          -> Text,
+        state_at_ms    -> Int8,
+        updated_at     -> Timestamptz,
     }
 }
 
@@ -353,6 +371,62 @@ impl RfqOutcomeRow {
     }
 }
 
+/// One durable reservation row (SO-444) — the DB shape of
+/// [`Reservation`]; the latest state per request id.
+#[derive(Insertable, Queryable, Debug, Clone)]
+#[diesel(table_name = desk_reservations)]
+struct ReservationRow {
+    request_id: String,
+    nonce: Option<i64>,
+    amount: i64,
+    is_put: bool,
+    expiry_ms: i64,
+    exercise_cash: f64,
+    hedge_notional: f64,
+    quoted_at_ms: i64,
+    expires_ms: i64,
+    state: String,
+    state_at_ms: i64,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<&Reservation> for ReservationRow {
+    fn from(r: &Reservation) -> Self {
+        Self {
+            request_id: r.key.clone(),
+            nonce: r.nonce.map(|n| n as i64),
+            amount: r.amount as i64,
+            is_put: r.is_put,
+            expiry_ms: r.expiry_ms as i64,
+            exercise_cash: r.exercise_cash,
+            hedge_notional: r.hedge_notional,
+            quoted_at_ms: r.quoted_at_ms as i64,
+            expires_ms: r.expires_ms as i64,
+            state: r.state.as_str().to_string(),
+            state_at_ms: r.state_at_ms as i64,
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+impl ReservationRow {
+    fn into_reservation(self) -> Option<Reservation> {
+        Some(Reservation {
+            key: self.request_id,
+            nonce: self.nonce.map(|n| n as u64),
+            amount: self.amount.max(0) as u64,
+            is_put: self.is_put,
+            expiry_ms: self.expiry_ms.max(0) as u64,
+            exercise_cash: self.exercise_cash,
+            hedge_notional: self.hedge_notional,
+            quoted_at_ms: self.quoted_at_ms.max(0) as u64,
+            expires_ms: self.expires_ms.max(0) as u64,
+            state: ReservationState::parse(&self.state)?,
+            state_at_ms: self.state_at_ms.max(0) as u64,
+        })
+    }
+}
+
 /// How a detected fill joins back to its funnel row.
 #[derive(Debug, Clone)]
 pub enum RfqFillKey {
@@ -460,6 +534,76 @@ impl History {
         let mut conn = self.conn()?;
         diesel::insert_into(desk_rfq_outcomes::table).values(&row).execute(&mut conn)?;
         Ok(())
+    }
+
+    // ── durable reservations (SO-444) ─────────────────────────────────
+
+    /// Persist reservation transitions (oldest first), fire-and-forget
+    /// like the funnel: the DB is not load-bearing for the quote path,
+    /// a failed write is counted + logged (and `/desk/state` still shows
+    /// the in-memory ledger).
+    pub fn record_reservations(self: &Arc<Self>, transitions: Vec<Reservation>) {
+        if transitions.is_empty() {
+            return;
+        }
+        let h = Arc::clone(self);
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || h.upsert_reservations(&transitions)).await;
+            if let Ok(Err(e)) | Err(e) = res.map_err(anyhow::Error::from) {
+                metrics::counter!("mm_desk_history_failures_total", "op" => "reservation")
+                    .increment(1);
+                tracing::warn!(error = %format!("{e:#}"), "reservation transition persist failed");
+            }
+        });
+    }
+
+    /// Upsert in order. A live row (`quoted`/`accepted`) may move
+    /// anywhere; a terminal row only ever upgrades to `filled` — the
+    /// chain fill is ground truth over an earlier expiry/revert.
+    fn upsert_reservations(&self, transitions: &[Reservation]) -> Result<()> {
+        use desk_reservations::dsl as t;
+        use diesel::query_dsl::methods::FilterDsl;
+        let mut conn = self.conn()?;
+        conn.transaction::<_, anyhow::Error, _>(|conn| {
+            for r in transitions {
+                let row = ReservationRow::from(r);
+                diesel::insert_into(t::desk_reservations)
+                    .values(&row)
+                    .on_conflict(t::request_id)
+                    .do_update()
+                    .set((
+                        t::nonce.eq(&row.nonce),
+                        t::state.eq(&row.state),
+                        t::state_at_ms.eq(row.state_at_ms),
+                        t::expires_ms.eq(row.expires_ms),
+                        t::updated_at.eq(row.updated_at),
+                    ))
+                    .filter(
+                        t::state
+                            .eq_any(["quoted", "accepted"])
+                            .or(diesel::dsl::sql::<Bool>("excluded.state = 'filled'")),
+                    )
+                    .execute(conn)?;
+            }
+            Ok(())
+        })
+        .context("upserting desk reservations")?;
+        metrics::counter!("mm_desk_reservation_transitions_total").increment(transitions.len() as u64);
+        Ok(())
+    }
+
+    /// Every still-live reservation, for boot reconstruction. Blocking
+    /// (call from `spawn_blocking`). Runs the pending migrations first
+    /// so a first boot with this schema does not fail the read.
+    pub fn load_live_reservations(&self) -> Result<Vec<Reservation>> {
+        use desk_reservations::dsl as t;
+        self.run_migrations()?;
+        let mut conn = self.conn()?;
+        let rows = t::desk_reservations
+            .filter(t::state.eq_any(["quoted", "accepted"]))
+            .load::<ReservationRow>(&mut conn)
+            .context("loading live desk reservations")?;
+        Ok(rows.into_iter().filter_map(ReservationRow::into_reservation).collect())
     }
 
     fn mark_rfq_filled(&self, key: &RfqFillKey, fill_sequence: i64, at: DateTime<Utc>) -> Result<()> {

@@ -35,6 +35,13 @@
 //! Fill detection (P&L attribution): [`classify_fill`] + [`apply_fills`]
 //! turn indexer events into spread-line records, resumed from a
 //! persisted sequence cursor ([`FillCursor`], write-after-apply).
+//!
+//! Reservations (SO-444, doc 08 §4.6) are keyed by quote/request id with
+//! explicit `quoted → accepted | reverted | expired | filled`
+//! transitions. The map here holds the LIVE ones; every transition is
+//! queued in an outbox the desk persists to the history DB, and boot
+//! re-installs the still-live rows after reconciling them against chain
+//! fills ([`reconcile_reservations`]).
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -128,11 +135,70 @@ impl Written {
     }
 }
 
-/// A premium reservation held while a signed quote is outstanding.
-#[derive(Clone, Debug, Serialize)]
+/// Reservation lifecycle (doc 08 §4.6, SO-444): `quoted → accepted |
+/// reverted | expired | filled`. `Quoted` and `Accepted` are LIVE (hold
+/// capacity); the rest are terminal. A fill is ground truth and wins
+/// over an expiry recorded earlier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationState {
+    Quoted,
+    Accepted,
+    Reverted,
+    Expired,
+    Filled,
+}
+
+impl ReservationState {
+    pub fn is_live(self) -> bool {
+        matches!(self, ReservationState::Quoted | ReservationState::Accepted)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReservationState::Quoted => "quoted",
+            ReservationState::Accepted => "accepted",
+            ReservationState::Reverted => "reverted",
+            ReservationState::Expired => "expired",
+            ReservationState::Filled => "filled",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "quoted" => ReservationState::Quoted,
+            "accepted" => ReservationState::Accepted,
+            "reverted" => ReservationState::Reverted,
+            "expired" => ReservationState::Expired,
+            "filled" => ReservationState::Filled,
+            _ => return None,
+        })
+    }
+}
+
+/// A premium reservation keyed by quote/request id, durable in the desk
+/// history DB and mirrored here (SO-444). Amounts are settlement raw.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reservation {
+    /// WS: the service request id. Legacy/auction: `legacy-<n>`.
+    pub key: String,
+    /// The signed quote nonce — the `(Put)WriteExecuted` join key.
+    pub nonce: Option<u64>,
+    /// Premium reserved.
     pub amount: u64,
+    pub is_put: bool,
+    /// Option expiry (per-expiry numerator).
+    pub expiry_ms: u64,
+    /// Strike cash (calls) / underlying value (puts) the fill would need
+    /// at exercise, and the hedge notional it would need — the capacity
+    /// numerators (`limits::ReservedSplit`).
+    pub exercise_cash: f64,
+    pub hedge_notional: f64,
+    pub quoted_at_ms: u64,
+    /// Reservation TTL: quote `valid_until` + fill-detection grace.
     pub expires_ms: u64,
+    pub state: ReservationState,
+    pub state_at_ms: u64,
 }
 
 /// Realized P&L attribution counters, settlement raw units.
@@ -188,6 +254,38 @@ impl GreeksAgg {
 pub enum ReserveError {
     /// reservations + deployed + amount would exceed NAV.
     ExceedsNav,
+    /// A live reservation already holds this key.
+    DuplicateKey,
+}
+
+/// Boot reconciliation of durable reservations against chain fills
+/// (doc 08 §4.6): a live row whose nonce a detected fill carries is
+/// `filled`; one past its TTL is `expired`; the rest are restored live.
+/// Returns the reservations to restore and the transitions to persist.
+pub fn reconcile_reservations(
+    rows: Vec<Reservation>,
+    filled_nonces: &std::collections::HashSet<u64>,
+    now_ms: u64,
+) -> (Vec<Reservation>, Vec<Reservation>) {
+    let mut live = Vec::new();
+    let mut transitions = Vec::new();
+    for mut r in rows {
+        if !r.state.is_live() {
+            continue;
+        }
+        if r.nonce.is_some_and(|n| filled_nonces.contains(&n)) {
+            r.state = ReservationState::Filled;
+            r.state_at_ms = now_ms;
+            transitions.push(r);
+        } else if r.expires_ms <= now_ms {
+            r.state = ReservationState::Expired;
+            r.state_at_ms = now_ms;
+            transitions.push(r);
+        } else {
+            live.push(r);
+        }
+    }
+    (live, transitions)
 }
 
 /// The book. Wrapped in a lock by the desk; all methods are synchronous.
@@ -199,7 +297,12 @@ pub struct Book {
     pub deployed: u64,
     pub holdings: Vec<Holding>,
     pub written: Vec<Written>,
-    reservations: HashMap<u64, Reservation>,
+    /// LIVE reservations by key. Terminal transitions leave the map via
+    /// the outbox ([`Book::drain_reservation_transitions`]).
+    reservations: HashMap<String, Reservation>,
+    /// Transitions not yet persisted (quoted rows included) — the desk
+    /// drains and writes them to the history DB.
+    reservation_outbox: Vec<Reservation>,
     /// Units per bucket committed to resting exchange asks (SO-416) —
     /// the listings engine writes; exits/quoting subtract so the same
     /// inventory is never double-committed.
@@ -210,6 +313,20 @@ pub struct Book {
     pnl_path: Option<PathBuf>,
 }
 
+/// What a new keyed reservation carries (`Book::reserve_quote`).
+#[derive(Clone, Debug)]
+pub struct QuoteReservation {
+    pub key: String,
+    pub nonce: Option<u64>,
+    pub amount: u64,
+    pub is_put: bool,
+    pub expiry_ms: u64,
+    pub exercise_cash: f64,
+    pub hedge_notional: f64,
+    /// Reservation TTL from `now` (quote TTL + detection grace).
+    pub ttl_ms: u64,
+}
+
 impl Book {
     pub fn new(nav: u64, pnl_path: Option<PathBuf>) -> Self {
         Self {
@@ -218,6 +335,7 @@ impl Book {
             holdings: Vec::new(),
             written: Vec::new(),
             reservations: HashMap::new(),
+            reservation_outbox: Vec::new(),
             listed_units: HashMap::new(),
             next_reservation_id: 1,
             pnl: Pnl::default(),
@@ -231,40 +349,158 @@ impl Book {
         self.reservations.values().map(|r| r.amount).sum()
     }
 
-    /// Reserve `amount` of premium for an outstanding quote. Enforces
-    /// `reservations + deployed ≤ NAV`.
-    pub fn reserve(&mut self, amount: u64, ttl_ms: u64, now_ms: u64) -> Result<u64, ReserveError> {
+    /// Reserve premium for an outstanding signed quote under its
+    /// request id (doc 08 §4.6). Enforces `reservations + deployed ≤
+    /// NAV` and one live reservation per key.
+    pub fn reserve_quote(&mut self, q: QuoteReservation, now_ms: u64) -> Result<(), ReserveError> {
         self.expire_reservations(now_ms);
-        let committed = self.reserved_total() as u128 + self.deployed as u128 + amount as u128;
+        if self.reservations.contains_key(&q.key) {
+            return Err(ReserveError::DuplicateKey);
+        }
+        let committed = self.reserved_total() as u128 + self.deployed as u128 + q.amount as u128;
         if committed > self.nav as u128 {
             return Err(ReserveError::ExceedsNav);
         }
+        let r = Reservation {
+            key: q.key,
+            nonce: q.nonce,
+            amount: q.amount,
+            is_put: q.is_put,
+            expiry_ms: q.expiry_ms,
+            exercise_cash: q.exercise_cash,
+            hedge_notional: q.hedge_notional,
+            quoted_at_ms: now_ms,
+            expires_ms: now_ms.saturating_add(q.ttl_ms),
+            state: ReservationState::Quoted,
+            state_at_ms: now_ms,
+        };
+        self.reservation_outbox.push(r.clone());
+        self.reservations.insert(r.key.clone(), r);
+        Ok(())
+    }
+
+    /// Legacy un-keyed reservation (the retired auction channel): the
+    /// same ledger under a process-local `legacy-<n>` key; the returned
+    /// id releases it via [`Book::release_reservation`].
+    pub fn reserve(&mut self, amount: u64, ttl_ms: u64, now_ms: u64) -> Result<u64, ReserveError> {
         let id = self.next_reservation_id;
-        self.next_reservation_id += 1;
-        self.reservations.insert(
-            id,
-            Reservation {
+        self.reserve_quote(
+            QuoteReservation {
+                key: format!("legacy-{id}"),
+                nonce: None,
                 amount,
-                expires_ms: now_ms.saturating_add(ttl_ms),
+                is_put: false,
+                expiry_ms: 0,
+                exercise_cash: 0.0,
+                hedge_notional: 0.0,
+                ttl_ms,
             },
-        );
+            now_ms,
+        )?;
+        self.next_reservation_id += 1;
         Ok(id)
     }
 
+    /// Legacy release: the reservation reverts (the bid never became a
+    /// fill the desk pays for).
     pub fn release_reservation(&mut self, id: u64) {
-        self.reservations.remove(&id);
+        let now = super::auctions::now_ms();
+        self.transition(&format!("legacy-{id}"), ReservationState::Reverted, now);
+    }
+
+    /// The taker took the quote (execution submitted, not yet observed
+    /// on chain). Capacity stays held.
+    pub fn accept_reservation(&mut self, key: &str, now_ms: u64) -> bool {
+        self.transition(key, ReservationState::Accepted, now_ms)
+    }
+
+    /// The quote never reached the taker (sign/send failure) or its
+    /// execution failed: free the capacity now.
+    pub fn revert_reservation(&mut self, key: &str, now_ms: u64) -> bool {
+        self.transition(key, ReservationState::Reverted, now_ms)
+    }
+
+    /// A chain fill carrying this quote nonce landed: the premium is now
+    /// custody (it reaches `deployed` on the next custody re-sync).
+    /// Returns the key it closed, if a live reservation carried the nonce.
+    pub fn fill_reservation_by_nonce(&mut self, nonce: u64, now_ms: u64) -> Option<String> {
+        let key = self
+            .reservations
+            .values()
+            .find(|r| r.nonce == Some(nonce))
+            .map(|r| r.key.clone())?;
+        self.transition(&key, ReservationState::Filled, now_ms);
+        Some(key)
+    }
+
+    fn transition(&mut self, key: &str, to: ReservationState, now_ms: u64) -> bool {
+        let Some(mut r) = self.reservations.remove(key) else {
+            return false;
+        };
+        r.state = to;
+        r.state_at_ms = now_ms;
+        if to.is_live() {
+            self.reservations.insert(r.key.clone(), r.clone());
+        }
+        self.reservation_outbox.push(r);
+        true
+    }
+
+    /// Re-install a still-live reservation from durable state at boot
+    /// (no capacity check — it was already granted).
+    pub fn restore_reservation(&mut self, r: Reservation) {
+        if r.state.is_live() {
+            self.reservations.insert(r.key.clone(), r);
+        }
+    }
+
+    /// Take every transition recorded since the last drain, oldest
+    /// first, for the durable ledger.
+    pub fn drain_reservation_transitions(&mut self) -> Vec<Reservation> {
+        std::mem::take(&mut self.reservation_outbox)
     }
 
     /// Snapshot of the live reservations (`/desk/state`), soonest-expiry
     /// first.
     pub fn reservations_snapshot(&self) -> Vec<Reservation> {
         let mut out: Vec<Reservation> = self.reservations.values().cloned().collect();
-        out.sort_by_key(|r| r.expires_ms);
+        out.sort_by(|a, b| a.expires_ms.cmp(&b.expires_ms).then_with(|| a.key.cmp(&b.key)));
         out
     }
 
+    /// Move TTL-elapsed live reservations to `expired`.
     pub fn expire_reservations(&mut self, now_ms: u64) {
-        self.reservations.retain(|_, r| r.expires_ms > now_ms);
+        let stale: Vec<String> = self
+            .reservations
+            .values()
+            .filter(|r| r.expires_ms <= now_ms)
+            .map(|r| r.key.clone())
+            .collect();
+        for key in stale {
+            self.transition(&key, ReservationState::Expired, now_ms);
+        }
+    }
+
+    /// The live reservations aggregated for the capital policy: each
+    /// lands once in the total, once on its side, once at its expiry.
+    pub fn reserved_split(&self) -> super::limits::ReservedSplit {
+        let mut s = super::limits::ReservedSplit::default();
+        for r in self.reservations.values() {
+            let a = r.amount as f64;
+            s.total += a;
+            if r.is_put {
+                s.puts += a;
+                s.put_underlying_value += r.exercise_cash;
+            } else {
+                s.calls += a;
+                s.call_strike_cash += r.exercise_cash;
+            }
+            *s.by_expiry.entry(r.expiry_ms).or_default() += a;
+            *s.exercise_demand_by_expiry.entry(r.expiry_ms).or_default() += r.exercise_cash;
+            s.hedge_notional += r.hedge_notional;
+            *s.hedge_notional_by_expiry.entry(r.expiry_ms).or_default() += r.hedge_notional;
+        }
+        s
     }
 
     // ── inventory ─────────────────────────────────────────────────────
@@ -765,6 +1001,39 @@ pub async fn free_balance_of(
     sui_tx::chain::decode_return_value::<u64>(&res, 0).context("decoding free balance")
 }
 
+/// The vault's on-chain external-account limits via dev-inspect of
+/// `vault::external_limits`: `(budget_bps, daily_release_bps,
+/// released_in_window, window_start_ms)`. Aborts (→ `Err`) when no
+/// external account is registered — callers check the indexer view's
+/// `external_account` first.
+pub async fn external_limits(
+    wrap: &sui_tx::sui_client::SuiClientWrapper,
+    trading_vault_package: ObjectID,
+    vault_id: ObjectID,
+) -> Result<(u64, u64, u64, u64)> {
+    let mut pt = ProgrammableTransactionBuilder::new();
+    let vault = pt.obj(sui_tx::tx::shared_object_arg(&wrap.client, vault_id, false).await?)?;
+    pt.programmable_move_call(
+        trading_vault_package,
+        Identifier::new("vault").unwrap(),
+        Identifier::new("external_limits").unwrap(),
+        vec![],
+        vec![vault],
+    );
+    let res = wrap
+        .client
+        .dev_inspect_ptb(wrap.signer.address, pt)
+        .await
+        .context("dev-inspecting external_limits")?;
+    let decode = |n: usize| sui_tx::chain::decode_return_value::<u64>(&res, n);
+    Ok((
+        decode(0).context("decoding budget_bps")?,
+        decode(1).context("decoding daily_release_bps")?,
+        decode(2).context("decoding released_in_window")?,
+        decode(3).context("decoding window_start_ms")?,
+    ))
+}
+
 // ── fill detection → spread-line attribution ───────────────────────────
 //
 // A poller (spawned in `mod.rs`) scans the indexer events feed for fills
@@ -1079,6 +1348,135 @@ mod tests {
         assert_eq!(b.reserve(900, 10_000, 5_000), Err(ReserveError::ExceedsNav));
         // Past the TTL the stale reservation frees its budget.
         assert!(b.reserve(900, 10_000, 20_000).is_ok());
+    }
+
+    // ── keyed, durable reservations (SO-444) ───────────────────────────
+
+    fn quote_res(key: &str, nonce: u64, amount: u64, is_put: bool, expiry: u64) -> QuoteReservation {
+        QuoteReservation {
+            key: key.into(),
+            nonce: Some(nonce),
+            amount,
+            is_put,
+            expiry_ms: expiry,
+            exercise_cash: 12.0 * amount as f64,
+            hedge_notional: 6.0 * amount as f64,
+            ttl_ms: 30_000,
+        }
+    }
+
+    #[test]
+    fn keyed_reservations_transition_and_queue_for_persistence() {
+        let mut b = Book::new(10_000, None);
+        b.reserve_quote(quote_res("r1", 11, 1_000, false, 100), 0).unwrap();
+        b.reserve_quote(quote_res("r2", 12, 2_000, true, 200), 0).unwrap();
+        // One live reservation per key.
+        assert_eq!(
+            b.reserve_quote(quote_res("r1", 13, 1, false, 100), 0),
+            Err(ReserveError::DuplicateKey)
+        );
+        assert_eq!(b.reserved_total(), 3_000);
+        // The split counts each once: total, side, expiry.
+        let s = b.reserved_split();
+        assert_eq!((s.total, s.calls, s.puts), (3_000.0, 1_000.0, 2_000.0));
+        assert_eq!(s.by_expiry[&100], 1_000.0);
+        assert_eq!(s.by_expiry[&200], 2_000.0);
+        assert_eq!(s.call_strike_cash, 12_000.0);
+        assert_eq!(s.put_underlying_value, 24_000.0);
+        assert_eq!(s.hedge_notional, 18_000.0);
+        // quoted → accepted keeps capacity; → filled / reverted /
+        // expired free it, each queued exactly once.
+        assert!(b.accept_reservation("r1", 1));
+        assert_eq!(b.reserved_total(), 3_000);
+        assert_eq!(b.fill_reservation_by_nonce(11, 2).as_deref(), Some("r1"));
+        assert_eq!(b.fill_reservation_by_nonce(11, 3), None, "already closed");
+        assert!(b.revert_reservation("r2", 4));
+        assert!(!b.revert_reservation("r2", 5));
+        assert_eq!(b.reserved_total(), 0);
+        let states: Vec<(String, ReservationState)> = b
+            .drain_reservation_transitions()
+            .into_iter()
+            .map(|r| (r.key, r.state))
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("r1".into(), ReservationState::Quoted),
+                ("r2".into(), ReservationState::Quoted),
+                ("r1".into(), ReservationState::Accepted),
+                ("r1".into(), ReservationState::Filled),
+                ("r2".into(), ReservationState::Reverted),
+            ]
+        );
+        assert!(b.drain_reservation_transitions().is_empty());
+        // TTL: expired lands in the outbox too.
+        b.reserve_quote(quote_res("r3", 14, 500, false, 100), 10).unwrap();
+        b.expire_reservations(40_010);
+        assert_eq!(b.reserved_total(), 0);
+        let out = b.drain_reservation_transitions();
+        assert_eq!(out.last().map(|r| r.state), Some(ReservationState::Expired));
+    }
+
+    /// Doc 08 §4.6 gate: restarting during live quotes preserves the same
+    /// available capacity. The durable rows are serialized (the DB row
+    /// shape round-trips through serde) and reloaded into a fresh book.
+    #[test]
+    fn restart_during_live_quotes_preserves_capacity() {
+        let mut before = Book::new(10_000, None);
+        before.deployed = 1_000;
+        before.reserve_quote(quote_res("ws-a", 1, 2_000, false, 100), 0).unwrap();
+        // ws-b carries a longer TTL so it alone outlives the second restart.
+        let mut b_res = quote_res("ws-b", 2, 1_500, true, 200);
+        b_res.ttl_ms = 60_000;
+        before.reserve_quote(b_res, 0).unwrap();
+        before.reserve_quote(quote_res("ws-c", 3, 700, false, 200), 0).unwrap();
+        before.accept_reservation("ws-b", 5);
+        let split_before = before.reserved_split();
+        let free_before = before.nav - before.deployed - before.reserved_total();
+
+        // "Durable state": every transition the DB would hold, latest
+        // row per key.
+        let fixture = serde_json::to_string(&before.drain_reservation_transitions()).unwrap();
+        let rows: Vec<Reservation> = serde_json::from_str(&fixture).unwrap();
+        let mut latest: HashMap<String, Reservation> = HashMap::new();
+        for r in rows {
+            latest.insert(r.key.clone(), r);
+        }
+
+        // Restart: nothing filled on chain, nothing expired.
+        let (live, transitions) =
+            reconcile_reservations(latest.values().cloned().collect(), &Default::default(), 10);
+        assert!(transitions.is_empty());
+        let mut after = Book::new(10_000, None);
+        after.deployed = 1_000;
+        for r in live {
+            after.restore_reservation(r);
+        }
+        assert_eq!(after.reserved_total(), before.reserved_total());
+        assert_eq!(after.reserved_split(), split_before);
+        assert_eq!(after.nav - after.deployed - after.reserved_total(), free_before);
+        // The accepted one came back accepted.
+        assert_eq!(
+            after.reservations_snapshot().iter().find(|r| r.key == "ws-b").map(|r| r.state),
+            Some(ReservationState::Accepted)
+        );
+
+        // Restart AFTER ws-a filled on chain while we were down and ws-c
+        // aged out: both close, ws-b alone still holds capacity.
+        let filled = std::collections::HashSet::from([1u64]);
+        let (live, transitions) =
+            reconcile_reservations(latest.values().cloned().collect(), &filled, 30_000);
+        assert_eq!(live.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(), vec!["ws-b"]);
+        let mut closed: Vec<(String, ReservationState)> =
+            transitions.into_iter().map(|r| (r.key, r.state)).collect();
+        closed.sort();
+        assert_eq!(
+            closed,
+            vec![
+                ("ws-a".into(), ReservationState::Filled),
+                ("ws-c".into(), ReservationState::Expired)
+            ]
+        );
     }
 
     #[test]

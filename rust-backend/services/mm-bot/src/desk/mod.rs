@@ -76,6 +76,10 @@ pub struct DeskConfig {
     pub refresh_secs: u64,
     pub surface: SurfaceTomlConfig,
     pub limits: LimitsConfig,
+    /// `[desk.capital]` — freshness gates, liquidity reserve, and the
+    /// venue/flash capacity assumptions behind the capital snapshot
+    /// (doc 08 §0.4/§4.6, SO-444).
+    pub capital: limits::CapitalConfig,
     pub v1: V1Config,
     pub hedge: hedge::HedgeConfig,
     pub auctions: auctions::AuctionsConfig,
@@ -103,6 +107,7 @@ impl Default for DeskConfig {
             refresh_secs: 60,
             surface: SurfaceTomlConfig::default(),
             limits: LimitsConfig::default(),
+            capital: limits::CapitalConfig::default(),
             v1: V1Config::default(),
             hedge: hedge::HedgeConfig::default(),
             auctions: auctions::AuctionsConfig::default(),
@@ -307,6 +312,9 @@ pub struct DeskShared {
     /// Per-bucket resting exchange asks (the listings engine writes;
     /// `/desk/state` reads) — SO-416.
     pub listings: RwLock<HashMap<protocol_types::ids::ObjectId, listings::ListingSnapshot>>,
+    /// Venue margin picture from the monitors' last roster read (the
+    /// capital snapshot's input) — SO-444.
+    pub venue_margin: RwLock<limits::VenueMarginInputs>,
 }
 
 impl DeskShared {
@@ -359,12 +367,40 @@ pub struct Desk {
     pub market_meta: Vec<state::MarketMeta>,
     pub settlement_coin_type: String,
     pub settlement_decimals: u8,
+    /// Desk history DB — the durable side of the reservation ledger
+    /// (SO-444). `None` ⇒ reservations are process-local only.
+    history: Option<Arc<history::History>>,
     v1: V1BidParams,
     limits: LimitsConfig,
     quote_ttl_ms: u64,
 }
 
+/// What a signed WS quote reserves under (SO-444): the service request
+/// id keys the reservation; the quote nonce joins it to the chain fill.
+#[derive(Clone, Debug)]
+pub struct QuoteKey {
+    pub request_id: String,
+    pub nonce: u64,
+}
+
 impl Desk {
+    /// Flush every reservation transition queued in the book to the
+    /// durable ledger (no-op without a history DB).
+    fn persist_reservations(&self) {
+        let transitions = self.book.write().drain_reservation_transitions();
+        if let Some(h) = &self.history {
+            h.record_reservations(transitions);
+        }
+    }
+
+    /// The signed quote never reached the taker (send failure): free its
+    /// reservation now rather than at TTL.
+    pub fn revert_quote(&self, request_id: &str, now_ms: u64) {
+        if self.book.write().revert_reservation(request_id, now_ms) {
+            self.persist_reservations();
+        }
+    }
+
     /// The model's vol for one market at a point on the surface — the input
     /// the moneyness guard sizes its band from, so the band widens and
     /// narrows with the same surface the pricing uses.
@@ -375,17 +411,17 @@ impl Desk {
     /// Price one WS RFQ. `Side::Writer` = retail writes (the desk buys).
     /// `Side::Trader` = retail buys — the desk NEVER writes options
     /// (SO-426, doc 08 §4.1), so trader RFQs always decline. With
-    /// `reserve`, a writer-flow quote reserves its premium for the quote
-    /// TTL (pass false for indicative bulk views — nothing is signed
-    /// there).
-
+    /// `reserve`, a writer-flow quote reserves its premium under the
+    /// request id for the quote TTL plus the fill-detection grace, and
+    /// the reservation is persisted (pass `None` for indicative bulk
+    /// views — nothing is signed there).
     pub async fn price_ws_rfq(
         &self,
         side: Side,
         model_index: usize,
         inputs: RfqInputs,
         spot: f64,
-        reserve: bool,
+        reserve: Option<QuoteKey>,
         now_ms: u64,
     ) -> Decision {
         // SO-418 risk gate: every signed quote routes collateral through
@@ -412,18 +448,44 @@ impl Desk {
         match side {
             Side::Writer => {
                 let d = quote::price_writer_flow(model, &self.v1, &self.limits, &ctx, &inputs, now_ms);
-                if let (true, Decision::Quote { premium, .. }) = (reserve, &d) {
-                    // Reserve the premium while the quote is live; TTL
-                    // expiry frees it if the quote is never executed.
-                    if self
-                        .book
-                        .write()
-                        .reserve(*premium, self.quote_ttl_ms, now_ms)
-                        .is_err()
-                    {
-                        return Decision::Decline {
-                            reason: "reservation ledger full (reservations + deployed ≥ NAV)".into(),
-                        };
+                if let (
+                    Some(key),
+                    Decision::Quote { premium, hedge_notional, exercise_cash, .. },
+                ) = (reserve, &d)
+                {
+                    // Reserve the premium while the quote is live (plus
+                    // the fill-detection grace); a detected fill, a
+                    // revert, or TTL expiry closes it.
+                    let ttl_ms = self
+                        .quote_ttl_ms
+                        .saturating_add(self.cfg.capital.reservation_grace_secs.saturating_mul(1000));
+                    let res = self.book.write().reserve_quote(
+                        book::QuoteReservation {
+                            key: key.request_id,
+                            nonce: Some(key.nonce),
+                            amount: *premium,
+                            is_put: inputs.is_put,
+                            expiry_ms: inputs.expiry_ms,
+                            exercise_cash: *exercise_cash,
+                            hedge_notional: *hedge_notional,
+                            ttl_ms,
+                        },
+                        now_ms,
+                    );
+                    match res {
+                        Ok(()) => self.persist_reservations(),
+                        Err(book::ReserveError::ExceedsNav) => {
+                            return Decision::Decline {
+                                reason: "reservation ledger full (reservations + deployed ≥ NAV)"
+                                    .into(),
+                            };
+                        }
+                        Err(book::ReserveError::DuplicateKey) => {
+                            return Decision::Decline {
+                                reason: "duplicate request id: a live reservation already holds it"
+                                    .into(),
+                            };
+                        }
                     }
                 }
                 d
@@ -603,6 +665,47 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     .context("reconstructing the desk book from vault custody")?;
     let book = Arc::new(RwLock::new(book));
 
+    // Durable reservations (SO-444): re-install every still-live quote
+    // reservation from the history DB, reconciled against the chain
+    // fills the vault's collateral released while we were down.
+    if let Some(h) = &p.history {
+        let loader = Arc::clone(h);
+        let rows = tokio::task::spawn_blocking(move || loader.load_live_reservations()).await;
+        match rows.map_err(anyhow::Error::from) {
+            Ok(Ok(rows)) => {
+                let vault_pt = protocol_types::ids::ObjectId::new(vault_id.into_bytes());
+                let filled = match recent_fill_nonces(&indexer, vault_pt).await {
+                    Ok(set) => set,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %format!("{e:#}"),
+                            "fill scan for reservation reconciliation failed; keeping rows live (TTL closes them)"
+                        );
+                        std::collections::HashSet::new()
+                    }
+                };
+                let now = auctions::now_ms();
+                let (live, transitions) = book::reconcile_reservations(rows, &filled, now);
+                let mut b = book.write();
+                let restored = live.len();
+                for r in live {
+                    b.restore_reservation(r);
+                }
+                tracing::info!(
+                    restored,
+                    closed = transitions.len(),
+                    reserved = b.reserved_total(),
+                    "quote reservations reconstructed from durable state + chain fills"
+                );
+                h.record_reservations(transitions);
+            }
+            Ok(Err(e)) | Err(e) => tracing::warn!(
+                error = %format!("{e:#}"),
+                "durable reservation load failed; starting with an empty ledger"
+            ),
+        }
+    }
+
     // Curator refs for vault-funded flows (bids escrowed from vault
     // balances, vault-custody exits). `resolve` already proved this wallet
     // owns the cap with a chain read; the registry comes from token-info.
@@ -647,6 +750,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         spots: RwLock::new(HashMap::new()),
         stress: RwLock::new(None),
         listings: RwLock::new(HashMap::new()),
+        venue_margin: RwLock::new(limits::VenueMarginInputs::default()),
     });
 
     let mut hedge_venues: Vec<Arc<dyn hedge::HedgeVenue>> = Vec::new();
@@ -700,6 +804,8 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         settlement_decimals: p.settlement_decimals,
         staleness: p.staleness,
         options_package: Some(p.core_package.to_hex_literal()),
+        settlement_coin_type: p.settlement_coin_type.clone(),
+        history: p.history.clone(),
     });
 
     // Fill detection → spread-line P&L attribution, resumed from the
@@ -840,6 +946,8 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
             staleness: p.staleness,
             venues: monitor_venues,
             hedge_band_pct_nav: p.cfg.hedge.band_pct_nav,
+            initial_margin_fraction: p.cfg.hedge.initial_margin_fraction,
+            maintenance_margin_fraction: p.cfg.capital.maintenance_margin_fraction,
         });
     }
 
@@ -862,6 +970,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         })
         .collect();
     Ok(Arc::new(Desk {
+        history: p.history,
         v1: p.cfg.v1.into(),
         limits: p.cfg.limits,
         quote_ttl_ms: p.quote_ttl_ms,
@@ -899,6 +1008,31 @@ struct RefresherParams {
     settlement_decimals: u8,
     staleness: Staleness,
     options_package: Option<String>,
+    settlement_coin_type: String,
+    /// Durable reservation ledger sink (TTL expiries) — SO-444.
+    history: Option<Arc<history::History>>,
+}
+
+/// The nonces of every recent chain fill the vault's collateral released
+/// (the boot reconciliation input; same feed the fill poller scans).
+async fn recent_fill_nonces(
+    indexer: &indexer_graphql::IndexerClient,
+    vault: protocol_types::ids::ObjectId,
+) -> Result<std::collections::HashSet<u64>> {
+    const MAX_EVENTS: usize = 500;
+    let mut out = std::collections::HashSet::new();
+    let filter = serde_json::json!({ "collateral_source": vault.to_hex() });
+    for ty in ["WriteExecuted", "PutWriteExecuted"] {
+        let events = indexer
+            .recent_events_with_payload(&[ty], filter.clone(), MAX_EVENTS)
+            .await
+            .with_context(|| format!("scanning {ty} fills"))?;
+        out.extend(events.iter().filter_map(|ev| match book::classify_fill(ev, vault)?.link {
+            book::FillLink::WsQuote { nonce } => Some(nonce),
+            book::FillLink::AuctionTicket { .. } => None,
+        }));
+    }
+    Ok(out)
 }
 
 fn spawn_book_refresher(p: RefresherParams) {
@@ -910,6 +1044,11 @@ fn spawn_book_refresher(p: RefresherParams) {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_theta_accrual = auctions::now_ms();
         let mut tick_count: u64 = 0;
+        // Last successful chain reads for the capital snapshot: a
+        // transient RPC failure reuses them rather than reporting an
+        // empty vault (which would collapse local NAV and free cash).
+        let mut last_free: Option<(f64, HashMap<String, f64>)> = None;
+        let mut last_external_limits: Option<(u64, u64, u64, u64)> = None;
         loop {
             ticker.tick().await;
             let now = auctions::now_ms();
@@ -948,13 +1087,17 @@ fn spawn_book_refresher(p: RefresherParams) {
 
             // Budget base + risk state from the indexer view (SO-418:
             // latest/junior NAV, not total pps × shares — see
-            // `book::budget_base`).
+            // `book::budget_base`). The same view feeds the capital
+            // snapshot (appraisal freshness, external account, queued
+            // withdrawals — SO-444).
+            let mut vault_view: Option<indexer_graphql::TradingVault> = None;
             let nav = match p.indexer.trading_vaults().await {
                 Ok(vaults) => {
                     let ours = vaults.iter().find(|v| {
                         let hex = p.vault_id.to_hex_literal();
                         v.vault_id.to_hex() == hex || format!("0x{}", v.vault_id.to_hex()) == hex
                     });
+                    vault_view = ours.cloned();
                     if let Some(v) = ours {
                         // Risk gate refresh, with transition logging: the
                         // desk keeps running (healthy-but-idle) either way.
@@ -1016,6 +1159,14 @@ fn spawn_book_refresher(p: RefresherParams) {
             let mut marks: HashMap<protocol_types::ids::ObjectId, MarkSnapshot> = HashMap::new();
             let mut delta_by_coin: HashMap<String, f64> = HashMap::new();
             let mut deployed = 0.0f64;
+            // Capital-snapshot demands of the marked book (SO-444):
+            // strike cash calls need / underlying value puts deliver at
+            // exercise, and the hedge notional each line needs.
+            let mut call_strike_cash = 0.0f64;
+            let mut put_underlying_value = 0.0f64;
+            let mut exercise_demand_by_expiry: HashMap<u64, f64> = HashMap::new();
+            let mut hedge_notional = 0.0f64;
+            let mut hedge_notional_by_expiry: HashMap<u64, f64> = HashMap::new();
             for h in &holdings {
                 let Some(mi) = p.models.iter().position(|m| m.coin_type == h.asset_coin_type)
                 else {
@@ -1054,6 +1205,16 @@ fn spawn_book_refresher(p: RefresherParams) {
                     exposure.delta_units_negative += line_delta;
                 }
                 *delta_by_coin.entry(h.asset_coin_type.clone()).or_default() += g.delta * amt;
+                let demand = if h.is_put { spot } else { k } * amt;
+                if h.is_put {
+                    put_underlying_value += demand;
+                } else {
+                    call_strike_cash += demand;
+                }
+                *exercise_demand_by_expiry.entry(h.expiry_ms).or_default() += demand;
+                let line_hedge = line_delta.abs() * spot;
+                hedge_notional += line_hedge;
+                *hedge_notional_by_expiry.entry(h.expiry_ms).or_default() += line_hedge;
             }
             // Written lines subtract their full greeks so quoting sees
             // TRUE nets (net vega = held − written, same for delta/
@@ -1090,10 +1251,94 @@ fn spawn_book_refresher(p: RefresherParams) {
             }
             *p.shared.marks.write() = marks;
 
+            // Capital snapshot inputs read from chain (SO-444): the
+            // vault's free settlement + free underlying (valued at spot)
+            // and, with an external account registered, its on-chain
+            // release limits.
+            let free = {
+                let settlement = book::free_balance_of(
+                    &p.wrap,
+                    p.trading_vault_package,
+                    p.vault_id,
+                    &p.settlement_coin_type,
+                )
+                .await;
+                match settlement {
+                    Ok(s) => {
+                        let mut underlying = HashMap::new();
+                        for (mi, m) in p.models.iter().enumerate() {
+                            let Some(spot) = spot_by_model[mi] else { continue };
+                            match book::free_balance_of(
+                                &p.wrap,
+                                p.trading_vault_package,
+                                p.vault_id,
+                                &m.coin_type,
+                            )
+                            .await
+                            {
+                                Ok(units) => {
+                                    underlying.insert(m.symbol.clone(), units as f64 * spot);
+                                }
+                                Err(e) => tracing::debug!(
+                                    error = %format!("{e:#}"),
+                                    symbol = %m.symbol,
+                                    "free underlying read failed; counted as 0 this tick"
+                                ),
+                            }
+                        }
+                        last_free = Some((s as f64, underlying));
+                    }
+                    Err(e) => tracing::debug!(
+                        error = %format!("{e:#}"),
+                        "free settlement read failed; reusing the last reading"
+                    ),
+                }
+                last_free.clone().unwrap_or_default()
+            };
+            let external = match &vault_view {
+                Some(v) if v.external_account.is_some() => {
+                    match book::external_limits(&p.wrap, p.trading_vault_package, p.vault_id).await {
+                        Ok(l) => last_external_limits = Some(l),
+                        Err(e) => tracing::debug!(
+                            error = %format!("{e:#}"),
+                            "external_limits read failed; reusing the last reading"
+                        ),
+                    }
+                    let (budget_bps, daily_release_bps, released_in_window, window_start_ms) =
+                        last_external_limits.unwrap_or_default();
+                    Some(limits::ExternalInputs {
+                        exposure: v.external_exposure as f64,
+                        equity: v.latest_external_equity.map(|e| e as f64),
+                        equity_at: v.external_equity_updated_at_ms,
+                        budget_bps,
+                        daily_release_bps,
+                        released_in_window: released_in_window as f64,
+                        window_start_ms,
+                        nav_for_limits: v.latest_nav.map(|n| n as f64),
+                    })
+                }
+                _ => None,
+            };
+            // Queued withdrawals valued at the tranche's observed pps;
+            // `None` (unvaluable) declines new quotes.
+            let queued_withdrawal_value = match &vault_view {
+                Some(v) => {
+                    let vault_pt = protocol_types::ids::ObjectId::new(p.vault_id.into_bytes());
+                    match p.indexer.vault_positions(vault_pt).await {
+                        Ok(positions) => queued_withdrawal_value(v, &positions),
+                        Err(e) => {
+                            tracing::debug!(error = %format!("{e:#}"), "vault_positions read failed");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+
             // Theta accrual → P&L attribution.
             let dt_days = now.saturating_sub(last_theta_accrual) as f64 / 86_400_000.0;
             last_theta_accrual = now;
-            {
+            let transitions = {
                 let mut b = p.book.write();
                 if let Some(nav) = nav {
                     b.nav = nav;
@@ -1112,12 +1357,67 @@ fn spawn_book_refresher(p: RefresherParams) {
                 exposure.reserved = b.reserved_total() as f64;
                 exposure.premium_deployed = b.deployed as f64;
                 *p.shared.naked_written_units.write() = b.naked_written_units();
+                let reserved = b.reserved_split();
+                exposure.capital = limits::build_capital_snapshot(
+                    &p.cfg.capital,
+                    limits::CapitalInputs {
+                        now_ms: now,
+                        appraised_nav: nav.map(|n| n as f64),
+                        appraisal_at: vault_view.as_ref().and_then(|v| v.nav_updated_at_ms),
+                        free_settlement: free.0,
+                        free_underlying_by_asset: free.1,
+                        premium_deployed: exposure.premium_deployed,
+                        call_premium_marked: exposure.call_premium,
+                        put_premium_marked: exposure.put_premium,
+                        premium_by_expiry_marked: &exposure.premium_by_expiry,
+                        call_strike_cash_marked: call_strike_cash,
+                        put_underlying_value_marked: put_underlying_value,
+                        exercise_demand_by_expiry_marked: &exercise_demand_by_expiry,
+                        hedge_notional_marked: hedge_notional,
+                        hedge_notional_by_expiry_marked: &hedge_notional_by_expiry,
+                        reserved: &reserved,
+                        queued_withdrawal_value,
+                        external,
+                        venue: *p.shared.venue_margin.read(),
+                        initial_margin_fraction: p.cfg.hedge.initial_margin_fraction,
+                        stress_gap: p.cfg.monitors.stress_gap_down.abs().max(p.cfg.monitors.stress_gap_up.abs()),
+                    },
+                );
+                b.drain_reservation_transitions()
+            };
+            if let Some(h) = &p.history {
+                h.record_reservations(transitions);
             }
+            if let Some(r) = exposure.capital.risk_nav {
+                metrics::gauge!("mm_desk_risk_nav").set(r);
+            }
+            metrics::gauge!("mm_desk_capital_stale")
+                .set(if exposure.capital.stale.is_empty() { 0.0 } else { 1.0 });
             exposure.kill_switch = kill.check(&p.cfg.limits, exposure.nav as u64, now);
             *p.shared.book_delta_units.write() = delta_by_coin;
             *p.shared.exposure.write() = exposure;
         }
     });
+}
+
+/// Value of every `queued` VaultPosition at its tranche's observed pps
+/// (settlement raw); `None` when any queued position has no pps to value
+/// it with. Mirrors `book::budget_base`'s pps scaling.
+fn queued_withdrawal_value(
+    v: &indexer_graphql::TradingVault,
+    positions: &[indexer_graphql::VaultPosition],
+) -> Option<f64> {
+    const OFFSET: f64 = 1_000_000.0; // SHARE_OFFSET
+    let mut total = 0.0;
+    for pos in positions.iter().filter(|p| p.status == "queued") {
+        let pps = match pos.tranche {
+            1 => v.latest_senior_pps_e12,
+            2 => v.latest_junior_pps_e12,
+            _ => v.latest_pps_e12,
+        }?;
+        total += pos.shares as f64 * pps as f64 / 1e12 / OFFSET;
+    }
+    Some(total)
 }
 
 // ── fill poller (spread-line P&L attribution) ──────────────────────────
@@ -1279,11 +1579,22 @@ fn spawn_fill_poller(p: FillPollerParams) {
             if priced.is_empty() {
                 continue;
             }
-            let applied = {
+            let (applied, transitions) = {
                 let mut b = p.book.write();
-                book::apply_fills(&mut b, &mut cur, &cursor_path, &priced, now)
+                let applied = book::apply_fills(&mut b, &mut cur, &cursor_path, &priced, now);
+                // A chain fill closes the quote's reservation (SO-444):
+                // ground truth, idempotent when it is already closed.
+                for (f, _) in &priced {
+                    if let book::FillLink::WsQuote { nonce } = &f.link {
+                        b.fill_reservation_by_nonce(*nonce, now);
+                    }
+                }
+                (applied, b.drain_reservation_transitions())
             };
             cursor = Some(cur);
+            if let Some(h) = &p.history {
+                h.record_reservations(transitions);
+            }
             // Close the RFQ-funnel rows these fills belong to (SO-425).
             // Idempotent updates — a replayed batch re-marks the same
             // rows filled.

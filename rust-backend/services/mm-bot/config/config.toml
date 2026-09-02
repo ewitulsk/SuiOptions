@@ -185,6 +185,27 @@ enabled            = false
 # kill_drawdown = 0.10              # stop new buys: NAV −10% in 7d
 # kill_window_days = 7.0
 
+# [desk.capital]              # capital snapshot + policy (doc 08 §0.4/§4.6, SO-444)
+# Every dollar cap scales from risk_nav = min(fresh appraised NAV, local
+# NAV) − queued withdrawals − liquidity reserve; stale inputs DECLINE new
+# quotes. Flash / spot figures are measurements (settlement raw) standing
+# in for pollers that do not exist yet — the snapshot labels them.
+# appraisal_max_age_secs = 3600
+# external_equity_max_age_secs = 900
+# snapshot_max_age_secs = 300       # refresher stalled ⇒ decline
+# reservation_grace_secs = 300      # reservation outlives the quote TTL by this
+# liquidity_reserve_frac = 0.10     # 00-plan: 10% NAV (floor 5%)
+# margin_topup_max = 0.10           # doc 08 §0.4: max margin top-up in 24h
+# venue_margin_from_chain = false   # true on a live venue: margin capacity = on-chain
+#                                   # external budget / daily release remaining
+# maintenance_margin_fraction = 0.05
+# base_flash_capacity = 0           # ASSUMPTION until a pool poller exists
+# quote_flash_capacity = 0
+# spot_buy_capacity_by_slippage = [{ slippageBps = 10, capacity = 0 }]
+# spot_sell_capacity_by_slippage = [{ slippageBps = 10, capacity = 0 }]
+# reference_hedge_notional_per_premium = 6.0   # headline /desk/state capacities only
+# reference_exercise_cash_per_premium = 12.0
+
 # [desk.hedge]                # paper venue until a real one lands
 # band_pct_nav = 15.0         # doc 07 §5: risk reduction saturates at 10–20%
 # band_wide_pct_nav = 25.0
@@ -265,6 +286,8 @@ enabled            = false
 # bleed_window_hours = 24.0
 # stress_interval_secs = 86_400
 # stress_max_drawdown = 0.25
+# stress_gap_down = 0.60      # crash the long-perp put hedges are sized for
+# stress_gap_up = 0.80        # rally the short-perp call hedges are sized for
 
 # ── Testnet counterparty sim (SO-299) ──────────────────────────────────
 # The desk's test counterparty: redeems expired wallet Positions and

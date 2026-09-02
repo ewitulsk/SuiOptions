@@ -44,6 +44,11 @@ pub enum Decision {
         model_fair: f64,
         /// Surface vol the decision priced at, annualized.
         surface_vol: f64,
+        /// The fill's hedge notional and exercise demand (strike cash /
+        /// underlying value) — what its reservation holds against the
+        /// capital policy (SO-444).
+        hedge_notional: f64,
+        exercise_cash: f64,
     },
     Decline {
         reason: String,
@@ -94,8 +99,13 @@ pub fn price_writer_flow(
         theta_cost_per_day: (-greeks.theta * amount).max(0.0),
         expiry_ms: inputs.expiry_ms,
         strike_bucket: limits::strike_bucket(strike, ctx.spot),
+        // The fill's own venue and exercise demands (doc 08 §4.6): the
+        // hedge it needs, and the strike cash a call exercise pays /
+        // the underlying value a put exercise delivers.
+        hedge_notional: (greeks.delta * amount).abs() * ctx.spot,
+        exercise_cash: if inputs.is_put { ctx.spot } else { strike } * amount,
     };
-    let util = match limits::evaluate(limits_cfg, &ctx.exposure, &fill) {
+    let util = match limits::evaluate(limits_cfg, &ctx.exposure, &fill, now_ms) {
         Ok(u) => u,
         Err(hard) => return decline_hard(hard),
     };
@@ -107,7 +117,9 @@ pub fn price_writer_flow(
     // call-heavy book merely reduces the short), never on premium.
     let incremental_delta_units = greeks.delta * amount;
     let bid_ctx = BidContext {
-        nav: ctx.exposure.nav,
+        // Size penalty and max-single-fill scale from the fresh risk
+        // NAV the caps were just checked against (doc 08 §0.4).
+        nav: util.risk_nav,
         premium_notional: fair_pu * amount,
         vega_utilization: util.vega,
         hedge_cost: pricing::desk::expected_hedge_cost(
@@ -137,6 +149,8 @@ pub fn price_writer_flow(
         premium: premium as u64,
         model_fair: fair_pu * amount,
         surface_vol: sigma,
+        hedge_notional: fill.hedge_notional,
+        exercise_cash: fill.exercise_cash,
     }
 }
 
@@ -189,7 +203,11 @@ mod tests {
     fn ctx() -> FlowContext {
         FlowContext {
             spot: 100.0,
-            exposure: BookExposure { nav: 1e9, ..Default::default() },
+            exposure: BookExposure {
+                nav: 1e9,
+                capital: crate::desk::limits::CapitalSnapshot::test_fresh(1e9, 0),
+                ..Default::default()
+            },
             funding_rate_annual: 0.0,
             expected_holding_years: 21.0 / 365.0,
             hedge_position_units: 0.0,
@@ -310,6 +328,28 @@ mod tests {
             0,
         );
         assert!(matches!(&d, Decision::Decline { .. }), "{d:?}");
+        // Stale capital (doc 08 §0.4): the snapshot cannot back new risk.
+        let mut stale = ctx();
+        stale.exposure.capital = Default::default();
+        let d = price_writer_flow(&m, &v1(), &LimitsConfig::default(), &stale, &atm(1_000_000), 0);
+        assert!(
+            matches!(&d, Decision::Decline { reason } if reason.contains("no capital snapshot")),
+            "{d:?}"
+        );
+    }
+
+    /// The bid's size denominator is the fresh RISK NAV, not the
+    /// indexer budget base: a haircut risk NAV makes the same clip a
+    /// larger fraction of it and prices worse.
+    #[test]
+    fn bid_sizes_against_risk_nav() {
+        let m = model();
+        let limits = LimitsConfig::default();
+        let full = premium_of(&price_writer_flow(&m, &v1(), &limits, &ctx(), &atm(1_000_000), 0));
+        let mut haircut = ctx();
+        haircut.exposure.capital.risk_nav = Some(2e8); // budget base still 1e9
+        let less = premium_of(&price_writer_flow(&m, &v1(), &limits, &haircut, &atm(1_000_000), 0));
+        assert!(less < full, "{less} !< {full}");
     }
 
 
