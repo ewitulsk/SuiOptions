@@ -17,7 +17,8 @@ use serde::Serialize;
 use super::book::Reservation;
 use super::hedge;
 use super::limits::{
-    Capacity, CapitalConfig, CapitalPolicy, CapitalSnapshot, FillRatios, LimitsConfig,
+    self, Capacity, CapitalConfig, CapitalPolicy, CapitalSnapshot, FillRatios, GammaByType,
+    LimitsConfig,
 };
 use super::model::Greeks;
 use super::monitors::{read_venue, MonitorsConfig};
@@ -105,6 +106,23 @@ pub struct ExposureDto {
     pub delta_units_negative: f64,
     pub gamma_units_calls: f64,
     pub gamma_units_puts: f64,
+    /// Composition surfaces (doc 08 §4.5, SO-445): gamma by type ×
+    /// expiry, stressed hedge losses before monetization, exercise
+    /// demand per expiry, flash utilization (report-only), and the
+    /// worst concurrent exercise + top-up demand.
+    pub gamma_by_expiry: HashMap<u64, GammaByType>,
+    pub crash_loss_put_hedges: f64,
+    pub rally_loss_call_hedges: f64,
+    pub call_settlement_cash_by_expiry: HashMap<u64, f64>,
+    pub put_underlying_value_by_expiry: HashMap<u64, f64>,
+    pub base_flash_util_by_expiry: HashMap<u64, f64>,
+    pub quote_flash_util_by_expiry: HashMap<u64, f64>,
+    pub concurrent_demand: f64,
+    pub stress_gap_down: f64,
+    pub stress_gap_up: f64,
+    /// Composition throttle position of the book as it stands (no
+    /// proposed fill): 0 under every soft threshold, 1 at a hard one.
+    pub composition_utilization: f64,
     pub kill_switch: bool,
     pub stress_blocked: bool,
     /// SO-418: the vault is risk-off (capital risk state / commitment
@@ -632,6 +650,17 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             delta_units_negative: exposure.delta_units_negative,
             gamma_units_calls: exposure.gamma_units_calls,
             gamma_units_puts: exposure.gamma_units_puts,
+            gamma_by_expiry: exposure.gamma_by_expiry.clone(),
+            crash_loss_put_hedges: exposure.crash_loss_put_hedges,
+            rally_loss_call_hedges: exposure.rally_loss_call_hedges,
+            call_settlement_cash_by_expiry: exposure.call_settlement_cash_by_expiry.clone(),
+            put_underlying_value_by_expiry: exposure.put_underlying_value_by_expiry.clone(),
+            base_flash_util_by_expiry: exposure.base_flash_util_by_expiry.clone(),
+            quote_flash_util_by_expiry: exposure.quote_flash_util_by_expiry.clone(),
+            concurrent_demand: exposure.concurrent_demand,
+            stress_gap_down: exposure.stress_gap_down,
+            stress_gap_up: exposure.stress_gap_up,
+            composition_utilization: composition_utilization(&limits, &exposure),
             kill_switch: exposure.kill_switch,
             stress_blocked,
             risk_off,
@@ -749,6 +778,57 @@ pub fn capacities(
             effective_expiry_capacity: Vec::new(),
         },
     }
+}
+
+/// The book's standing composition throttle (doc 08 §4.5): the worst
+/// [`limits::throttle`] over gamma by type × expiry, stressed hedge
+/// loss, per-expiry exercise demand and concurrent demand, against the
+/// snapshot's risk NAV and sources. 0 without a usable risk NAV.
+pub fn composition_utilization(cfg: &LimitsConfig, x: &super::BookExposure) -> f64 {
+    let Some(risk_nav) = x.capital.risk_nav.filter(|r| *r > 0.0) else {
+        return 0.0;
+    };
+    let s = &x.capital;
+    let t = |v: f64, soft: f64, hard: f64| limits::throttle(v, soft, hard);
+    let mut worst: f64 = 0.0;
+    for g in x.gamma_by_expiry.values() {
+        for v in [g.calls_notional_per_pct, g.puts_notional_per_pct] {
+            worst = worst.max(t(
+                v,
+                cfg.gamma_soft_nav_per_pct_move * risk_nav,
+                cfg.gamma_hard_nav_per_pct_move * risk_nav,
+            ));
+        }
+    }
+    for v in [x.crash_loss_put_hedges, x.rally_loss_call_hedges] {
+        worst = worst.max(t(
+            v,
+            cfg.hedge_stress_loss_soft * risk_nav,
+            cfg.hedge_stress_loss_hard * risk_nav,
+        ));
+    }
+    let call_sources = s.call_exercise_sources();
+    for v in x.call_settlement_cash_by_expiry.values() {
+        worst = worst.max(t(
+            *v,
+            cfg.exercise_demand_soft * call_sources,
+            cfg.exercise_demand_hard * call_sources,
+        ));
+    }
+    let put_sources = s.put_exercise_sources();
+    for v in x.put_underlying_value_by_expiry.values() {
+        worst = worst.max(t(
+            *v,
+            cfg.exercise_demand_soft * put_sources,
+            cfg.exercise_demand_hard * put_sources,
+        ));
+    }
+    let all = call_sources + put_sources + s.margin_topup_cap;
+    worst.max(t(
+        x.concurrent_demand,
+        cfg.concurrent_demand_soft * all,
+        cfg.concurrent_demand_hard * all,
+    ))
 }
 
 /// Utilizations against the SOFT budgets, mirroring `limits::evaluate`'s

@@ -171,6 +171,7 @@ enabled            = false
 # inventory_penalty_max_volpts = 0.10
 # inventory_penalty_start_util = 0.6
 # max_single_fill_pct_nav = 5.0
+# composition_penalty_volpts = 0.05   # widening at a hard composition threshold (SO-445)
 
 # [desk.limits]                     # long-only retrofit (doc 08 §0.4)
 # premium_budget_soft = 0.25
@@ -184,6 +185,17 @@ enabled            = false
 # per_strike_bucket_max = 0.10
 # kill_drawdown = 0.10              # stop new buys: NAV −10% in 7d
 # kill_window_days = 7.0
+# Composition limits (doc 08 §4.5, SO-445): soft = start of the bid
+# widening (see [desk.v1] composition_penalty_volpts), hard = solvency
+# decline. Provisional — the backtester selects them out of sample.
+# gamma_soft_nav_per_pct_move = 0.05  # per type × expiry, delta-notional
+# gamma_hard_nav_per_pct_move = 0.10  #   change per 1% spot move, of risk NAV
+# hedge_stress_loss_soft = 0.05       # crash loss on put hedges / rally loss
+# hedge_stress_loss_hard = 0.10       #   on call hedges, of risk NAV (§0.4 top-up)
+# exercise_demand_soft = 0.80         # per-expiry strike cash / underlying vs sources
+# exercise_demand_hard = 1.00
+# concurrent_demand_soft = 0.80       # worst expiry + worst stress loss vs all sources
+# concurrent_demand_hard = 1.00
 
 # [desk.capital]              # capital snapshot + policy (doc 08 §0.4/§4.6, SO-444)
 # Every dollar cap scales from risk_nav = min(fresh appraised NAV, local
