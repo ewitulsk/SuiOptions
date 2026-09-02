@@ -77,7 +77,7 @@ enabled = true
 # decides, and the bot holds its own CuratorCap.
 mm_release_enabled = true
 # [desk.exits.spot_pools]     # spot pools for flash-exercise, per symbol
-# TSUI = "0x..."
+# TSUI = "0x..."              # (also the put-exercise pool allowlist, SO-443)
 
 # Self-provisioning: create a vault when there is none of ours to adopt.
 # Funds the escrowed curator commitment with commitment_deposit ($100k

@@ -223,7 +223,21 @@ enabled            = false
 # near_expiry_hours = 24.0
 # max_slice = 1_000_000_000   # flash-exercise ladder chunk
 # [desk.exits.spot_pools]     # UNDERLYING/SETTLEMENT pools for flash
-# TSUI = "0x..."
+# TSUI = "0x..."              # (also the put-exercise pool allowlist)
+
+# [desk.exits.put]            # put exercise policy (SO-443, doc 08 §0.4/§4.4)
+# enabled = true
+# min_profit_usd = 10.0       # min profit = max($10, 5 bps × payout,
+# min_profit_bps = 5.0        #   2 × route uncertainty)
+# route_uncertainty_bps = 20.0 # cash bound on route drift, bps of payout
+# route_uncertainty_mult = 2.0
+# swap_fee_bps = 0.0          # repurchase taker fee bound (whitelisted: 0)
+# flash_fee_bps = 0.0         # DeepBook v3 flash loans are fee-free
+# gas_cost_usd = 0.05         # per-slice gas allowance in the profit test
+# max_gas_mist = 100_000_000  # dev-inspect gas above this ⇒ not submitted
+# ladder_tx_secs = 30         # per-slice inclusion allowance vs expiry
+# expiry_margin_secs = 120    # no slice starts inside this margin
+# ask_ticks = 50              # ask-ladder depth read for route pricing
 
 # [desk.listings]             # exchange resting-ask exits (SO-416)
 # The desk lists its option inventory as resting ASKS on the in-house
