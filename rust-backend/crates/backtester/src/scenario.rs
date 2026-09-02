@@ -38,6 +38,15 @@ pub struct Scenario {
     pub exercise: ExerciseConfig,
     pub fees: ProtocolFees,
     pub hurdle: HurdleConfig,
+    /// Flow/acceptance seed (doc 08 §8.7): same seed ⇒ identical flow.
+    pub seed: u64,
+    /// Minutes between full book revaluations (marks, net delta, APY
+    /// menu). 1 = every minute (v0); the solver runs coarser.
+    pub revalue_interval_min: i64,
+    pub flow_gen: FlowGenConfig,
+    pub acceptance: AcceptanceConfig,
+    pub resale: ResaleConfig,
+    pub venue: VenueConfig,
 }
 
 impl Default for Scenario {
@@ -64,6 +73,12 @@ impl Default for Scenario {
             exercise: ExerciseConfig::default(),
             fees: ProtocolFees::default(),
             hurdle: HurdleConfig::default(),
+            seed: 1,
+            revalue_interval_min: 1,
+            flow_gen: FlowGenConfig::default(),
+            acceptance: AcceptanceConfig::default(),
+            resale: ResaleConfig::default(),
+            venue: VenueConfig::default(),
         }
     }
 }
@@ -208,6 +223,8 @@ impl Default for LimitsConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct FlowConfig {
+    /// `constant` (this injector) or `generated` (`[flow_gen]`, PR N).
+    pub source: String,
     /// `per_turn`: at each turn start buy `notional_nav_multiple × NAV`
     /// of spot notional (doc 07's M = 3.0 framing); `daily`: buy
     /// `notional_per_day` of spot notional every day at `hour_utc`.
@@ -233,6 +250,7 @@ pub struct FlowConfig {
 impl Default for FlowConfig {
     fn default() -> Self {
         Self {
+            source: "constant".into(),
             mode: "per_turn".into(),
             notional_nav_multiple: 3.0,
             notional_per_day: 100_000.0,
@@ -342,6 +360,272 @@ impl HurdleConfig {
     /// `max(12%, settlement cash yield + 8%)`.
     pub fn required_return(&self) -> f64 {
         self.min_annual_return.max(self.settlement_cash_yield + self.cash_yield_spread)
+    }
+}
+
+/// Per-type arrival and size priors (doc 08 §8.2–§8.3). STATED PRIORS:
+/// no RFQ data calibrates them (doc 08 §3.1, 2026-09-01).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TypePriors {
+    /// Arrivals per day at reference conditions.
+    pub base_rate_per_day: f64,
+    /// Sensitivity to the trailing log return (+ = more after run-ups).
+    pub return_coef: f64,
+    /// Sensitivity to ln(σ / σ one window ago).
+    pub vol_spike_coef: f64,
+    /// Sensitivity to ln(σ / reference_vol).
+    pub vol_level_coef: f64,
+    /// Arrival elasticity to displayed writer-net APY: (APY/ref)^ε.
+    pub apy_elasticity: f64,
+    pub apy_ref: f64,
+    /// The collateral's alternative yield (staking for call collateral,
+    /// settlement lending for put collateral) and the arrival multiplier
+    /// applied when the displayed APY is below it.
+    pub alt_yield: f64,
+    pub alt_yield_penalty: f64,
+    /// Lognormal size in spot notional (settlement units).
+    pub size_median: f64,
+    pub size_log_sd: f64,
+    /// Requested moneyness in standard deviations (calls OTM > 0, puts
+    /// OTM < 0), quantised to the live lattice.
+    pub moneyness_mean_z: f64,
+    pub moneyness_sd_z: f64,
+}
+
+impl TypePriors {
+    pub fn call_default() -> Self {
+        Self {
+            base_rate_per_day: 20.0,
+            return_coef: 4.0,
+            vol_spike_coef: 0.0,
+            vol_level_coef: 0.3,
+            apy_elasticity: 1.2,
+            apy_ref: 1.0,
+            alt_yield: 0.03,
+            alt_yield_penalty: 0.4,
+            size_median: 2_000.0,
+            size_log_sd: 1.2,
+            moneyness_mean_z: 0.5,
+            moneyness_sd_z: 0.4,
+        }
+    }
+
+    pub fn put_default() -> Self {
+        Self {
+            base_rate_per_day: 12.0,
+            return_coef: -4.0,
+            vol_spike_coef: 1.5,
+            vol_level_coef: 0.5,
+            apy_elasticity: 0.8,
+            apy_ref: 0.8,
+            alt_yield: 0.05,
+            alt_yield_penalty: 0.4,
+            size_median: 3_000.0,
+            size_log_sd: 1.0,
+            moneyness_mean_z: -0.5,
+            moneyness_sd_z: 0.4,
+        }
+    }
+}
+
+impl Default for TypePriors {
+    fn default() -> Self {
+        Self::call_default()
+    }
+}
+
+/// The Earn flow generator (`flow.source = "generated"`, doc 08 §8).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct FlowGenConfig {
+    /// Always "prior" — every parameter below is a stated hypothesis.
+    pub provenance: String,
+    /// `market`: elastic Poisson arrivals against the strategy's bid;
+    /// `capacity`: `rfqs_per_day` writers whose sizes are rescaled so the
+    /// day's offered notional equals `target_notional_per_day`.
+    pub mode: String,
+    pub target_notional_per_day: f64,
+    pub call_share: f64,
+    pub rfqs_per_day: u32,
+    pub max_rfqs_per_minute: u32,
+    pub call: TypePriors,
+    pub put: TypePriors,
+    /// Window for the trailing return and vol-spike features, hours.
+    pub trailing_window_hours: f64,
+    pub reference_vol: f64,
+    /// Time-of-day multiplier 1 + A·cos(2π(h − peak)/24).
+    pub tod_amplitude: f64,
+    pub tod_peak_hour: f64,
+    /// Arrival boost in the window after a board expiry (writers roll).
+    pub calendar_boost: f64,
+    pub calendar_window_hours: f64,
+    /// Expiry menu: the live board (doc 09 G13) or `tenor_menu_days`.
+    pub use_expiry_board: bool,
+    pub tenor_menu_days: Vec<f64>,
+    /// Geometric mass on the nearest listed expiry (1 = all nearest).
+    pub expiry_concentration: f64,
+    pub min_tenor_days: f64,
+    /// Probability a writer joins the last bucket of its type
+    /// (synchronized bucket concentration).
+    pub herd_prob: f64,
+    /// Protocol / plausible-collateral size bounds, spot notional.
+    pub min_notional: f64,
+    pub max_notional: f64,
+    /// The indicative menu entry whose bid sets the displayed APY.
+    pub apy_reference_tenor_days: f64,
+    pub apy_reference_notional: f64,
+}
+
+impl Default for FlowGenConfig {
+    fn default() -> Self {
+        Self {
+            provenance: "prior".into(),
+            mode: "market".into(),
+            target_notional_per_day: 100_000.0,
+            call_share: 0.5,
+            rfqs_per_day: 24,
+            max_rfqs_per_minute: 50,
+            call: TypePriors::call_default(),
+            put: TypePriors::put_default(),
+            trailing_window_hours: 24.0,
+            reference_vol: 0.8,
+            tod_amplitude: 0.3,
+            tod_peak_hour: 15.0,
+            calendar_boost: 0.5,
+            calendar_window_hours: 24.0,
+            use_expiry_board: true,
+            tenor_menu_days: vec![7.0, 14.0, 30.0],
+            expiry_concentration: 0.5,
+            min_tenor_days: 1.0,
+            herd_prob: 0.25,
+            min_notional: 100.0,
+            max_notional: 250_000.0,
+            apy_reference_tenor_days: 14.0,
+            apy_reference_notional: 5_000.0,
+        }
+    }
+}
+
+/// Per-type acceptance priors (doc 08 §8.4).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TypeAcceptance {
+    /// P(accept over a full TTL) at `apy_ref`, no value drift.
+    pub accept_prob_at_ref: f64,
+    pub apy_ref: f64,
+    /// Hazard elasticity to displayed APY: wider bids reduce acceptance.
+    pub apy_elasticity: f64,
+}
+
+impl Default for TypeAcceptance {
+    fn default() -> Self {
+        Self { accept_prob_at_ref: 0.6, apy_ref: 1.0, apy_elasticity: 1.5 }
+    }
+}
+
+/// Quote lifecycle and acceptance hazard (doc 08 §7.1, §8.4). Priors.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AcceptanceConfig {
+    pub provenance: String,
+    /// `instant` (fill on arrival: v0 parity, capacity mode) or `hazard`.
+    pub mode: String,
+    pub ttl_ms: i64,
+    pub response_latency_ms: i64,
+    pub inclusion_latency_ms: i64,
+    pub revert_prob: f64,
+    pub call: TypeAcceptance,
+    pub put: TypeAcceptance,
+    /// Selection into stale quotes: exp(β · (fair_at_quote − fair_now)/fair_at_quote).
+    pub stale_edge_coef: f64,
+    /// exp(β · ln(notional / size_ref)).
+    pub size_coef: f64,
+    pub size_ref_notional: f64,
+    /// exp(β · |z|).
+    pub moneyness_coef: f64,
+    /// Hazard shape over the TTL: 0 = flat, > 0 = front-loaded.
+    pub front_load: f64,
+}
+
+impl Default for AcceptanceConfig {
+    fn default() -> Self {
+        Self {
+            provenance: "prior".into(),
+            mode: "instant".into(),
+            ttl_ms: 90_000,
+            response_latency_ms: 1_500,
+            inclusion_latency_ms: 3_000,
+            revert_prob: 0.02,
+            call: TypeAcceptance { accept_prob_at_ref: 0.6, apy_ref: 1.0, apy_elasticity: 1.5 },
+            put: TypeAcceptance { accept_prob_at_ref: 0.55, apy_ref: 0.8, apy_elasticity: 1.2 },
+            stale_edge_coef: 8.0,
+            size_coef: -0.15,
+            size_ref_notional: 5_000.0,
+            moneyness_coef: 0.0,
+            front_load: 1.0,
+        }
+    }
+}
+
+/// Resale (doc 08 §8.5): off by default (hold/exercise). When enabled
+/// the run is labeled `resale=upside_scenario` and carries these
+/// assumptions.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ResaleConfig {
+    pub enabled: bool,
+    /// Resale demand as a hazard per position per day, by type.
+    pub call_demand_per_day: f64,
+    pub put_demand_per_day: f64,
+    pub fill_prob: f64,
+    /// Sale price = mark × (1 − discount).
+    pub price_discount: f64,
+    pub latency_ms: i64,
+    pub min_holding_days: f64,
+}
+
+impl Default for ResaleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            call_demand_per_day: 0.10,
+            put_demand_per_day: 0.05,
+            fill_prob: 0.5,
+            price_discount: 0.05,
+            latency_ms: 60_000,
+            min_holding_days: 2.0,
+        }
+    }
+}
+
+/// Venue / flash / external-budget assumptions the solver gates on. All
+/// labeled `assumed` until measured (doc 09: flash capacity is an
+/// assumption until a pool-balance poller exists; PR M).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VenueConfig {
+    /// Max absolute perp notional the venue absorbs (0 = unlimited).
+    pub max_hedge_notional: f64,
+    /// Max spot notional one exercise can flash/route (0 = unlimited).
+    pub flash_max_notional_per_exercise: f64,
+    pub router_capacity_notional: f64,
+    /// Governance budget fractions from the live vault (doc 08 §8.6).
+    pub external_budget_fraction: f64,
+    pub external_daily_release_fraction: f64,
+    pub maintenance_margin_fraction: f64,
+}
+
+impl Default for VenueConfig {
+    fn default() -> Self {
+        Self {
+            max_hedge_notional: 0.0,
+            flash_max_notional_per_exercise: 0.0,
+            router_capacity_notional: 0.0,
+            external_budget_fraction: 0.20,
+            external_daily_release_fraction: 0.10,
+            maintenance_margin_fraction: 0.05,
+        }
     }
 }
 

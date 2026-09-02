@@ -8,22 +8,30 @@
 //! perp, funding accrues against the signed position at every settlement
 //! row, options settle at expiry (`exercise=at_expiry`), and a simple
 //! ledger reconciles cash + option marks + perp P&L to NAV every minute.
-//! Flow is a constant injector (doc 08 §8 capacity-mode subset); the full
-//! arrival/acceptance generator is doc 08 PR N. Every output carries its
-//! labels and a determinism hash.
+//! Flow is either the constant injector (doc 08 §8 capacity-mode subset)
+//! or the PR N generator (`flow_gen`: conditioned call/put arrivals,
+//! heavy-tailed sizes, bucket herding; `acceptance`: a hazard over the
+//! quote TTL; `solver`: the capital-to-volume solver and market mode).
+//! Every flow/acceptance parameter is a stated prior (doc 08 §3.1) and
+//! every output carries its labels and a determinism hash.
 //!
 //! Nothing here consumes oracle-provider history (doc 09 §3): the decision
 //! price is lake mids through the configured model, and it says so.
 
+pub mod acceptance;
 pub mod data;
 pub mod engine;
 pub mod estimator;
 pub mod flow;
+pub mod flow_gen;
 pub mod ledger;
 pub mod model;
 pub mod oracle;
 pub mod report;
+pub mod rng;
 pub mod scenario;
+pub mod solver;
+pub mod stats;
 
 pub const MS_PER_DAY: i64 = 86_400_000;
 pub const MS_PER_YEAR_F: f64 = 365.0 * 86_400_000.0;
