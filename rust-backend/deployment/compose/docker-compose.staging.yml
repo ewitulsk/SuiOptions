@@ -126,6 +126,10 @@ services:
       # price-charting (options/staging/price-charting secret → deploy.sh
       # .env). Empty (secret absent) ⇒ history disabled, bot unaffected.
       DESK_DATABASE_URL: ${CHART_DATABASE_URL:-}
+      # Staging gas famine: the deployer wallet holds ~0.1 SUI in coin
+      # objects and gas is paid from ONE source, so the default 0.2 SUI
+      # budget cannot be selected and the signer bootstrap crash-loops.
+      MM_BOT_GAS_BUDGET: "100000000"
       RUST_LOG: info,mm_bot=debug
     volumes:
       - /opt/options/staging/secrets:/run/secrets:ro
