@@ -85,16 +85,20 @@ pub trait HedgeVenue: Send + Sync {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct HedgeConfig {
-    /// Rebalance band, % of NAV of net delta notional. 00-plan: 1.5.
+    /// Rebalance band, % of NAV of net delta notional. Doc 07 §5: risk
+    /// reduction saturates at 10–20% bands; the 00-plan 1.5% cost 6.8× the
+    /// turnover for 0.8pp of P&L std. Provisional call-book value 15.
     pub band_pct_nav: f64,
-    /// Widened band while shorting funding is expensive. 00-plan: 2.5.
+    /// Widened band while the required hedge direction is expensive.
+    /// Doc 07 §5: 25.
     pub band_wide_pct_nav: f64,
     /// The band widens when the short's funding rate drops below this
     /// (i.e. the short PAYS more than 25%/yr). 00-plan: −0.25.
     pub funding_widen_threshold: f64,
     /// Rebalance check cadence. Bands decide; the clock only samples.
     pub interval_secs: u64,
-    /// Paper venue: simulated slippage, bps of spot per fill.
+    /// Paper venue: simulated slippage, bps of spot per fill. Doc 07
+    /// §6.1/§11: 3.5 bp Bluefin taker + spread; sweep it.
     pub paper_slippage_bps: f64,
     /// Paper venue: fixed annualized funding rate (0 = flat).
     pub paper_funding_rate_annual: f64,
@@ -104,19 +108,50 @@ pub struct HedgeConfig {
     /// single paper venue built from the `paper_*` knobs above, so
     /// pre-multi-venue configs keep working unchanged.
     pub venues: Vec<HedgeVenueToml>,
+    /// Expected-hedge-cost inputs for the bid (doc 08 §4.3, SO-437).
+    /// Taker fee, bps of traded notional. Doc 07 §6.1: Bluefin 3.5 bp.
+    pub taker_fee_bps: f64,
+    /// Flat fee per fill, settlement raw units (Bluefin: 0.03 USDC).
+    pub fixed_fee_per_fill: f64,
+    /// Expected extra rebalance fills per year per unit of initial hedge
+    /// notional (doc 07 §5: ~11.3× per 30d turn at 20% bands ≈ 137/yr).
+    pub rebalance_turnover_per_year: f64,
+    /// Annual financing rate on cash parked as venue margin.
+    pub margin_financing_rate_annual: f64,
+    /// Initial margin fraction of hedge notional at the venue.
+    pub initial_margin_fraction: f64,
+}
+
+impl HedgeConfig {
+    /// The bid's venue cost inputs, with the primary venue's slippage.
+    pub fn cost_params(&self, slippage_bps: f64) -> pricing::desk::HedgeCostParams {
+        pricing::desk::HedgeCostParams {
+            slippage_bps,
+            taker_fee_bps: self.taker_fee_bps,
+            fixed_fee_per_fill: self.fixed_fee_per_fill,
+            rebalance_turnover_per_year: self.rebalance_turnover_per_year,
+            margin_financing_rate_annual: self.margin_financing_rate_annual,
+            initial_margin_fraction: self.initial_margin_fraction,
+        }
+    }
 }
 
 impl Default for HedgeConfig {
     fn default() -> Self {
         Self {
-            band_pct_nav: 1.5,
-            band_wide_pct_nav: 2.5,
+            band_pct_nav: 15.0,
+            band_wide_pct_nav: 25.0,
             funding_widen_threshold: -0.25,
             interval_secs: 30,
-            paper_slippage_bps: 5.0,
+            paper_slippage_bps: 3.5,
             paper_funding_rate_annual: 0.0,
             paper_state_path: "services/mm-bot/state/paper-hedge".into(),
             venues: Vec::new(),
+            taker_fee_bps: 3.5,
+            fixed_fee_per_fill: 0.0,
+            rebalance_turnover_per_year: 0.0,
+            margin_financing_rate_annual: 0.0,
+            initial_margin_fraction: 0.10,
         }
     }
 }
@@ -419,12 +454,13 @@ mod tests {
     #[test]
     fn band_widens_when_funding_is_expensive() {
         let cfg = HedgeConfig::default();
-        // NAV 1e9, spot 100 → base band = 1.5% × 1e9 / 100 = 150_000 units.
+        // NAV 1e9, spot 100 → base band = 15% × 1e9 / 100 = 1.5e6 units
+        // (doc 07 §5 correction, SO-436).
         let base = band_units(&cfg, 1e9, 100.0, 0.0);
-        assert!((base - 150_000.0).abs() < 1e-6);
-        // Funding below −25%: wide band (2.5%).
+        assert!((base - 1_500_000.0).abs() < 1e-6);
+        // Funding below −25%: wide band (25%).
         let wide = band_units(&cfg, 1e9, 100.0, -0.30);
-        assert!((wide - 250_000.0).abs() < 1e-6);
+        assert!((wide - 2_500_000.0).abs() < 1e-6);
         // Receiving funding keeps the tight band.
         assert!((band_units(&cfg, 1e9, 100.0, 0.10) - base).abs() < 1e-9);
     }

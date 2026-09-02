@@ -276,7 +276,12 @@ pub struct DeskShared {
     /// every book-refresher tick.
     pub risk_off: AtomicBool,
     pub expected_holding_years: f64,
-    pub slippage_bps: f64,
+    /// Bid-side venue cost inputs (primary venue slippage + `[desk.hedge]`
+    /// fee/turnover/margin knobs) — SO-437.
+    pub hedge_cost: pricing::desk::HedgeCostParams,
+    /// Last signed hedge position per underlying coin type on the primary
+    /// venue, hedge units; the rebalancer writes, the bid reads (SO-437).
+    pub hedge_position_units: RwLock<HashMap<String, f64>>,
     /// Per-bucket marks + per-unit greeks from the last refresher tick
     /// (`/desk/state` reads; the refresher writes).
     pub marks: RwLock<HashMap<protocol_types::ids::ObjectId, MarkSnapshot>>,
@@ -290,13 +295,19 @@ pub struct DeskShared {
 }
 
 impl DeskShared {
-    pub async fn flow_context(&self, spot: f64) -> FlowContext {
+    pub async fn flow_context(&self, spot: f64, coin_type: &str) -> FlowContext {
         FlowContext {
             spot,
             exposure: self.exposure.read().clone(),
             funding_rate_annual: *self.funding_rate_annual.read(),
             expected_holding_years: self.expected_holding_years,
-            slippage_bps: self.slippage_bps,
+            hedge_position_units: self
+                .hedge_position_units
+                .read()
+                .get(coin_type)
+                .copied()
+                .unwrap_or(0.0),
+            hedge_cost: self.hedge_cost,
         }
     }
 }
@@ -382,7 +393,7 @@ impl Desk {
             };
         }
         let model = &self.models[model_index];
-        let ctx = self.shared.flow_context(spot).await;
+        let ctx = self.shared.flow_context(spot, &model.coin_type).await;
         match side {
             Side::Writer => {
                 let d = quote::price_writer_flow(model, &self.v1, &self.limits, &ctx, &inputs, now_ms);
@@ -602,7 +613,8 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         stress_blocked: AtomicBool::new(false),
         risk_off: AtomicBool::new(resolved.risk_off),
         expected_holding_years: p.cfg.expected_holding_years,
-        slippage_bps: primary_spec.slippage_bps,
+        hedge_cost: p.cfg.hedge.cost_params(primary_spec.slippage_bps),
+        hedge_position_units: RwLock::new(HashMap::new()),
         marks: RwLock::new(HashMap::new()),
         spots: RwLock::new(HashMap::new()),
         stress: RwLock::new(None),
@@ -1361,6 +1373,7 @@ fn spawn_rebalancer(p: RebalancerParams) {
                     continue;
                 }
             };
+            p.shared.hedge_position_units.write().insert(p.coin_type.clone(), position);
             let band = hedge::band_units(&p.hedge_cfg, nav, spot, funding);
             if let Some(target) = hedge::rebalance_target(delta, position, band) {
                 let size = target - position;

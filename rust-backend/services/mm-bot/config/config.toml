@@ -182,12 +182,19 @@ enabled            = false
 # kill_window_days = 7.0
 
 # [desk.hedge]                # paper venue until a real one lands
-# band_pct_nav = 1.5
-# band_wide_pct_nav = 2.5
+# band_pct_nav = 15.0         # doc 07 §5: risk reduction saturates at 10–20%
+# band_wide_pct_nav = 25.0
 # funding_widen_threshold = -0.25   # widen when shorts pay > 25%/yr
 # interval_secs = 30
-# paper_slippage_bps = 5.0
+# paper_slippage_bps = 3.5    # doc 07 §6.1: Bluefin taker 3.5 bp + spread
 # paper_funding_rate_annual = 0.0
+# Bid-side hedge cost inputs (doc 08 §4.3, SO-437); all default to 0 except
+# the Bluefin taker fee and a 10% initial margin fraction.
+# taker_fee_bps = 3.5
+# fixed_fee_per_fill = 0.0            # settlement raw units (Bluefin: 0.03 USDC)
+# rebalance_turnover_per_year = 0.0   # doc 07 §5: ~137/yr at 20% bands
+# margin_financing_rate_annual = 0.0
+# initial_margin_fraction = 0.10
 
 # Multi-venue hedging: declare [[desk.hedge.venues]] entries to run
 # several venues (per-venue labelled gauges, min-margin alerts naming
@@ -197,7 +204,7 @@ enabled            = false
 # [[desk.hedge.venues]]
 # kind = "paper"              # only "paper" until real venues land
 # name = "paper"              # gauge/alert label + state-file key
-# slippage_bps = 5.0          # default: paper_slippage_bps
+# slippage_bps = 3.5          # default: paper_slippage_bps
 # funding_rate_annual = 0.0   # default: paper_funding_rate_annual
 
 # [desk.auctions]             # RETIRED on-chain RFQ channel

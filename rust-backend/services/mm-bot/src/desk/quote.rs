@@ -61,8 +61,12 @@ pub struct FlowContext {
     pub funding_rate_annual: f64,
     /// Expected holding period for a bought option, years (config).
     pub expected_holding_years: f64,
-    /// Hedge slippage estimate, bps of delta notional (config).
-    pub slippage_bps: f64,
+    /// Current signed perp hedge position for this underlying, hedge
+    /// units (long > 0). The bid prices the CHANGE a fill causes from
+    /// here (doc 09 G2, SO-437).
+    pub hedge_position_units: f64,
+    /// Venue cost inputs (slippage, fees, turnover, margin financing).
+    pub hedge_cost: pricing::desk::HedgeCostParams,
 }
 
 /// V1 writer flow: the desk buys retail's option.
@@ -96,26 +100,25 @@ pub fn price_writer_flow(
         Err(hard) => return decline_hard(hard),
     };
 
-    // Direction-aware expected hedge cost (doc 08 §4.3): funding on the
-    // fill's SIGNED incremental hedge notional (puts carry negative
-    // delta → a LONG hedge that PAYS positive funding), never on premium.
+    // Direction- and position-aware expected hedge cost (doc 08 §4.3,
+    // doc 09 G2): every term is the change the fill's SIGNED incremental
+    // delta causes from the CURRENT hedge position (puts carry negative
+    // delta → a LONG hedge that PAYS positive funding; a put against a
+    // call-heavy book merely reduces the short), never on premium.
     let incremental_delta_units = greeks.delta * amount;
     let bid_ctx = BidContext {
         nav: ctx.exposure.nav,
         premium_notional: fair_pu * amount,
         vega_utilization: util.vega,
-        hedge_cost: pricing::desk::ExpectedHedgeCost {
-            funding: pricing::desk::expected_funding_cost(
-                incremental_delta_units,
-                ctx.spot,
-                ctx.funding_rate_annual,
-                ctx.expected_holding_years,
-                v1.funding_income_credit,
-            ),
-            venue_fees: 0.0,
-            slippage: greeks.delta.abs() * ctx.spot * amount * ctx.slippage_bps / 10_000.0,
-            fixed_cost: 0.0,
-        },
+        hedge_cost: pricing::desk::expected_hedge_cost(
+            ctx.hedge_position_units,
+            incremental_delta_units,
+            ctx.spot,
+            ctx.funding_rate_annual,
+            ctx.expected_holding_years,
+            v1.funding_income_credit,
+            &ctx.hedge_cost,
+        ),
     };
     let Some((total_bid, _sigma)) =
         model.v1_bid_total(inputs.is_put, ctx.spot, strike, t, amount, &bid_ctx, v1)
@@ -189,7 +192,15 @@ mod tests {
             exposure: BookExposure { nav: 1e9, ..Default::default() },
             funding_rate_annual: 0.0,
             expected_holding_years: 21.0 / 365.0,
-            slippage_bps: 0.0,
+            hedge_position_units: 0.0,
+            hedge_cost: pricing::desk::HedgeCostParams {
+                slippage_bps: 0.0,
+                taker_fee_bps: 0.0,
+                fixed_fee_per_fill: 0.0,
+                rebalance_turnover_per_year: 0.0,
+                margin_financing_rate_annual: 0.0,
+                initial_margin_fraction: 0.10,
+            },
         }
     }
 
@@ -328,5 +339,46 @@ mod tests {
         // …and the put hedge would earn (uncredited → unchanged).
         let earn_p = premium_of(&price_writer_flow(&m, &v1(), &limits, &neg_funding, &put, 0));
         assert_eq!(flat_p, earn_p, "put bid must not price in funding income");
+    }
+
+    /// Doc 08 §4.3 gate 4 / doc 09 G2 (SO-437): a put fill against a
+    /// call-heavy book REDUCES the short hedge and must not be charged as
+    /// if it opened a fresh long.
+    #[test]
+    fn put_against_call_heavy_book_is_charged_as_a_reduction() {
+        let m = model();
+        let limits = LimitsConfig::default();
+        let put = RfqInputs { is_put: true, ..atm(1_000_000) };
+        let mut flat = ctx();
+        flat.funding_rate_annual = 0.30;
+        flat.hedge_cost.margin_financing_rate_annual = 0.10;
+        // Same book, but the desk is already short 10M hedge units
+        // (deeply call-heavy): the put's −0.5M delta only trims it.
+        let mut call_heavy = flat.clone();
+        call_heavy.hedge_position_units = -10_000_000.0;
+        let from_flat = premium_of(&price_writer_flow(&m, &v1(), &limits, &flat, &put, 0));
+        let reducing = premium_of(&price_writer_flow(&m, &v1(), &limits, &call_heavy, &put, 0));
+        assert!(reducing > from_flat, "reducing put bid {reducing} !> opening put bid {from_flat}");
+        // And it matches the zero-funding, zero-margin price: nothing
+        // but the reducing trade itself is charged.
+        let mut none = ctx();
+        none.hedge_cost = flat.hedge_cost;
+        none.hedge_cost.margin_financing_rate_annual = 0.0;
+        let unpriced = premium_of(&price_writer_flow(&m, &v1(), &limits, &none, &put, 0));
+        assert_eq!(reducing, unpriced);
+    }
+
+    /// Venue fees and fixed costs are no longer hard-coded to zero.
+    #[test]
+    fn venue_fees_and_fixed_cost_lower_the_bid() {
+        let m = model();
+        let limits = LimitsConfig::default();
+        let call = atm(1_000_000);
+        let free = premium_of(&price_writer_flow(&m, &v1(), &limits, &ctx(), &call, 0));
+        let mut fees = ctx();
+        fees.hedge_cost.taker_fee_bps = 3.5;
+        fees.hedge_cost.fixed_fee_per_fill = 30_000.0;
+        let paid = premium_of(&price_writer_flow(&m, &v1(), &limits, &fees, &call, 0));
+        assert!(paid < free, "fees {paid} !< free {free}");
     }
 }

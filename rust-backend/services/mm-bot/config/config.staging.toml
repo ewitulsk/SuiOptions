@@ -112,10 +112,21 @@ orderbook_url = "http://orderbook:9014"
 # [[desk.hedge.venues]] entries (kind = "paper", name, slippage_bps,
 # funding_rate_annual) for multi-venue monitoring — see config.toml.
 # Real venues (Bluefin) land behind the same HedgeVenue seam.
+# Bid-side hedge cost inputs (doc 08 §4.3 / doc 09 G2, SO-437). Bluefin
+# taker 3.5 bp + 0.03 USDC flat (doc 07 §6.1); ~137 rebalance fills/yr per
+# unit of initial notional at 20% bands (doc 07 §5: 11.3× per 30d turn);
+# 5%/yr financing on the 10% initial margin the hedge parks.
+[desk.hedge]
+taker_fee_bps                = 3.5
+fixed_fee_per_fill           = 30_000      # 0.03 TUSDC at 6 decimals
+rebalance_turnover_per_year  = 137.0
+margin_financing_rate_annual = 0.05
+initial_margin_fraction      = 0.10
+
 [[desk.hedge.venues]]
 kind                = "paper"
 name                = "paper"
-slippage_bps        = 5
+slippage_bps        = 3.5                  # doc 07 §6.1: taker 3.5 bp + spread
 funding_rate_annual = 0.05
 
 # ── Testnet counterparty sim (SO-299) ──────────────────────────────────
