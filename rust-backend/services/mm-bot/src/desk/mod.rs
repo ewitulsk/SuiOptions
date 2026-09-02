@@ -18,13 +18,16 @@ pub mod hedge;
 pub mod history;
 pub mod limits;
 pub mod listings;
-pub mod model;
 pub mod monitors;
 pub mod positions;
 pub mod provision;
-pub mod quote;
 pub mod rfq;
 pub mod state;
+
+// Pure policy modules re-exported from the strategy kernel (SO-450) so
+// every `desk::model` / `desk::quote` path keeps resolving.
+pub use desk_core::exposure::{MarkSnapshot, SpotSnapshot};
+pub use desk_core::{model, quote};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use sui_types::base_types::{ObjectID, SuiAddress};
 
 use protocol_types::sides::Side;
-use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
+use pyth_client::{PriceCache, PriceFeedId};
 use sui_tx::sui_client::Network;
 use sui_tx::tx::deepbook::DeepBookHandles;
 
@@ -46,8 +49,8 @@ use crate::pricing::{compute_spot_from_cache, Staleness};
 use book::{Book, PnlLine};
 use limits::{BookExposure, LimitsConfig};
 use model::{EstimatorConfig, EstimatorKind, MarketModel, SurfaceConfig, V1BidParams};
-use vol_forecast::PriceHistory;
 use quote::{Decision, FlowContext, RfqInputs};
+use vol_forecast::{PriceHistory, RollingVolBuffer};
 
 // ── config ─────────────────────────────────────────────────────────────
 
@@ -246,25 +249,6 @@ impl From<V1Config> for V1BidParams {
 }
 
 // ── shared runtime state ───────────────────────────────────────────────
-
-/// Per-bucket mark snapshot written by the book refresher: model fair,
-/// the sigma/spot it was computed at, and per-unit greeks. Read by the
-/// `/desk/state` endpoint (SO-348) so serving a snapshot never re-prices.
-#[derive(Clone, Copy, Debug)]
-pub struct MarkSnapshot {
-    pub mark_per_unit: f64,
-    pub sigma: f64,
-    pub spot: f64,
-    pub greeks: model::Greeks,
-    pub at_ms: u64,
-}
-
-/// Per-symbol spot written each refresher tick.
-#[derive(Clone, Copy, Debug)]
-pub struct SpotSnapshot {
-    pub spot: f64,
-    pub at_ms: u64,
-}
 
 /// Last nightly-stress result (written by `monitors::stress_tick`).
 #[derive(Clone, Copy, Debug, Default)]
@@ -666,7 +650,6 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         trading_vault_package: p.trading_vault_package,
         vault_id,
         settlement_coin_type: p.settlement_coin_type.clone(),
-        pnl_path: Some(std::path::PathBuf::from(&p.cfg.pnl_jsonl_path)),
         options_package: Some(p.core_package.to_hex_literal()),
     })
     .await
@@ -838,6 +821,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     for (i, m) in p.markets.iter().enumerate() {
         spawn_rebalancer(RebalancerParams {
             hedge_cfg: p.cfg.hedge.clone(),
+            pnl_path: std::path::PathBuf::from(&p.cfg.pnl_jsonl_path),
             venue: Arc::clone(&primary_venues[i]),
             shared: Arc::clone(&shared),
             book: Arc::clone(&book),
@@ -1399,6 +1383,10 @@ fn spawn_book_refresher(p: RefresherParams) {
                         "accrual",
                         now,
                     );
+                    book::flush_pnl(
+                        &mut b,
+                        Some(std::path::Path::new(&p.cfg.pnl_jsonl_path)),
+                    );
                 }
                 exposure.nav = b.nav as f64;
                 exposure.reserved = b.reserved_total() as f64;
@@ -1630,7 +1618,14 @@ fn spawn_fill_poller(p: FillPollerParams) {
             }
             let (applied, transitions) = {
                 let mut b = p.book.write();
-                let applied = book::apply_fills(&mut b, &mut cur, &cursor_path, &priced, now);
+                let applied = book::apply_fills(
+                    &mut b,
+                    &mut cur,
+                    &cursor_path,
+                    Some(std::path::Path::new(&p.cfg.pnl_jsonl_path)),
+                    &priced,
+                    now,
+                );
                 // A chain fill closes the quote's reservation (SO-444):
                 // ground truth, idempotent when it is already closed.
                 for (f, _) in &priced {
@@ -1711,6 +1706,8 @@ async fn fill_fair_total(
 
 struct RebalancerParams {
     hedge_cfg: hedge::HedgeConfig,
+    /// P&L attribution JSONL sink (scalp + funding lines).
+    pnl_path: std::path::PathBuf,
     venue: Arc<dyn hedge::HedgeVenue>,
     shared: Arc<DeskShared>,
     book: Arc<RwLock<Book>>,
@@ -1744,6 +1741,9 @@ pub(crate) struct Rebalancer {
     /// through `poll_events`; unfilled size counts toward the net so a
     /// slow fill is never re-submitted, and stale orders are cancelled.
     open: hedge::OpenOrders,
+    /// P&L attribution JSONL sink (scalp + funding lines); `None` in
+    /// tests.
+    pnl_path: Option<std::path::PathBuf>,
 }
 
 impl Rebalancer {
@@ -1754,6 +1754,7 @@ impl Rebalancer {
         book: Arc<RwLock<Book>>,
         coin_type: String,
         symbol: String,
+        pnl_path: Option<std::path::PathBuf>,
     ) -> Self {
         // Seed from the venue so a restart doesn't re-attribute the whole
         // persisted realized P&L as fresh scalp.
@@ -1768,6 +1769,7 @@ impl Rebalancer {
             last_realized,
             next_order_id: 0,
             open: hedge::OpenOrders::default(),
+            pnl_path,
         }
     }
 
@@ -1828,7 +1830,9 @@ impl Rebalancer {
         // own P&L line — never through the fills-only realized figure.
         match self.venue.accrue_funding(now, spot).await {
             Ok(paid) if paid != 0.0 => {
-                self.book.write().record_pnl(PnlLine::Funding, -paid, "hedge funding accrual", now);
+                let mut b = self.book.write();
+                b.record_pnl(PnlLine::Funding, -paid, "hedge funding accrual", now);
+                book::flush_pnl(&mut b, self.pnl_path.as_deref());
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "hedge funding accrual failed"),
@@ -1871,9 +1875,9 @@ impl Rebalancer {
             let scalp = realized - self.last_realized;
             self.last_realized = realized;
             if scalp != 0.0 {
-                self.book
-                    .write()
-                    .record_pnl(PnlLine::Scalp, scalp, "hedge rebalance", auctions::now_ms());
+                let mut b = self.book.write();
+                b.record_pnl(PnlLine::Scalp, scalp, "hedge rebalance", auctions::now_ms());
+                book::flush_pnl(&mut b, self.pnl_path.as_deref());
             }
         }
     }
@@ -1891,6 +1895,7 @@ fn spawn_rebalancer(p: RebalancerParams) {
             p.book,
             p.coin_type,
             p.symbol,
+            Some(p.pnl_path),
         )
         .await;
         loop {
@@ -1960,7 +1965,7 @@ mod tests {
     }
 
     fn desk_with(shared: Arc<DeskShared>, venue: Arc<dyn hedge::HedgeVenue>) -> Desk {
-        testkit::desk(shared, Arc::new(RwLock::new(Book::new(1_000_000_000, None))), venue)
+        testkit::desk(shared, Arc::new(RwLock::new(Book::new(1_000_000_000))), venue)
     }
 
     /// Doc 08 §4.1 gate 1, through `Desk::price_ws_rfq`: a trader-side
@@ -2029,12 +2034,13 @@ mod tests {
             hedge_cfg: hedge::HedgeConfig::default(),
             venue,
             shared: Arc::clone(shared),
-            book: Arc::new(RwLock::new(Book::new(NAV as u64, None))),
+            book: Arc::new(RwLock::new(Book::new(NAV as u64))),
             coin_type: COIN.into(),
             symbol: "TSUI".into(),
             last_realized: 0.0,
             next_order_id: 0,
             open: hedge::OpenOrders::default(),
+            pnl_path: None,
         }
     }
 

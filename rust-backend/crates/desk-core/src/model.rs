@@ -22,10 +22,10 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use pyth_client::RollingVolBuffer;
 use serde::{Deserialize, Serialize};
 use vol_forecast::{
-    Calibration, ForecastConfig, ForecastInput, Horizon, PriceHistory, Regime, VolForecast,
+    Calibration, ForecastConfig, ForecastInput, Horizon, PriceHistory, Regime, RollingVolBuffer,
+    VolForecast,
 };
 
 pub use pricing::american::AmericanInputs;

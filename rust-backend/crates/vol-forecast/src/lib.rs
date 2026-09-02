@@ -41,6 +41,7 @@
 pub mod har;
 pub mod history;
 mod norm;
+pub mod rolling;
 pub mod rv;
 pub mod signature;
 pub mod synthetic;
@@ -49,6 +50,7 @@ use serde::{Deserialize, Serialize};
 
 pub use har::{HarWeights, Regressors};
 pub use history::PriceHistory;
+pub use rolling::RollingVolBuffer;
 pub use rv::{log_returns, realized_vol, realized_vol_between, DayStats, MS_PER_DAY, MS_PER_YEAR};
 pub use signature::SignaturePoint;
 

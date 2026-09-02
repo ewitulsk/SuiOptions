@@ -40,8 +40,8 @@ use protocol_types::sides::MmRole;
 use protocol_types::SigningScheme;
 
 use api_service_client::ApiServiceClient;
-use pyth_client::{PriceCache, PriceFeedId, RollingVolBuffer};
-use vol_forecast::PriceHistory;
+use pyth_client::{PriceCache, PriceFeedId};
+use vol_forecast::{PriceHistory, RollingVolBuffer};
 use sui_tx::quote_signer::QuoteSigner;
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::mm_collateral::balance_of as collateral_balance_of;

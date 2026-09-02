@@ -46,30 +46,12 @@ use crate::sui_client::Signer;
 use crate::tx::deepbook::{gather_exact_coin, nested, submit_programmable, zero_coin};
 use crate::tx::shared_object_arg;
 
-/// DeepBook v3 `FLOAT_SCALING`: raw price = quote-atomic per base-atomic
-/// × 10^9.
-pub const FLOAT_SCALING: u128 = 1_000_000_000;
-
-/// The three atomic put-exercise routes, in policy order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PutPath {
-    VaultUnderlying,
-    BaseFlash,
-    QuoteFlash,
-}
-
-impl PutPath {
-    pub const ORDER: [PutPath; 3] =
-        [PutPath::VaultUnderlying, PutPath::BaseFlash, PutPath::QuoteFlash];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            PutPath::VaultUnderlying => "vault_underlying",
-            PutPath::BaseFlash => "base_flash",
-            PutPath::QuoteFlash => "quote_flash",
-        }
-    }
-}
+// The route enum, the pool-liquidity shape and the lot/ladder math are
+// strategy inputs the desk kernel plans on, so they live in `desk-core`
+// (SO-450) and are re-exported here for the PTB builders and callers.
+pub use desk_core::exits::put::{
+    lot_round_up, quote_needed_for_base, PoolLiquidity, PutPath, FLOAT_SCALING,
+};
 
 /// Chain-free inputs for one wallet put-exercise PTB.
 #[derive(Clone, Debug)]
@@ -367,19 +349,6 @@ pub fn build_vault_put_exercise(
 
 // ── pool reads (dev-inspect) ───────────────────────────────────────────
 
-/// What the spot pool can do for a put exercise right now.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PoolLiquidity {
-    /// `pool::vault_balances` base — the base flash-loan capacity.
-    pub base_balance: u64,
-    /// `pool::vault_balances` quote — the quote flash-loan capacity.
-    pub quote_balance: u64,
-    pub lot_size: u64,
-    pub min_size: u64,
-    /// Asks best-first: `(price_raw, base_quantity)`.
-    pub asks: Vec<(u64, u64)>,
-}
-
 async fn inspect_pool_read(
     client: &ChainClient,
     sender: SuiAddress,
@@ -468,30 +437,6 @@ pub async fn pool_liquidity(
         min_size: decode_return_value(&params, 2).context("decoding min size")?,
         asks: ask_prices.into_iter().zip(ask_qtys).collect(),
     })
-}
-
-/// Round `amount` up to the pool's lot — the base a buy must take so the
-/// swap returns at least `amount`. `None` when it rounds below `min_size`.
-pub fn lot_round_up(amount: u64, lot_size: u64, min_size: u64) -> Option<u64> {
-    let lot = lot_size.max(1);
-    let rounded = amount.div_ceil(lot).checked_mul(lot)?;
-    (rounded >= min_size).then_some(rounded)
-}
-
-/// Settlement needed to lift `base_needed` off the ask ladder (ceil per
-/// level), `None` when the ladder is too shallow.
-pub fn quote_needed_for_base(asks: &[(u64, u64)], base_needed: u64) -> Option<u64> {
-    let mut remaining = base_needed;
-    let mut cost: u128 = 0;
-    for &(price_raw, qty) in asks {
-        if remaining == 0 {
-            break;
-        }
-        let take = remaining.min(qty);
-        cost += (take as u128 * price_raw as u128).div_ceil(FLOAT_SCALING);
-        remaining -= take;
-    }
-    (remaining == 0).then(|| u64::try_from(cost).unwrap_or(u64::MAX))
 }
 
 // ── pre-simulate + submit ──────────────────────────────────────────────
@@ -899,25 +844,5 @@ mod tests {
         let ptb = pt.finish();
         let r = std::panic::catch_unwind(|| assert_nothing_stranded(&ptb));
         assert!(r.is_err());
-    }
-
-    #[test]
-    fn quote_needed_walks_the_ask_ladder() {
-        // price_raw 2e9 = 2 quote-atomic per base-atomic.
-        let asks = [(2_000_000_000, 100), (3_000_000_000, 50)];
-        assert_eq!(quote_needed_for_base(&asks, 100), Some(200));
-        assert_eq!(quote_needed_for_base(&asks, 120), Some(260));
-        assert_eq!(quote_needed_for_base(&asks, 151), None);
-        assert_eq!(quote_needed_for_base(&[], 1), None);
-        // Ceil per level: 1 base at 1.5 quote/base costs 2.
-        assert_eq!(quote_needed_for_base(&[(1_500_000_000, 10)], 1), Some(2));
-    }
-
-    #[test]
-    fn lot_rounding_respects_min_size() {
-        assert_eq!(lot_round_up(1_001, 1_000, 10_000), None); // 2_000 < min_size
-        assert_eq!(lot_round_up(9_001, 1_000, 10_000), Some(10_000));
-        assert_eq!(lot_round_up(10_000, 1_000, 10_000), Some(10_000));
-        assert_eq!(lot_round_up(7, 1, 1), Some(7));
     }
 }

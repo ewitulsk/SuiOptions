@@ -21,6 +21,7 @@ members = [
     "crates/exchange-signing",
     "crates/exchange-book",
     "crates/exchange-router",
+    "crates/desk-core",
     "crates/backtester",
     "services/indexer",
     "services/keeper",
@@ -94,6 +95,9 @@ exchange-types   = { path = "crates/exchange-types" }
 exchange-signing = { path = "crates/exchange-signing" }
 exchange-book    = { path = "crates/exchange-book" }
 exchange-router  = { path = "crates/exchange-router" }
+# The desk strategy kernel (doc 08 §5.2, SO-450): pure state + policy the
+# live mm-bot and the backtester both drive. No I/O crates, ever.
+desk-core        = { path = "crates/desk-core" }
 # data-room lake crates (SO-449). Prefixed because `schema`/`store`/
 # `adapters` are too generic for a shared workspace. The `data-room/` path
 # (not `crates/`) is load-bearing: affected.py derives protocol crate

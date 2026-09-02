@@ -345,7 +345,7 @@ async fn observe_ticket_burns(
         .collect();
     for ticket in burned {
         if let Some(bid) = live.remove(&ticket) {
-            p.book.write().release_reservation(bid.reservation);
+            p.book.write().release_reservation(bid.reservation, now_ms());
             tracing::info!(
                 ticket = %ticket,
                 auction = %bid.auction_id,
@@ -529,7 +529,7 @@ async fn tick(
                 );
             }
             Err(e) => {
-                p.book.write().release_reservation(reservation);
+                p.book.write().release_reservation(reservation, now_ms());
                 if crate::is_benign_bid_loss(&e) {
                     tracing::warn!(rfq = %rfq.rfq_id.to_hex(), premium, error = %format!("{e:#}"), "bid failed (outbid)");
                 } else {

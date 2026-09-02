@@ -1,0 +1,25 @@
+[package]
+name = "desk-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The mm-bot desk's pure strategy kernel: state, policy, events and commands (doc 08 §5.2)"
+
+[lib]
+path = "src/lib.rs"
+
+# Deterministic and I/O-free by construction: no tokio, reqwest, diesel or
+# Sui SDK crate may ever appear below — `tests::dependency_assertion`
+# fails the build of the test suite if one does.
+[dependencies]
+pricing        = { workspace = true }
+vol-forecast   = { workspace = true }
+protocol-types = { workspace = true }
+
+serde       = { workspace = true }
+anyhow      = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+toml       = { workspace = true }

@@ -9,6 +9,8 @@ path = "src/lib.rs"
 
 [dependencies]
 protocol-types = { workspace = true }
+# Put-exercise route types + DeepBook lot/ladder math (SO-450).
+desk-core      = { workspace = true }
 runtime-config = { workspace = true }
 # oracle-service wire client, for the shared Switchboard appraisal
 # composer (`tx::appraisal::compose_switchboard_appraisal`).

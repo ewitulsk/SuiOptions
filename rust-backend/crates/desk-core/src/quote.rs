@@ -166,10 +166,10 @@ fn decline_hard(hard: HardDecline) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desk::model::{MarketModel, SurfaceConfig, V1BidParams};
+    use crate::model::{MarketModel, SurfaceConfig, V1BidParams};
     use parking_lot::RwLock;
-    use pyth_client::RollingVolBuffer;
     use std::sync::Arc;
+    use vol_forecast::RollingVolBuffer;
 
     const DAY_MS: u64 = 86_400_000;
 
@@ -199,8 +199,18 @@ mod tests {
         )
     }
 
+    /// The 00-plan V1 starting parameters (mm-bot's `V1Config` defaults).
     fn v1() -> V1BidParams {
-        super::super::V1Config::default().into()
+        V1BidParams {
+            base_spread_volpts: 0.05,
+            size_penalty_volpts_per_pct_nav: 0.01,
+            size_penalty_quadratic_from_pct: 3.0,
+            inventory_penalty_max_volpts: 0.10,
+            inventory_penalty_start_util: 0.6,
+            max_single_fill_pct_nav: 5.0,
+            funding_income_credit: 0.0,
+            composition_penalty_volpts: 0.05,
+        }
     }
 
     fn ctx() -> FlowContext {
@@ -208,7 +218,7 @@ mod tests {
             spot: 100.0,
             exposure: BookExposure {
                 nav: 1e9,
-                capital: crate::desk::limits::CapitalSnapshot::test_fresh(1e9, 0),
+                capital: crate::limits::CapitalSnapshot::test_fresh(1e9, 0),
                 ..Default::default()
             },
             funding_rate_annual: 0.0,

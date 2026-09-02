@@ -188,7 +188,7 @@ mod tests {
 
     fn desk() -> Desk {
         let shared = testkit::shared(1e9);
-        let book = Arc::new(RwLock::new(Book::new(1_000_000_000, None)));
+        let book = Arc::new(RwLock::new(Book::new(1_000_000_000)));
         testkit::desk(shared, book, testkit::paper_venue("rfq", 0.0, 0.0, 1.0))
     }
 
