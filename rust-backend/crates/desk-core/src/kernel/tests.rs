@@ -113,9 +113,14 @@ fn atm(is_put: bool) -> RfqInputs {
 }
 
 fn mark_update(at_ms: u64, custody: Option<(Vec<Holding>, Vec<Written>)>) -> Event {
+    let (holdings, written) = match custody {
+        Some((h, w)) => (Some(h), Some(w)),
+        None => (None, None),
+    };
     Event::MarkUpdate(Box::new(MarkUpdate {
         at_ms,
-        custody,
+        holdings,
+        written,
         nav: Some(1_000_000_000),
         appraisal_at: Some(at_ms),
         risk_off: Some(false),
@@ -146,6 +151,7 @@ fn trace() -> Vec<Event> {
         rfq("r2", Side::Trader, atm(false), Some(2), T0 + 1_500),
         rfq("r3", Side::Writer, atm(true), Some(3), T0 + 2_000),
         Event::QuoteAccepted { request_id: "r1".into(), at_ms: T0 + 2_500 },
+        Event::HedgeTimer { market: 0, at_ms: T0 + 3_000 },
         Event::HedgeTick { market: 0, position_units: 0.0, funding_rate_annual: 0.0, at_ms: T0 + 3_000 },
         Event::FundingSettled { market: 0, paid: 3.0, at_ms: T0 + 3_500 },
         Event::QuoteFilled {
@@ -162,6 +168,7 @@ fn trace() -> Vec<Event> {
         },
         Event::QuoteReverted { request_id: "r3".into(), at_ms: T0 + 4_500 },
         Event::ExitTimer { wallet_cash: 1_000_000, at_ms: T0 + 5_000 },
+        Event::HedgeTimer { market: 0, at_ms: T0 + 6_000 },
         Event::HedgeTick { market: 0, position_units: -5_000_000.0, funding_rate_annual: 0.0, at_ms: T0 + 6_000 },
         Event::NavSample { nav: 800_000_000, at_ms: T0 + 7_000 },
         rfq("r4", Side::Writer, atm(false), Some(4), T0 + 8_000),
@@ -195,6 +202,7 @@ fn at_ms(ev: &Event) -> u64 {
         | Event::QuoteReverted { at_ms, .. }
         | Event::QuoteFilled { at_ms, .. }
         | Event::Hedge { at_ms, .. }
+        | Event::HedgeTimer { at_ms, .. }
         | Event::HedgeTick { at_ms, .. }
         | Event::HedgeRealized { at_ms, .. }
         | Event::FundingSettled { at_ms, .. }
@@ -420,11 +428,12 @@ fn hedge_ticks_plan_signed_orders_and_never_resubmit_working_size() {
     k.markets[0].book_delta_units = 100.0 + -70.0;
     let cmds = k.on_event(Event::HedgeTick { market: 0, position_units: 0.0, funding_rate_annual: 0.0, at_ms: T0 + 2 });
     assert!(matches!(&cmds[0], Command::SubmitHedgeOrder { order, .. } if order.size_units == -30.0));
-    // A stale working order is cancelled (and stops counting) before
-    // the tick plans.
+    // A stale working order is cancelled (and stops counting) by the
+    // timer sweep, so the tick that follows re-plans it.
+    let cmds = k.on_event(Event::HedgeTimer { market: 0, at_ms: T0 + 2 + 60_000 });
+    assert_eq!(cmds, vec![Command::CancelHedgeOrder { market: 0, id: 1 }]);
     let cmds = k.on_event(Event::HedgeTick { market: 0, position_units: 0.0, funding_rate_annual: 0.0, at_ms: T0 + 2 + 60_000 });
-    assert!(matches!(&cmds[0], Command::CancelHedgeOrder { id: 1, .. }), "{cmds:?}");
-    assert!(matches!(&cmds[1], Command::SubmitHedgeOrder { order, .. } if order.id == 2 && order.size_units == -30.0), "{cmds:?}");
+    assert!(matches!(&cmds[0], Command::SubmitHedgeOrder { order, .. } if order.id == 2 && order.size_units == -30.0), "{cmds:?}");
 }
 
 /// Funding and scalp land on their own lines, in order, as commands.

@@ -1,7 +1,9 @@
 //! Put exercise EXECUTION (SO-443, doc 08 §4.4): the three-path atomic
 //! waterfall and the redundant near-expiry sweep. The policy — timing
 //! rule, minimum profit, route choice, ladder — is `desk_core::exits::put`,
-//! re-exported here.
+//! re-exported here; the kernel plans every slice
+//! (`Command::ExecutePutPtb`) from the pool ladder this module reads
+//! (`Command::QueryPutLiquidity` → `Event::PutLiquidity`).
 //!
 //! Every route is pre-simulated with explicit max-input / min-output,
 //! exact repayment, the configured pool allowlist, a flash-capacity
@@ -9,9 +11,9 @@
 //! failure aborts the whole PTB (`sui_tx::tx::put_exercise`).
 //!
 //! The Sui PTB is atomic; the LONG-perp hedge unwind is not. After a
-//! successful slice the hedge close (a SELL of `|Δ| × units`) is sent
-//! through the market's primary [`HedgeVenue`] immediately and its
-//! delay is logged as its own line.
+//! successful slice the kernel schedules the hedge close (a SELL of
+//! `|Δ| × units`) and this module sends it through the market's primary
+//! [`HedgeVenue`] immediately, logging its delay as its own line.
 //!
 //! Custody legs mirror the call path: wallet float coins use the wallet
 //! routes (own underlying / base flash / quote flash); VaultMm coin-
@@ -19,10 +21,10 @@
 //! deepbook-adapter repurchase on an allowlisted pool (vault-underlying
 //! only — flash routes are wallet-only, exactly like calls).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use desk_core::kernel::{Command, Event, PutLeg};
 use sui_tx::sui_client::SuiClientWrapper;
 use sui_tx::tx::put_exercise::{
     self, PutPtbSpec, PutSubmitRefs, VaultPutPtbArgs, VaultPutPtbSpec,
@@ -33,7 +35,6 @@ use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 
 use crate::desk::book::{self, CoinPosition, Holding};
 use crate::desk::hedge::{HedgeCommand, HedgeEvent, HedgeOrder};
-use crate::desk::model::MarketModel;
 use crate::desk::CuratorRefs;
 
 use super::{ExitsParams, ALERT_ID};
@@ -41,10 +42,6 @@ use super::{ExitsParams, ALERT_ID};
 pub use desk_core::exits::put::*;
 
 // ── execution ──────────────────────────────────────────────────────────
-
-/// Hedge-close order ids live in their own half of the id space so they
-/// never collide with the rebalancer's process-local counter.
-static NEXT_CLOSE_ID: AtomicU64 = AtomicU64::new(1 << 63);
 
 /// The deepbook-adapter package + shared `PoolAllowlist` the vault-custody
 /// repurchase needs.
@@ -54,43 +51,31 @@ pub struct AdapterRefs {
     pub pool_allowlist: ObjectID,
 }
 
-struct Market<'a> {
-    model: &'a MarketModel,
-    spot: f64,
-    t_years: f64,
-    decimals: u8,
+/// The allowlisted spot pool for the holding's underlying.
+fn spot_pool(p: &ExitsParams, mi: usize) -> Result<ObjectID> {
+    let symbol = p.kernel.read().models[mi].symbol.clone();
+    let pool = p
+        .cfg
+        .spot_pools
+        .get(&symbol)
+        .with_context(|| format!("no [desk.exits.spot_pools] entry for {symbol}"))?;
+    Ok(ObjectID::from_hex_literal(pool)?)
 }
 
-/// Run the put waterfall for one holding this tick: wallet leg (float
-/// coins) and vault leg (coin-custody positions), each laddered.
-/// Returns the units exercised.
-pub async fn run(
+/// Answer the kernel's `QueryPutLiquidity`: the spot pool's flash
+/// capacity, lot/min size and ask ladder, plus the underlying each leg
+/// already holds (wallet float / vault free balance).
+pub async fn query_liquidity(
     p: &ExitsParams,
     wrap: &SuiClientWrapper,
     h: &Holding,
     mi: usize,
-    spot: f64,
     now_ms: u64,
-) -> Result<u64> {
+) -> Result<Event> {
     let cfg = &p.cfg.put;
-    let model = &p.models[mi];
-    let Some(pool) = p.cfg.spot_pools.get(&model.symbol) else {
-        tracing::warn!(
-            symbol = %model.symbol,
-            "put exercise wanted but no [desk.exits.spot_pools] entry (pool allowlist); holding"
-        );
-        return Ok(0);
-    };
-    let pool = ObjectID::from_hex_literal(pool)?;
+    let pool = spot_pool(p, mi)?;
     let handles = p.handles.as_ref().context("no deepbook handles")?;
-    let deep = p.deep_coin_type.as_deref().context("no deep coin type")?;
-    let m = Market {
-        model,
-        spot,
-        t_years: h.expiry_ms.saturating_sub(now_ms) as f64 / 1000.0 / 86_400.0 / 365.0,
-        decimals: p.market_feeds[mi].1,
-    };
-    let remaining_ms = h.expiry_ms.saturating_sub(now_ms);
+    p.deep_coin_type.as_deref().context("no deep coin type")?;
     let liq_pool = put_exercise::pool_liquidity(
         &wrap.client,
         wrap.signer.address,
@@ -102,205 +87,185 @@ pub async fn run(
     )
     .await
     .context("reading spot pool liquidity")?;
-    let mut exercised = 0u64;
+    let wallet_underlying = if h.amount_wallet > 0 {
+        wallet_balance(wrap, &h.asset_coin_type).await
+    } else {
+        0
+    };
+    let vault_underlying = match (p.curator.as_ref(), p.deepbook_adapter.as_ref()) {
+        (Some(refs), Some(_)) if h.amount_coin_positions() > 0 => book::free_balance_of(
+            wrap,
+            refs.trading_vault_package,
+            refs.vault_id,
+            &h.asset_coin_type,
+        )
+        .await
+        .unwrap_or(0),
+        _ => 0,
+    };
+    Ok(Event::PutLiquidity {
+        bucket: h.bucket_id,
+        wallet_underlying,
+        vault_underlying,
+        pool: liq_pool,
+        at_ms: now_ms,
+    })
+}
 
-    // Wallet leg (float coins).
-    if h.amount_wallet > 0 {
-        let own = wallet_balance(wrap, &h.asset_coin_type).await;
-        let liq = PutLiquidity { own_underlying: own, pool: liq_pool.clone() };
-        let slices = ladder(
-            h.amount_wallet,
-            p.cfg.max_slice,
-            remaining_ms,
-            cfg.ladder_tx_secs * 1000,
-            cfg.expiry_margin_secs * 1000,
-        );
-        for slice in slices {
-            let plan = match plan_slice(
-                cfg,
-                slice,
-                h.strike,
-                h.strike_scale,
-                p.settlement_decimals,
-                &liq,
-            ) {
-                Ok(plan) => plan,
-                Err(reject) => {
-                    tracing::info!(
-                        bucket = %h.bucket_id.to_hex(),
-                        slice,
-                        %reject,
-                        "put slice not exercisable (wallet leg)"
-                    );
-                    break;
+/// Run the kernel's put slices for one holding: wallet leg (float
+/// coins) then vault leg (coin-custody positions). The first failed
+/// wallet slice ends the wallet leg; a failed vault slice ends the tick
+/// for this holding. Returns the units exercised.
+pub async fn execute(
+    p: &ExitsParams,
+    wrap: &SuiClientWrapper,
+    h: &Holding,
+    mi: usize,
+    cmds: Vec<Command>,
+    now_ms: u64,
+) -> Result<u64> {
+    let cfg = &p.cfg.put;
+    let pool = spot_pool(p, mi)?;
+    let handles = p.handles.as_ref().context("no deepbook handles")?;
+    let deep = p.deep_coin_type.as_deref().context("no deep coin type")?;
+    let mut exercised = 0u64;
+    let mut wallet_dead = false;
+    for cmd in cmds {
+        let Command::ExecutePutPtb { leg, plan, .. } = cmd else { continue };
+        match leg {
+            PutLeg::Wallet => {
+                if wallet_dead {
+                    continue;
                 }
-            };
-            let spec = PutPtbSpec {
-                deepbook_package: handles.package,
-                core_package: p.core_package,
-                underlying_type: &h.asset_coin_type,
-                settlement_type: &h.settlement_coin_type,
-                put_coin_type: &h.option_coin_type,
-                deep_coin_type: deep,
-                amount: plan.amount,
-                payout: plan.payout,
-                max_quote_in: plan.max_quote_in,
-                min_profit: plan.min_profit,
-                recipient: p.vault_address,
-            };
-            let refs = PutSubmitRefs {
-                spot_pool: pool,
-                bucket: ObjectID::new(*h.bucket_id.as_bytes()),
-                gas_budget: p.cfg.gas_budget,
-                max_gas_mist: cfg.max_gas_mist,
-            };
-            let started = Instant::now();
-            let res = put_exercise::submit_put_exercise(
-                &wrap.client,
-                &wrap.signer,
-                &spec,
-                &refs,
-                plan.path,
-            )
-            .await;
-            match res {
-                Ok(resp) => {
-                    tracing::info!(
-                        bucket = %h.bucket_id.to_hex(),
-                        path = plan.path.label(),
-                        amount = plan.amount,
-                        payout = plan.payout,
-                        max_quote_in = plan.max_quote_in,
-                        min_profit = plan.min_profit,
-                        digest = %sui_tx::tx::tx_digest(&resp),
-                        "put exercised (residual settlement → vault)"
-                    );
-                    metrics::counter!("mm_desk_put_exercise_total", "path" => plan.path.label())
-                        .increment(1);
-                    exercised += plan.amount;
-                    hedge_close(p, h, mi, &m, plan.amount, started).await;
-                }
-                Err(e) => {
-                    // The PTB aborts atomically: nothing signed on a
-                    // pre-simulation failure, everything reverted on-chain.
-                    tracing::error!(
-                        alert_id = ALERT_ID,
-                        bucket = %h.bucket_id.to_hex(),
-                        path = plan.path.label(),
-                        amount = plan.amount,
-                        error = %format!("{e:#}"),
-                        "put exercise tx failed (wallet leg)"
-                    );
-                    break;
+                let spec = PutPtbSpec {
+                    deepbook_package: handles.package,
+                    core_package: p.core_package,
+                    underlying_type: &h.asset_coin_type,
+                    settlement_type: &h.settlement_coin_type,
+                    put_coin_type: &h.option_coin_type,
+                    deep_coin_type: deep,
+                    amount: plan.amount,
+                    payout: plan.payout,
+                    max_quote_in: plan.max_quote_in,
+                    min_profit: plan.min_profit,
+                    recipient: p.vault_address,
+                };
+                let refs = PutSubmitRefs {
+                    spot_pool: pool,
+                    bucket: ObjectID::new(*h.bucket_id.as_bytes()),
+                    gas_budget: p.cfg.gas_budget,
+                    max_gas_mist: cfg.max_gas_mist,
+                };
+                let started = Instant::now();
+                let res = put_exercise::submit_put_exercise(
+                    &wrap.client,
+                    &wrap.signer,
+                    &spec,
+                    &refs,
+                    plan.path,
+                )
+                .await;
+                match res {
+                    Ok(resp) => {
+                        tracing::info!(
+                            bucket = %h.bucket_id.to_hex(),
+                            path = plan.path.label(),
+                            amount = plan.amount,
+                            payout = plan.payout,
+                            max_quote_in = plan.max_quote_in,
+                            min_profit = plan.min_profit,
+                            digest = %sui_tx::tx::tx_digest(&resp),
+                            "put exercised (residual settlement → vault)"
+                        );
+                        metrics::counter!("mm_desk_put_exercise_total", "path" => plan.path.label())
+                            .increment(1);
+                        exercised += plan.amount;
+                        landed(p, h, mi, leg, plan.amount, now_ms, started).await;
+                    }
+                    Err(e) => {
+                        // The PTB aborts atomically: nothing signed on a
+                        // pre-simulation failure, everything reverted on-chain.
+                        tracing::error!(
+                            alert_id = ALERT_ID,
+                            bucket = %h.bucket_id.to_hex(),
+                            path = plan.path.label(),
+                            amount = plan.amount,
+                            error = %format!("{e:#}"),
+                            "put exercise tx failed (wallet leg)"
+                        );
+                        failed(p, h, leg, plan.amount, now_ms);
+                        wallet_dead = true;
+                    }
                 }
             }
-        }
-    }
-
-    // Vault leg (coin-custody positions), minus resting exchange asks.
-    let listed = p.book.read().listed_units(&h.bucket_id);
-    let vault_units = h.amount_coin_positions().saturating_sub(listed);
-    if vault_units == 0 {
-        return Ok(exercised);
-    }
-    let hold = |why: &str| {
-        tracing::info!(
-            bucket = %h.bucket_id.to_hex(),
-            vault_held = vault_units,
-            "vault-custody put exit wanted but {why}; holding"
-        );
-    };
-    let Some(refs) = p.curator.as_ref() else {
-        hold("curator refs unresolved");
-        return Ok(exercised);
-    };
-    let Some(adapter) = p.deepbook_adapter.as_ref() else {
-        hold("deepbook adapter refs missing");
-        return Ok(exercised);
-    };
-    // SO-418 risk gate: the session takes vault FREE underlying.
-    if p.shared.risk_off.load(Ordering::Relaxed) {
-        hold("the vault is risk-off");
-        return Ok(exercised);
-    }
-    let free_underlying = book::free_balance_of(
-        wrap,
-        refs.trading_vault_package,
-        refs.vault_id,
-        &h.asset_coin_type,
-    )
-    .await
-    .unwrap_or(0);
-    let liq = PutLiquidity { own_underlying: free_underlying, pool: liq_pool };
-    let mut budget = vault_units;
-    for cp in &h.coin_positions {
-        if budget == 0 {
-            break;
-        }
-        let units = cp.amount.min(budget);
-        let slices = ladder(
-            units,
-            p.cfg.max_slice,
-            remaining_ms,
-            cfg.ladder_tx_secs * 1000,
-            cfg.expiry_margin_secs * 1000,
-        );
-        for slice in slices {
-            // Only the vault-underlying route exists for custody coins.
-            let plan = match plan_slice(
-                cfg,
-                slice,
-                h.strike,
-                h.strike_scale,
-                p.settlement_decimals,
-                &liq,
-            ) {
-                Ok(plan) if plan.path == PutPath::VaultUnderlying => plan,
-                Ok(plan) => {
-                    tracing::info!(
-                        bucket = %h.bucket_id.to_hex(),
-                        slice,
-                        path = plan.path.label(),
-                        "vault free underlying short for the slice; holding custody coins"
-                    );
-                    break;
-                }
-                Err(reject) => {
-                    tracing::info!(
-                        bucket = %h.bucket_id.to_hex(),
-                        slice,
-                        %reject,
-                        "put slice not exercisable (vault leg)"
-                    );
-                    break;
-                }
-            };
-            let started = Instant::now();
-            match vault_exercise(p, wrap, refs, adapter, h, cp, &plan, pool).await {
-                Ok(()) => {
-                    metrics::counter!("mm_desk_put_exercise_total", "path" => "vault_custody")
-                        .increment(1);
-                    exercised += plan.amount;
-                    budget -= plan.amount;
-                    // The repurchase restores the delivered underlying, so
-                    // `liq.own_underlying` is unchanged for the next slice.
-                    hedge_close(p, h, mi, &m, plan.amount, started).await;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        alert_id = ALERT_ID,
-                        bucket = %h.bucket_id.to_hex(),
-                        coin_position = %cp.position_id.to_hex(),
-                        amount = plan.amount,
-                        error = %format!("{e:#}"),
-                        "put exercise tx failed (vault leg)"
-                    );
-                    return Ok(exercised);
+            PutLeg::VaultCoin { position_id } => {
+                let (Some(refs), Some(adapter)) = (p.curator.as_ref(), p.deepbook_adapter.as_ref())
+                else {
+                    continue;
+                };
+                let Some(cp) = h.coin_positions.iter().find(|c| c.position_id == position_id) else {
+                    continue;
+                };
+                let started = Instant::now();
+                match vault_exercise(p, wrap, refs, adapter, h, cp, &plan, pool).await {
+                    Ok(()) => {
+                        metrics::counter!("mm_desk_put_exercise_total", "path" => "vault_custody")
+                            .increment(1);
+                        exercised += plan.amount;
+                        landed(p, h, mi, leg, plan.amount, now_ms, started).await;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            alert_id = ALERT_ID,
+                            bucket = %h.bucket_id.to_hex(),
+                            coin_position = %cp.position_id.to_hex(),
+                            amount = plan.amount,
+                            error = %format!("{e:#}"),
+                            "put exercise tx failed (vault leg)"
+                        );
+                        failed(p, h, leg, plan.amount, now_ms);
+                        return Ok(exercised);
+                    }
                 }
             }
         }
     }
     Ok(exercised)
+}
+
+/// A slice landed: tell the kernel, and send the hedge close it
+/// schedules through the market's primary venue.
+async fn landed(
+    p: &ExitsParams,
+    h: &Holding,
+    mi: usize,
+    leg: PutLeg,
+    units: u64,
+    now_ms: u64,
+    ptb_done: Instant,
+) {
+    let cmds = p.kernel.write().on_event(Event::ExercisePtbResult {
+        bucket: h.bucket_id,
+        leg,
+        units,
+        ok: true,
+        at_ms: now_ms,
+    });
+    for cmd in cmds {
+        if let Command::SubmitHedgeOrder { order, .. } = cmd {
+            hedge_close(p, h, mi, order, ptb_done, now_ms).await;
+        }
+    }
+}
+
+fn failed(p: &ExitsParams, h: &Holding, leg: PutLeg, units: u64, now_ms: u64) {
+    p.kernel.write().on_event(Event::ExercisePtbResult {
+        bucket: h.bucket_id,
+        leg,
+        units,
+        ok: false,
+        at_ms: now_ms,
+    });
 }
 
 async fn wallet_balance(wrap: &SuiClientWrapper, coin_type: &str) -> u64 {
@@ -400,32 +365,24 @@ async fn vault_args(
     Ok(VaultPutPtbArgs { vault, cap, reg, allowlist, pool, bucket, clock })
 }
 
-/// Close the exercised units' share of the LONG perp hedge: a SELL of
-/// `|Δ| × units` on the market's primary venue, scheduled immediately
-/// after the PTB lands; the delay from PTB success is its own log line
-/// and histogram (doc 08 §4.4: the unwind is not atomic with the chain).
+/// Send the kernel's hedge close — a SELL of `|Δ| × units` on the
+/// market's primary venue, scheduled immediately after the PTB lands —
+/// and hand the venue's events back; the delay from PTB success is its
+/// own log line and histogram (doc 08 §4.4: the unwind is not atomic
+/// with the chain).
 async fn hedge_close(
     p: &ExitsParams,
     h: &Holding,
     mi: usize,
-    m: &Market<'_>,
-    units: u64,
+    order: HedgeOrder,
     ptb_done: Instant,
+    now_ms: u64,
 ) {
     let Some(venue) = p.hedge_venues.get(mi) else {
         return;
     };
-    let strike = h.strike_scaled();
-    let (sigma, _) = m.model.sigma(m.spot, strike, m.t_years);
-    let delta = m.model.greeks_per_unit(true, m.spot, strike, m.t_years, sigma).delta;
-    // Held put: book delta = Δ × units (Δ < 0), hedge = −that (long);
-    // closing sells it back, i.e. size = Δ × units.
-    let size = delta * units as f64;
-    if size == 0.0 {
-        return;
-    }
-    let id = NEXT_CLOSE_ID.fetch_add(1, Ordering::Relaxed);
-    let order = HedgeOrder { id, size_units: size, spot: m.spot };
+    let id = order.id;
+    let size = order.size_units;
     match venue.execute(HedgeCommand::Submit(order)).await {
         Ok(events) => {
             let delay_ms = ptb_done.elapsed().as_millis() as u64;
@@ -445,7 +402,7 @@ async fn hedge_close(
                 size,
                 filled,
                 delay_ms,
-                decimals = m.decimals,
+                decimals = p.market_feeds[mi].1,
                 "put exercise hedge close scheduled"
             );
             if let Some(HedgeEvent::Rejected { reason, .. }) =
@@ -458,6 +415,10 @@ async fn hedge_close(
                     reason,
                     "put exercise hedge close rejected"
                 );
+            }
+            let mut k = p.kernel.write();
+            for ev in events {
+                k.on_event(Event::Hedge { market: mi, event: ev, at_ms: now_ms });
             }
         }
         Err(e) => tracing::error!(

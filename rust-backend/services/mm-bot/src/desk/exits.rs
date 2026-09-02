@@ -1,6 +1,8 @@
-//! The §5 exit ladder, run per tick over the book's held options. The
-//! ladder DECISION (`decide_exit`, `strike_cost`, `[desk.exits]`) is
-//! `desk_core::exits`, re-exported here; this module executes it:
+//! The §5 exit ladder, run per tick over the book's held options — the
+//! kernel's `ExitTimer` adapter (SO-450): the tick feeds fresh spots and
+//! the wallet's cash to the kernel, which runs the ladder DECISION
+//! (`desk_core::exits`, re-exported here) and answers with PTB commands
+//! this module executes:
 //!
 //!   0. **Offset close** (netting, config-gated): when the book holds a
 //!      written `Position` and VaultMm-custodied option coins in the SAME
@@ -38,6 +40,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use desk_core::kernel::{CallLeg, Command, DeskKernel, Event};
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use parking_lot::RwLock;
@@ -45,6 +48,7 @@ use sui_types::base_types::ObjectID;
 use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 use sui_types::transaction::Argument;
 
+use protocol_types::ids::ObjectId;
 use pyth_client::{PriceCache, PriceFeedId};
 use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::deepbook::{flash_exercise_call, DeepBookHandles, FlashExerciseCallParams};
@@ -52,9 +56,8 @@ use sui_tx::tx::{clock_arg, owned_object_arg, shared_object_arg, submit_ptb};
 
 use crate::pricing::{compute_spot_from_cache, Staleness};
 
-use super::book::{self, Book, CoinPosition, Holding, Written};
-use super::model::MarketModel;
-use super::{CuratorRefs, DeskShared};
+use super::book::{self, Holding};
+use super::CuratorRefs;
 
 pub use desk_core::exits::*;
 
@@ -68,10 +71,8 @@ pub struct ExitsParams {
     pub cfg: ExitsConfig,
     pub secrets: runtime_config::Secrets,
     pub network: Network,
-    /// Shared desk state — the SO-418 risk gate lives here.
-    pub shared: Arc<DeskShared>,
-    pub book: Arc<RwLock<Book>>,
-    pub models: Arc<Vec<MarketModel>>,
+    /// The kernel: the book, the risk gate and the ladder decision.
+    pub kernel: Arc<RwLock<DeskKernel>>,
     pub market_feeds: Vec<(PriceFeedId, u8)>,
     pub price_cache: PriceCache,
     pub settlement_feed: PriceFeedId,
@@ -91,8 +92,8 @@ pub struct ExitsParams {
     /// deepbook-adapter package + `PoolAllowlist` — `None` disables the
     /// vault-custody put repurchase (SO-443).
     pub deepbook_adapter: Option<put::AdapterRefs>,
-    /// Per-market PRIMARY hedge venue, aligned with `models`; put
-    /// exercise schedules its hedge close here.
+    /// Per-market PRIMARY hedge venue, aligned with the kernel's models;
+    /// put exercise schedules its hedge close here.
     pub hedge_venues: Vec<Arc<dyn super::hedge::HedgeVenue>>,
 }
 
@@ -120,165 +121,144 @@ pub fn spawn_exits(p: ExitsParams) {
 }
 
 async fn tick(p: &ExitsParams, wrap: &SuiClientWrapper) -> Result<()> {
-    let (holdings, written): (Vec<Holding>, Vec<Written>) = {
-        let b = p.book.read();
-        (b.holdings.clone(), b.written.clone())
-    };
     let now = super::auctions::now_ms();
-    for h in holdings {
-        if h.amount() == 0 || h.expiry_ms <= now {
-            continue;
-        }
-        let Some(mi) = p.models.iter().position(|m| m.coin_type == h.asset_coin_type) else {
-            continue;
-        };
-        let (feed, decimals) = p.market_feeds[mi];
-        let Ok(spot) = compute_spot_from_cache(
-            &p.price_cache,
-            feed,
-            p.settlement_feed,
-            decimals,
-            p.settlement_decimals,
-            p.staleness,
-        ) else {
-            continue;
-        };
-
-        // Step 0 (netting): a written position + same-bucket VaultMm coin
-        // custody offset-close at zero market impact. One tx per holding
-        // per tick; the custody re-sync picks up the shrunk amounts.
-        if p.cfg.offset_close_enabled {
-            if let (Some(refs), Some(w), Some(cp)) = (
-                p.curator.as_ref(),
-                written.iter().find(|w| w.bucket_id == h.bucket_id && w.amount > 0),
-                h.coin_positions.first(),
+    // Fresh spot per market → the kernel (a stale market's holdings are
+    // skipped, as before).
+    {
+        let mut k = p.kernel.write();
+        for (mi, (feed, decimals)) in p.market_feeds.iter().enumerate() {
+            match compute_spot_from_cache(
+                &p.price_cache,
+                *feed,
+                p.settlement_feed,
+                *decimals,
+                p.settlement_decimals,
+                p.staleness,
             ) {
-                let amount = w.amount.min(cp.amount);
-                if let Err(e) = offset_close(p, wrap, refs, &h, w, cp, amount).await {
-                    tracing::error!(
+                Ok(spot) => k.on_event(Event::Spot { market: mi, spot, at_ms: now }),
+                Err(_) => k.on_event(Event::SpotStale { market: mi, at_ms: now }),
+            };
+        }
+    }
+    let wallet_cash = match sui_types::parse_sui_struct_tag(&p.settlement_coin_type) {
+        Ok(tag) => wrap
+            .client
+            .balance(wrap.signer.address, &tag)
+            .await
+            .map(|b| u64::try_from(b).unwrap_or(u64::MAX))
+            .unwrap_or(0),
+        Err(_) => 0,
+    };
+    let cmds = p.kernel.write().on_event(Event::ExitTimer { wallet_cash, at_ms: now });
+    execute(p, wrap, cmds, now).await
+}
+
+/// The held line a command refers to, as the book holds it now.
+fn holding(p: &ExitsParams, bucket: &ObjectId) -> Option<Holding> {
+    p.kernel.read().book.holdings.iter().find(|h| h.bucket_id == *bucket).cloned()
+}
+
+/// Execute the ladder's PTB commands, in order.
+async fn execute(p: &ExitsParams, wrap: &SuiClientWrapper, cmds: Vec<Command>, now: u64) -> Result<()> {
+    for cmd in cmds {
+        match cmd {
+            Command::OffsetClose { bucket, position_id, coin_position_id, amount, .. } => {
+                let (Some(refs), Some(h)) = (p.curator.as_ref(), holding(p, &bucket)) else {
+                    continue;
+                };
+                match offset_close(p, wrap, refs, &h, position_id, coin_position_id, amount).await {
+                    Ok(()) => {
+                        metrics::counter!("mm_desk_exit_decisions_total", "action" => "offset_close")
+                            .increment(1);
+                    }
+                    Err(e) => tracing::error!(
                         alert_id = ALERT_ID,
-                        bucket = %h.bucket_id.to_hex(),
+                        bucket = %bucket.to_hex(),
                         amount,
                         error = %format!("{e:#}"),
                         "offset close tx failed"
-                    );
-                } else {
-                    metrics::counter!("mm_desk_exit_decisions_total", "action" => "offset_close")
-                        .increment(1);
+                    ),
                 }
-                continue; // custody changed under us; re-ladder next tick
             }
-        }
-
-        let wallet_cash = match sui_types::parse_sui_struct_tag(&p.settlement_coin_type) {
-            Ok(tag) => wrap
-                .client
-                .balance(wrap.signer.address, &tag)
-                .await
-                .map(|b| u64::try_from(b).unwrap_or(u64::MAX))
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
-        let cost_wallet = strike_cost(h.amount_wallet, h.strike, h.strike_scale);
-        let action = decide_exit(
-            &p.cfg,
-            &p.models[mi],
-            h.is_put,
-            spot,
-            h.strike_scaled(),
-            h.expiry_ms,
-            wallet_cash,
-            cost_wallet,
-            now,
-        );
-        metrics::counter!("mm_desk_exit_decisions_total", "action" => match action {
-            ExitAction::Hold => "hold",
-            ExitAction::ExerciseCash => "exercise_cash",
-            ExitAction::FlashExercise => "flash_exercise",
-            ExitAction::ExercisePut => "exercise_put",
-        })
-        .increment(1);
-        if action == ExitAction::Hold {
-            continue;
-        }
-        if action == ExitAction::ExercisePut {
-            // Both legs + laddering + hedge close live in the put module;
-            // every tx failure is alert-logged at its handler there.
-            match put::run(p, wrap, &h, mi, spot, now).await {
-                Ok(0) => {}
-                Ok(units) => {
-                    metrics::counter!("mm_desk_put_exercised_units_total").increment(units)
+            Command::ExecuteCallPtb { bucket, leg } => {
+                let Some(h) = holding(p, &bucket) else { continue };
+                match leg {
+                    // Wallet leg (float coins: auction remnants / staged exits).
+                    CallLeg::WalletCash { amount, .. } => {
+                        metrics::counter!("mm_desk_exit_decisions_total", "action" => "exercise_cash")
+                            .increment(1);
+                        if let Err(e) = exercise_cash(p, wrap, &h, amount).await {
+                            tracing::error!(
+                                alert_id = ALERT_ID,
+                                bucket = %bucket.to_hex(),
+                                action = "exercise_cash",
+                                error = %format!("{e:#}"),
+                                "exit execution tx failed (wallet leg)"
+                            );
+                        }
+                    }
+                    CallLeg::WalletFlash { .. } => {
+                        metrics::counter!("mm_desk_exit_decisions_total", "action" => "flash_exercise")
+                            .increment(1);
+                        if let Err(e) = flash_exercise(p, wrap, &h).await {
+                            tracing::error!(
+                                alert_id = ALERT_ID,
+                                bucket = %bucket.to_hex(),
+                                action = "flash_exercise",
+                                error = %format!("{e:#}"),
+                                "exit execution tx failed (wallet leg)"
+                            );
+                        }
+                    }
+                    // Vault leg (coin-custody positions).
+                    CallLeg::VaultCoins => {
+                        let Some(refs) = p.curator.as_ref() else {
+                            tracing::info!(
+                                bucket = %bucket.to_hex(),
+                                "vault-custody exit wanted but curator refs unresolved; holding"
+                            );
+                            continue;
+                        };
+                        if let Err(e) = vault_exercise(p, wrap, refs, &h).await {
+                            tracing::error!(
+                                alert_id = ALERT_ID,
+                                bucket = %bucket.to_hex(),
+                                action = "vault_exercise",
+                                error = %format!("{e:#}"),
+                                "exit execution tx failed (vault leg)"
+                            );
+                        }
+                    }
                 }
-                Err(e) => tracing::error!(
-                    alert_id = ALERT_ID,
-                    bucket = %h.bucket_id.to_hex(),
-                    error = %format!("{e:#}"),
-                    "put exercise failed before any tx"
-                ),
             }
-            continue;
-        }
-
-        // Wallet leg (float coins: auction remnants / staged exits).
-        if h.amount_wallet > 0 {
-            let res = match action {
-                ExitAction::ExerciseCash => exercise_cash(p, wrap, &h, h.amount_wallet).await,
-                ExitAction::FlashExercise => flash_exercise(p, wrap, &h, spot).await,
-                ExitAction::Hold | ExitAction::ExercisePut => unreachable!(),
-            };
-            if let Err(e) = res {
-                tracing::error!(
-                    alert_id = ALERT_ID,
-                    bucket = %h.bucket_id.to_hex(),
-                    ?action,
-                    error = %format!("{e:#}"),
-                    "exit execution tx failed (wallet leg)"
-                );
+            Command::QueryPutLiquidity { bucket, market } => {
+                let Some(h) = holding(p, &bucket) else { continue };
+                metrics::counter!("mm_desk_exit_decisions_total", "action" => "exercise_put")
+                    .increment(1);
+                // Both legs + laddering + hedge close live in the put
+                // module; every tx failure is alert-logged at its handler
+                // there.
+                let res = match put::query_liquidity(p, wrap, &h, market, now).await {
+                    Ok(ev) => {
+                        let plans = p.kernel.write().on_event(ev);
+                        put::execute(p, wrap, &h, market, plans, now).await
+                    }
+                    Err(e) => Err(e),
+                };
+                match res {
+                    Ok(0) => {}
+                    Ok(units) => {
+                        metrics::counter!("mm_desk_put_exercised_units_total").increment(units)
+                    }
+                    Err(e) => tracing::error!(
+                        alert_id = ALERT_ID,
+                        bucket = %bucket.to_hex(),
+                        error = %format!("{e:#}"),
+                        "put exercise failed before any tx"
+                    ),
+                }
             }
-        }
-
-        // Vault leg (coin-custody positions), minus whatever the listings
-        // engine has committed to resting exchange asks.
-        let listed = p.book.read().listed_units(&h.bucket_id);
-        let vault_units = h
-            .amount_vault
-            .saturating_add(h.amount_coin_positions())
-            .saturating_sub(listed);
-        if vault_units == 0 {
-            continue;
-        }
-        let Some(refs) = p.curator.as_ref() else {
-            tracing::info!(
-                bucket = %h.bucket_id.to_hex(),
-                ?action,
-                vault_held = vault_units,
-                "vault-custody exit wanted but curator refs unresolved; holding"
-            );
-            continue;
-        };
-        // SO-418 risk gate: `exercise_call_coin` spends vault FREE
-        // settlement to pay the strike — in risk-off nothing leaves free
-        // balances except withdrawal fulfillment, so the session aborts
-        // on-chain. Hold instead of burning gas. (Offset closes above
-        // keep running: netting is unwinding, and frees collateral INTO
-        // the vault.)
-        if p.shared.risk_off.load(std::sync::atomic::Ordering::Relaxed) {
-            tracing::info!(
-                bucket = %h.bucket_id.to_hex(),
-                ?action,
-                "vault-custody exercise wanted but the vault is risk-off; holding"
-            );
-            continue;
-        }
-        let res = vault_exercise(p, wrap, refs, &h).await;
-        if let Err(e) = res {
-            tracing::error!(
-                alert_id = ALERT_ID,
-                bucket = %h.bucket_id.to_hex(),
-                ?action,
-                error = %format!("{e:#}"),
-                "exit execution tx failed (vault leg)"
-            );
+            _ => {}
         }
     }
     Ok(())
@@ -316,8 +296,8 @@ async fn offset_close(
     wrap: &SuiClientWrapper,
     refs: &CuratorRefs,
     h: &Holding,
-    w: &Written,
-    cp: &CoinPosition,
+    position_id: ObjectId,
+    coin_position_id: ObjectId,
     amount: u64,
 ) -> Result<()> {
     let mut pt = ProgrammableTransactionBuilder::new();
@@ -325,8 +305,8 @@ async fn offset_close(
     let bucket = pt.obj(
         shared_object_arg(&wrap.client, ObjectID::new(*h.bucket_id.as_bytes()), true).await?,
     )?;
-    let position_id = pt.pure(&ObjectID::new(*w.position_id.as_bytes()))?;
-    let coin_position_id = pt.pure(&ObjectID::new(*cp.position_id.as_bytes()))?;
+    let position_arg = pt.pure(&ObjectID::new(*position_id.as_bytes()))?;
+    let coin_position_arg = pt.pure(&ObjectID::new(*coin_position_id.as_bytes()))?;
     let amount_arg = pt.pure(&amount)?;
     let clock = clock_arg(&mut pt)?;
     let function = if h.is_put { "close_offset_put_position" } else { "close_offset_position" };
@@ -335,14 +315,14 @@ async fn offset_close(
         Identifier::new("vault_mm").unwrap(),
         Identifier::new(function).unwrap(),
         bucket_type_tags(h)?,
-        vec![vault, cap, reg, bucket, position_id, coin_position_id, amount_arg, clock],
+        vec![vault, cap, reg, bucket, position_arg, coin_position_arg, amount_arg, clock],
     );
     let resp =
         submit_ptb(&wrap.client, &wrap.signer, pt, p.cfg.gas_budget, "desk offset close").await?;
     tracing::info!(
         bucket = %h.bucket_id.to_hex(),
-        position = %w.position_id.to_hex(),
-        coin_position = %cp.position_id.to_hex(),
+        position = %position_id.to_hex(),
+        coin_position = %coin_position_id.to_hex(),
         amount,
         digest = %sui_tx::tx::tx_digest(&resp),
         "offset-closed written position against held coins (collateral → vault)"
@@ -377,7 +357,7 @@ async fn vault_exercise(
     .await
     .unwrap_or(0);
     let mut budget = free_settlement;
-    let mut batch: Vec<&CoinPosition> = Vec::new();
+    let mut batch: Vec<&book::CoinPosition> = Vec::new();
     for cp in &h.coin_positions {
         let cost = strike_cost(cp.amount, h.strike, h.strike_scale);
         if cost <= budget {
@@ -479,17 +459,20 @@ async fn exercise_cash(p: &ExitsParams, wrap: &SuiClientWrapper, h: &Holding, am
 
 /// Flash-exercise: laddered `flash_exercise_call` PTBs, each pre-simulated
 /// and aborted if net ≤ 0 inside the builder.
-async fn flash_exercise(p: &ExitsParams, wrap: &SuiClientWrapper, h: &Holding, _spot: f64) -> Result<()> {
+async fn flash_exercise(p: &ExitsParams, wrap: &SuiClientWrapper, h: &Holding) -> Result<()> {
     let handles = p.handles.as_ref().context("no deepbook handles")?;
     let deep = p.deep_coin_type.as_deref().context("no deep coin type")?;
-    let model = p
+    let symbol = p
+        .kernel
+        .read()
         .models
         .iter()
         .find(|m| m.coin_type == h.asset_coin_type)
+        .map(|m| m.symbol.clone())
         .context("no model for underlying")?;
-    let Some(spot_pool) = p.cfg.spot_pools.get(&model.symbol) else {
+    let Some(spot_pool) = p.cfg.spot_pools.get(&symbol) else {
         tracing::warn!(
-            symbol = %model.symbol,
+            symbol = %symbol,
             "flash-exercise wanted but no [desk.exits.spot_pools] entry; holding"
         );
         return Ok(());

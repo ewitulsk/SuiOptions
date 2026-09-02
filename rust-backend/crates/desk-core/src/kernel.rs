@@ -17,8 +17,9 @@
 //! What the handlers replicate, line for line, is the live desk as of
 //! SO-447: `Desk::price_ws_rfq` ([`Event::Rfq`]), the book refresher
 //! ([`Event::MarkUpdate`]), `Rebalancer::rebalance_once`
-//! ([`Event::HedgeTick`] + [`Event::Hedge`] + [`Event::FundingSettled`] +
-//! [`Event::HedgeRealized`]), the fill poller ([`Event::QuoteFilled`])
+//! ([`Event::HedgeTimer`] + [`Event::HedgeTick`] + [`Event::Hedge`] +
+//! [`Event::FundingSettled`] + [`Event::HedgeRealized`]), the fill
+//! poller ([`Event::QuoteFilled`])
 //! and the exits ladder ([`Event::ExitTimer`] + [`Event::PutLiquidity`]).
 //! Same quotes, same hedges, same declines, same rows.
 
@@ -82,9 +83,11 @@ pub type MarketIndex = usize;
 #[derive(Clone, Debug, Default)]
 pub struct MarkUpdate {
     pub at_ms: u64,
-    /// Custody re-sync (held coins + written positions), when the tick
-    /// re-read them.
-    pub custody: Option<(Vec<Holding>, Vec<Written>)>,
+    /// Custody re-sync, when the tick re-read it: held coins and/or
+    /// written positions (each replaces the book's on its own, so one
+    /// failed read never discards the other).
+    pub holdings: Option<Vec<Holding>>,
+    pub written: Option<Vec<Written>>,
     /// Budget base (`book::budget_base`), `None` when unreadable.
     pub nav: Option<u64>,
     pub appraisal_at: Option<u64>,
@@ -164,8 +167,12 @@ pub enum Event {
     /// Hedge order acknowledged / partially filled / filled / rejected /
     /// cancelled.
     Hedge { market: MarketIndex, event: HedgeEvent, at_ms: u64 },
+    /// The rebalancer's tick started: sweep working orders older than
+    /// the order timeout (cancels come back as commands).
+    HedgeTimer { market: MarketIndex, at_ms: u64 },
     /// The rebalancer's venue readback this tick: signed position and
-    /// the venue's own funding rate (the band input).
+    /// the venue's own funding rate (the band input). Plans the order
+    /// that brings the net delta back inside the band.
     HedgeTick { market: MarketIndex, position_units: f64, funding_rate_annual: f64, at_ms: u64 },
     /// The venue's cumulative realized P&L after this tick's order.
     HedgeRealized { market: MarketIndex, realized_pnl: f64, at_ms: u64 },
@@ -380,6 +387,17 @@ impl DeskKernel {
             }
             Event::Hedge { market, event, .. } => {
                 self.markets[market].open_orders.apply(&event);
+            }
+            Event::HedgeTimer { market, at_ms } => {
+                let timeout_ms = self.cfg.hedge.order_timeout_secs.max(1) * 1000;
+                let m = &mut self.markets[market];
+                for id in m.open_orders.stale(at_ms, timeout_ms) {
+                    // The venue acknowledges the cancel synchronously
+                    // (paper) or through its event stream; either way the
+                    // remainder no longer counts toward the working size.
+                    m.open_orders.apply(&HedgeEvent::Cancelled(id));
+                    out.push(Command::CancelHedgeOrder { market, id });
+                }
             }
             Event::HedgeTick { market, position_units, funding_rate_annual, at_ms } => {
                 self.on_hedge_tick(&mut out, market, position_units, funding_rate_annual, at_ms);
@@ -617,15 +635,7 @@ impl DeskKernel {
         funding_rate_annual: f64,
         now_ms: u64,
     ) {
-        let timeout_ms = self.cfg.hedge.order_timeout_secs.max(1) * 1000;
         let m = &mut self.markets[market];
-        for id in m.open_orders.stale(now_ms, timeout_ms) {
-            // The venue acknowledges the cancel synchronously (paper) or
-            // through its event stream; either way the remainder no
-            // longer counts toward the working size.
-            m.open_orders.apply(&HedgeEvent::Cancelled(id));
-            out.push(Command::CancelHedgeOrder { market, id });
-        }
         let Some(spot) = m.spot.map(|s| s.spot) else {
             return;
         };
@@ -649,9 +659,13 @@ impl DeskKernel {
 
     fn on_mark_update(&mut self, out: &mut Vec<Command>, u: MarkUpdate) {
         let now = u.at_ms;
-        if let Some((holdings, written)) = u.custody {
-            self.book.holdings = holdings;
-            self.book.written = written;
+        if u.holdings.is_some() || u.written.is_some() {
+            if let Some(holdings) = u.holdings {
+                self.book.holdings = holdings;
+            }
+            if let Some(written) = u.written {
+                self.book.written = written;
+            }
             self.book.recompute_covered();
         }
         if let Some(now_off) = u.risk_off {

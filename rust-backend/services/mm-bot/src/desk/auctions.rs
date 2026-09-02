@@ -42,10 +42,10 @@ use sui_tx::tx::{clock_arg, owned_object_arg, shared_object_arg, submit_ptb};
 
 use crate::pricing::{compute_spot_from_cache, serves_pair, Staleness};
 
-use super::book::Book;
-use super::model::{MarketModel, V1BidParams};
+use desk_core::kernel::DeskKernel;
+
 use super::quote::{self, Decision, RfqInputs};
-use super::{CuratorRefs, DeskShared};
+use super::CuratorRefs;
 
 const ALERT_ID: &str = "tx-failed-mm-bot-desk";
 const BPS_DENOM: u128 = 10_000;
@@ -260,29 +260,24 @@ struct LiveBid {
 
 pub struct AuctionBidderParams {
     pub cfg: AuctionsConfig,
-    pub v1: V1BidParams,
-    pub limits: super::limits::LimitsConfig,
-    pub shared: Arc<DeskShared>,
+    /// The kernel: pricing context, market models and the reservation
+    /// ledger (live ticket costs reserve NAV).
+    pub kernel: Arc<RwLock<DeskKernel>>,
     pub secrets: runtime_config::Secrets,
     pub network: Network,
     /// options_adapter package (`bid_on_auction`).
     pub options_adapter_package: ObjectID,
     /// Curator-session refs — the bid escrows from THIS vault's balances.
     pub curator: CuratorRefs,
-    /// Reservation ledger (live ticket costs reserve NAV).
-    pub book: Arc<RwLock<Book>>,
     pub api_url: String,
     pub indexer_url: String,
     pub price_cache: PriceCache,
-    pub models: Arc<Vec<MarketModel>>,
     pub settlement_feed: PriceFeedId,
     pub settlement_coin_type: String,
     pub settlement_decimals: u8,
     /// Per-model (underlying) feeds/decimals aligned with `models`.
     pub market_feeds: Vec<(PriceFeedId, u8)>,
     pub staleness: Staleness,
-    pub expected_holding_years: f64,
-    pub slippage_bps: f64,
 }
 
 pub fn spawn_bidder(p: AuctionBidderParams) {
@@ -345,7 +340,7 @@ async fn observe_ticket_burns(
         .collect();
     for ticket in burned {
         if let Some(bid) = live.remove(&ticket) {
-            p.book.write().release_reservation(bid.reservation, now_ms());
+            p.kernel.write().book.release_reservation(bid.reservation, now_ms());
             tracing::info!(
                 ticket = %ticket,
                 auction = %bid.auction_id,
@@ -369,7 +364,7 @@ async fn tick(
     // which the risk-off gate set blocks on-chain — stop before reading
     // the board or burning gas. Ticket burns above still release
     // reservations while parked.
-    if p.shared.risk_off.load(std::sync::atomic::Ordering::Relaxed) {
+    if p.kernel.read().risk_off {
         tracing::debug!("auction bidder idle: vault is risk-off");
         return Ok(());
     }
@@ -412,7 +407,7 @@ async fn tick(
         let Some(bucket) = api.bucket_pricing(rfq.bucket_id.clone()).await? else {
             continue;
         };
-        let Some(mi) = p.models.iter().position(|m| {
+        let Some(mi) = p.kernel.read().models.iter().position(|m| {
             serves_pair(
                 &bucket.asset_coin_type,
                 &bucket.settlement_coin_type,
@@ -443,7 +438,6 @@ async fn tick(
         };
 
         // Max bid: the SAME V1 writer-flow decision as the WS channel.
-        let ctx = p.shared.flow_context(spot, &p.models[mi].coin_type).await;
         let inputs = RfqInputs {
             write_amount: view.amount,
             is_put: bucket.is_put,
@@ -451,14 +445,12 @@ async fn tick(
             strike_scale: bucket.strike_scale,
             expiry_ms: bucket.expiry_ms,
         };
-        let max_bid = match quote::price_writer_flow(
-            &p.models[mi],
-            &p.v1,
-            &p.limits,
-            &ctx,
-            &inputs,
-            now,
-        ) {
+        let decision = {
+            let k = p.kernel.read();
+            let ctx = k.flow_context(mi, spot);
+            quote::price_writer_flow(&k.models[mi], &k.cfg.v1, &k.cfg.limits, &ctx, &inputs, now)
+        };
+        let max_bid = match decision {
             Decision::Quote { premium, .. } => premium,
             Decision::Decline { reason } => {
                 tracing::debug!(rfq = %rfq.rfq_id.to_hex(), %reason, "declined to price auction");
@@ -483,7 +475,7 @@ async fn tick(
         };
 
         // Reserve the ticket cost against NAV before escrowing it.
-        let reservation = match p.book.write().reserve(premium, u64::MAX, now) {
+        let reservation = match p.kernel.write().book.reserve(premium, u64::MAX, now) {
             Ok(id) => id,
             Err(e) => {
                 tracing::warn!(rfq = %rfq.rfq_id.to_hex(), premium, ?e, "bid refused by reservation ledger");
@@ -529,7 +521,7 @@ async fn tick(
                 );
             }
             Err(e) => {
-                p.book.write().release_reservation(reservation, now_ms());
+                p.kernel.write().book.release_reservation(reservation, now_ms());
                 if crate::is_benign_bid_loss(&e) {
                     tracing::warn!(rfq = %rfq.rfq_id.to_hex(), premium, error = %format!("{e:#}"), "bid failed (outbid)");
                 } else {

@@ -30,7 +30,6 @@ pub use desk_core::exposure::{MarkSnapshot, SpotSnapshot};
 pub use desk_core::{model, quote};
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,10 +45,10 @@ use sui_tx::tx::deepbook::DeepBookHandles;
 
 use crate::pricing::{compute_spot_from_cache, Staleness};
 
-use book::{Book, PnlLine};
-use limits::{BookExposure, LimitsConfig};
+use desk_core::kernel::{Command, DeskKernel, Event, KernelConfig, PolicyState};
+use limits::LimitsConfig;
 use model::{EstimatorConfig, EstimatorKind, MarketModel, SurfaceConfig, V1BidParams};
-use quote::{Decision, FlowContext, RfqInputs};
+use quote::{Decision, RfqInputs};
 use vol_forecast::{PriceHistory, RollingVolBuffer};
 
 // ── config ─────────────────────────────────────────────────────────────
@@ -262,67 +261,104 @@ pub struct StressSnapshot {
     pub blocked: bool,
 }
 
-/// State the desk's tasks share (the book refresher writes; quoting,
-/// auctions and monitors read).
+/// Runtime state the desk's tasks share OUTSIDE the kernel: the stress
+/// suite's last result and the listings engine's resting asks.
+/// Everything the strategy decides on — exposure, marks, spots, hedge
+/// positions, the policy flags — lives in the [`DeskKernel`] (SO-450).
 pub struct DeskShared {
-    pub exposure: RwLock<BookExposure>,
-    /// Net book delta per underlying coin type, underlying raw units.
-    pub book_delta_units: RwLock<HashMap<String, f64>>,
-    /// Naked written units across the book — legacy written-inventory
-    /// detection only (SO-426): the desk never writes options, so any
-    /// nonzero value is pre-existing inventory that blocks new quotes
-    /// until unwound.
-    pub naked_written_units: RwLock<u64>,
-    /// Last observed hedge funding rate (annualized).
-    pub funding_rate_annual: RwLock<f64>,
-    /// Nightly stress gate: block new short risk (V2 §7).
-    pub stress_blocked: AtomicBool,
-    /// SO-418 capital risk gate: true while the desk's vault is risk-off
-    /// (risk state not Healthy, curator commitment breached, lifecycle
-    /// not open, or settled). Quote sessions and `vault_mm` releases
-    /// abort on-chain in these states (code 124), so quoting, auction
-    /// bids and new listings hard-stop here BEFORE burning gas. Seeded at
-    /// boot from the resolved vault; refreshed from the indexer view
-    /// every book-refresher tick.
-    pub risk_off: AtomicBool,
-    pub expected_holding_years: f64,
-    /// Bid-side venue cost inputs (primary venue slippage + `[desk.hedge]`
-    /// fee/turnover/margin knobs) — SO-437.
-    pub hedge_cost: pricing::desk::HedgeCostParams,
-    /// Last signed hedge position per underlying coin type on the primary
-    /// venue, hedge units; the rebalancer writes, the bid reads (SO-437).
-    pub hedge_position_units: RwLock<HashMap<String, f64>>,
-    /// Per-bucket marks + per-unit greeks from the last refresher tick
-    /// (`/desk/state` reads; the refresher writes).
-    pub marks: RwLock<HashMap<protocol_types::ids::ObjectId, MarkSnapshot>>,
-    /// Per-symbol spot from the last refresher tick.
-    pub spots: RwLock<HashMap<String, SpotSnapshot>>,
     /// Last stress-suite result (per-scenario drawdowns + the gate).
     pub stress: RwLock<Option<StressSnapshot>>,
     /// Per-bucket resting exchange asks (the listings engine writes;
     /// `/desk/state` reads) — SO-416.
     pub listings: RwLock<HashMap<protocol_types::ids::ObjectId, listings::ListingSnapshot>>,
-    /// Venue margin picture from the monitors' last roster read (the
-    /// capital snapshot's input) — SO-444.
-    pub venue_margin: RwLock<limits::VenueMarginInputs>,
 }
 
 impl DeskShared {
-    pub async fn flow_context(&self, spot: f64, coin_type: &str) -> FlowContext {
-        FlowContext {
-            spot,
-            exposure: self.exposure.read().clone(),
-            funding_rate_annual: *self.funding_rate_annual.read(),
-            expected_holding_years: self.expected_holding_years,
-            hedge_position_units: self
-                .hedge_position_units
-                .read()
-                .get(coin_type)
-                .copied()
-                .unwrap_or(0.0),
-            hedge_cost: self.hedge_cost,
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { stress: RwLock::new(None), listings: RwLock::new(HashMap::new()) })
+    }
+}
+
+/// Where the kernel's side-effect-only commands go: P&L records to the
+/// metrics + JSONL ledger, reservation transitions to the history DB.
+/// Every adapter holds one; the commands that ARE the adapter's job
+/// (quotes, hedge orders, PTBs, policy logging) stay with the caller.
+#[derive(Clone)]
+pub struct Sinks {
+    /// P&L attribution JSONL sink; `None` in tests.
+    pub pnl_path: Option<std::path::PathBuf>,
+    /// Desk history DB — the durable side of the reservation ledger
+    /// (SO-444). `None` ⇒ reservations are process-local only.
+    pub history: Option<Arc<history::History>>,
+}
+
+impl Sinks {
+    /// Sink the P&L records and reservation transitions in `cmds`, in
+    /// order (a reservation batch is one DB write, as before).
+    pub fn apply(&self, kernel: &Arc<RwLock<DeskKernel>>, cmds: &[Command]) {
+        let mut transitions = Vec::new();
+        for cmd in cmds {
+            match cmd {
+                Command::RecordPnl(rec) => {
+                    let total = kernel.read().book.pnl_line(rec.line);
+                    book::sink_pnl_record(rec, total, self.pnl_path.as_deref());
+                }
+                Command::ReservePremium(r) | Command::ReleasePremium(r) => {
+                    transitions.push(r.clone());
+                }
+                _ => {}
+            }
+        }
+        if let Some(h) = &self.history {
+            h.record_reservations(transitions);
         }
     }
+}
+
+/// The pure slice of `[desk]` the kernel is parameterized by.
+fn kernel_config(
+    cfg: &DeskConfig,
+    primary_slippage_bps: f64,
+    quote_ttl_ms: u64,
+    settlement_decimals: u8,
+    curator_session: bool,
+    deepbook_adapter: bool,
+) -> KernelConfig {
+    KernelConfig {
+        v1: cfg.v1.into(),
+        limits: cfg.limits,
+        capital: cfg.capital.clone(),
+        hedge: cfg.hedge.clone(),
+        exits: cfg.exits.clone(),
+        quote_ttl_ms,
+        expected_holding_years: cfg.expected_holding_years,
+        stress_gap_down: cfg.monitors.stress_gap_down.abs(),
+        stress_gap_up: cfg.monitors.stress_gap_up.abs(),
+        primary_slippage_bps,
+        settlement_decimals,
+        curator_session,
+        deepbook_adapter,
+    }
+}
+
+/// The RFQ decision among one `Event::Rfq`'s commands.
+pub(crate) fn decision_of(cmds: &[Command]) -> Decision {
+    for c in cmds {
+        match c {
+            Command::Quote { premium, model_fair, surface_vol, hedge_notional, exercise_cash, .. } => {
+                return Decision::Quote {
+                    premium: *premium,
+                    model_fair: *model_fair,
+                    surface_vol: *surface_vol,
+                    hedge_notional: *hedge_notional,
+                    exercise_cash: *exercise_cash,
+                }
+            }
+            Command::Decline { reason, .. } => return Decision::Decline { reason: reason.clone() },
+            _ => {}
+        }
+    }
+    Decision::Decline { reason: "kernel produced no decision".into() }
 }
 
 // ── the desk handle (used by the WS serve loop) ────────────────────────
@@ -334,9 +370,10 @@ pub struct Desk {
     /// collateral through this, NOT through `cfg.vault_id`, which is
     /// empty whenever the desk provisioned its own.
     pub vault_id: ObjectID,
+    /// The strategy kernel: every decision the desk makes, and the
+    /// state it makes them on (SO-450).
+    pub kernel: Arc<RwLock<DeskKernel>>,
     pub shared: Arc<DeskShared>,
-    pub book: Arc<RwLock<Book>>,
-    pub models: Arc<Vec<MarketModel>>,
     /// Every hedge-venue instance (each `[[desk.hedge.venues]]` spec ×
     /// underlying). `Arc` rather than `Box` because rebalancers and
     /// monitors share the instances.
@@ -352,17 +389,12 @@ pub struct Desk {
     /// `/desk/state` surfaces).
     pub curator_refs: Option<CuratorRefs>,
     pub booted_at_ms: u64,
-    /// Static per-market metadata for `/desk/state` (aligned with
-    /// `models`).
+    /// Static per-market metadata for `/desk/state` (aligned with the
+    /// kernel's `models`).
     pub market_meta: Vec<state::MarketMeta>,
     pub settlement_coin_type: String,
     pub settlement_decimals: u8,
-    /// Desk history DB — the durable side of the reservation ledger
-    /// (SO-444). `None` ⇒ reservations are process-local only.
-    history: Option<Arc<history::History>>,
-    v1: V1BidParams,
-    limits: LimitsConfig,
-    quote_ttl_ms: u64,
+    sinks: Sinks,
 }
 
 /// What a signed WS quote reserves under (SO-444): the service request
@@ -374,37 +406,30 @@ pub struct QuoteKey {
 }
 
 impl Desk {
-    /// Flush every reservation transition queued in the book to the
-    /// durable ledger (no-op without a history DB).
-    fn persist_reservations(&self) {
-        let transitions = self.book.write().drain_reservation_transitions();
-        if let Some(h) = &self.history {
-            h.record_reservations(transitions);
-        }
-    }
-
     /// The signed quote never reached the taker (send failure): free its
     /// reservation now rather than at TTL.
     pub fn revert_quote(&self, request_id: &str, now_ms: u64) {
-        if self.book.write().revert_reservation(request_id, now_ms) {
-            self.persist_reservations();
-        }
+        let cmds = self.kernel.write().on_event(Event::QuoteReverted {
+            request_id: request_id.to_string(),
+            at_ms: now_ms,
+        });
+        self.sinks.apply(&self.kernel, &cmds);
     }
 
     /// The model's vol for one market at a point on the surface — the input
     /// the moneyness guard sizes its band from, so the band widens and
     /// narrows with the same surface the pricing uses.
     pub fn model_sigma(&self, model_index: usize, spot: f64, strike: f64, t_years: f64) -> f64 {
-        self.models[model_index].sigma(spot, strike, t_years).0
+        self.kernel.read().model_sigma(model_index, spot, strike, t_years)
     }
 
-    /// Price one WS RFQ. `Side::Writer` = retail writes (the desk buys).
-    /// `Side::Trader` = retail buys — the desk NEVER writes options
-    /// (SO-426, doc 08 §4.1), so trader RFQs always decline. With
-    /// `reserve`, a writer-flow quote reserves its premium under the
-    /// request id for the quote TTL plus the fill-detection grace, and
-    /// the reservation is persisted (pass `None` for indicative bulk
-    /// views — nothing is signed there).
+    /// Price one WS RFQ through the kernel. `Side::Writer` = retail
+    /// writes (the desk buys). `Side::Trader` = retail buys — the desk
+    /// NEVER writes options (SO-426, doc 08 §4.1), so trader RFQs always
+    /// decline. With `reserve`, a writer-flow quote reserves its premium
+    /// under the request id for the quote TTL plus the fill-detection
+    /// grace, and the reservation is persisted (pass `None` for
+    /// indicative bulk views — nothing is signed there).
     pub async fn price_ws_rfq(
         &self,
         side: Side,
@@ -414,76 +439,21 @@ impl Desk {
         reserve: Option<QuoteKey>,
         now_ms: u64,
     ) -> Decision {
-        // SO-418 risk gate: every signed quote routes collateral through
-        // `vault_mm::release`, which aborts (code 124) whenever the vault
-        // is risk-off — decline before pricing, reserving, or signing.
-        if self.shared.risk_off.load(Ordering::Relaxed) {
-            return Decision::Decline {
-                reason: "vault risk-off (capital risk state / commitment breach)".into(),
-            };
-        }
-        // Legacy written inventory is a migration problem, not a
-        // strategy: surface it and block new quoting until it is
-        // unwound (doc 08 §4.1 gate).
-        let naked = *self.shared.naked_written_units.read();
-        if naked > 0 {
-            return Decision::Decline {
-                reason: format!(
-                    "legacy written inventory present ({naked} naked units); quoting blocked until unwound"
-                ),
-            };
-        }
-        let model = &self.models[model_index];
-        let ctx = self.shared.flow_context(spot, &model.coin_type).await;
-        match side {
-            Side::Writer => {
-                let d = quote::price_writer_flow(model, &self.v1, &self.limits, &ctx, &inputs, now_ms);
-                if let (
-                    Some(key),
-                    Decision::Quote { premium, hedge_notional, exercise_cash, .. },
-                ) = (reserve, &d)
-                {
-                    // Reserve the premium while the quote is live (plus
-                    // the fill-detection grace); a detected fill, a
-                    // revert, or TTL expiry closes it.
-                    let ttl_ms = self
-                        .quote_ttl_ms
-                        .saturating_add(self.cfg.capital.reservation_grace_secs.saturating_mul(1000));
-                    let res = self.book.write().reserve_quote(
-                        book::QuoteReservation {
-                            key: key.request_id,
-                            nonce: Some(key.nonce),
-                            amount: *premium,
-                            is_put: inputs.is_put,
-                            expiry_ms: inputs.expiry_ms,
-                            exercise_cash: *exercise_cash,
-                            hedge_notional: *hedge_notional,
-                            ttl_ms,
-                        },
-                        now_ms,
-                    );
-                    match res {
-                        Ok(()) => self.persist_reservations(),
-                        Err(book::ReserveError::ExceedsNav) => {
-                            return Decision::Decline {
-                                reason: "reservation ledger full (reservations + deployed ≥ NAV)"
-                                    .into(),
-                            };
-                        }
-                        Err(book::ReserveError::DuplicateKey) => {
-                            return Decision::Decline {
-                                reason: "duplicate request id: a live reservation already holds it"
-                                    .into(),
-                            };
-                        }
-                    }
-                }
-                d
-            }
-            Side::Trader => Decision::Decline {
-                reason: "desk does not write options (long-only strategy)".into(),
-            },
-        }
+        let (request_id, nonce) = match reserve {
+            Some(k) => (k.request_id, Some(k.nonce)),
+            None => (String::new(), None),
+        };
+        let cmds = self.kernel.write().on_event(Event::Rfq {
+            request_id,
+            side,
+            market: model_index,
+            inputs,
+            spot,
+            reserve: nonce,
+            at_ms: now_ms,
+        });
+        self.sinks.apply(&self.kernel, &cmds);
+        decision_of(&cmds)
     }
 }
 
@@ -622,26 +592,27 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         horizon_ms: (p.cfg.expected_holding_years * vol_forecast::MS_PER_YEAR).round() as u64,
         convexity_from_kurtosis: p.cfg.surface.convexity_from_kurtosis,
     };
-    let models: Arc<Vec<MarketModel>> = Arc::new(
-        p.markets
-            .iter()
-            .map(|m| {
-                MarketModel::new(
-                    m.symbol.clone(),
-                    m.coin_type.clone(),
-                    Arc::clone(&m.vol_buf),
-                    Arc::clone(&m.vol_buf_long),
-                    m.fallback_vol,
-                    p.cfg.carry_yields.get(&m.symbol).copied().unwrap_or(0.0),
-                    p.rate,
-                    surface,
-                )
-                .with_estimator(Arc::clone(&m.history), estimator)
-            })
-            .collect(),
-    );
+    let models: Vec<MarketModel> = p
+        .markets
+        .iter()
+        .map(|m| {
+            MarketModel::new(
+                m.symbol.clone(),
+                m.coin_type.clone(),
+                Arc::clone(&m.vol_buf),
+                Arc::clone(&m.vol_buf_long),
+                m.fallback_vol,
+                p.cfg.carry_yields.get(&m.symbol).copied().unwrap_or(0.0),
+                p.rate,
+                surface,
+            )
+            .with_estimator(Arc::clone(&m.history), estimator)
+        })
+        .collect();
     let market_feeds: Vec<(PriceFeedId, u8)> =
         p.markets.iter().map(|m| (m.feed, m.decimals)).collect();
+    let market_names: Vec<(String, String)> =
+        p.markets.iter().map(|m| (m.symbol.clone(), m.coin_type.clone())).collect();
 
     let book = book::reconstruct(book::ReconstructParams {
         wrap: &wrap,
@@ -654,48 +625,6 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     })
     .await
     .context("reconstructing the desk book from vault custody")?;
-    let book = Arc::new(RwLock::new(book));
-
-    // Durable reservations (SO-444): re-install every still-live quote
-    // reservation from the history DB, reconciled against the chain
-    // fills the vault's collateral released while we were down.
-    if let Some(h) = &p.history {
-        let loader = Arc::clone(h);
-        let rows = tokio::task::spawn_blocking(move || loader.load_live_reservations()).await;
-        match rows.map_err(anyhow::Error::from) {
-            Ok(Ok(rows)) => {
-                let vault_pt = protocol_types::ids::ObjectId::new(vault_id.into_bytes());
-                let filled = match recent_fill_nonces(&indexer, vault_pt).await {
-                    Ok(set) => set,
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %format!("{e:#}"),
-                            "fill scan for reservation reconciliation failed; keeping rows live (TTL closes them)"
-                        );
-                        std::collections::HashSet::new()
-                    }
-                };
-                let now = auctions::now_ms();
-                let (live, transitions) = book::reconcile_reservations(rows, &filled, now);
-                let mut b = book.write();
-                let restored = live.len();
-                for r in live {
-                    b.restore_reservation(r);
-                }
-                tracing::info!(
-                    restored,
-                    closed = transitions.len(),
-                    reserved = b.reserved_total(),
-                    "quote reservations reconstructed from durable state + chain fills"
-                );
-                h.record_reservations(transitions);
-            }
-            Ok(Err(e)) | Err(e) => tracing::warn!(
-                error = %format!("{e:#}"),
-                "durable reservation load failed; starting with an empty ledger"
-            ),
-        }
-    }
 
     // Curator refs for vault-funded flows (bids escrowed from vault
     // balances, vault-custody exits). `resolve` already proved this wallet
@@ -727,22 +656,76 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
     let venue_specs = p.cfg.hedge.venue_specs()?;
     let primary_spec = venue_specs[0].clone();
 
-    let shared = Arc::new(DeskShared {
-        exposure: RwLock::new(BookExposure::default()),
-        book_delta_units: RwLock::new(HashMap::new()),
-        naked_written_units: RwLock::new(0),
-        funding_rate_annual: RwLock::new(primary_spec.funding_rate_annual),
-        stress_blocked: AtomicBool::new(false),
-        risk_off: AtomicBool::new(resolved.risk_off),
-        expected_holding_years: p.cfg.expected_holding_years,
-        hedge_cost: p.cfg.hedge.cost_params(primary_spec.slippage_bps),
-        hedge_position_units: RwLock::new(HashMap::new()),
-        marks: RwLock::new(HashMap::new()),
-        spots: RwLock::new(HashMap::new()),
-        stress: RwLock::new(None),
-        listings: RwLock::new(HashMap::new()),
-        venue_margin: RwLock::new(limits::VenueMarginInputs::default()),
-    });
+    // The strategy kernel (SO-450): the book, the exposure, the hedge
+    // state and the policy flags, driven by the tasks below through
+    // events. The kill-switch NAV history survives restarts on disk.
+    let kill = limits::KillSwitch::load(
+        std::path::PathBuf::from(&p.cfg.state_dir).join("desk-nav-history.json"),
+    );
+    let mut kernel = DeskKernel::new(
+        kernel_config(
+            &p.cfg,
+            primary_spec.slippage_bps,
+            p.quote_ttl_ms,
+            p.settlement_decimals,
+            curator_refs.is_some(),
+            p.deepbook_adapter.is_some(),
+        ),
+        models,
+        book,
+        primary_spec.funding_rate_annual,
+        resolved.risk_off,
+        auctions::now_ms(),
+    );
+    kernel.kill_switch = kill.state().clone();
+    let kernel = Arc::new(RwLock::new(kernel));
+
+    // Durable reservations (SO-444): re-install every still-live quote
+    // reservation from the history DB, reconciled against the chain
+    // fills the vault's collateral released while we were down.
+    if let Some(h) = &p.history {
+        let loader = Arc::clone(h);
+        let rows = tokio::task::spawn_blocking(move || loader.load_live_reservations()).await;
+        match rows.map_err(anyhow::Error::from) {
+            Ok(Ok(rows)) => {
+                let vault_pt = protocol_types::ids::ObjectId::new(vault_id.into_bytes());
+                let filled = match recent_fill_nonces(&indexer, vault_pt).await {
+                    Ok(set) => set,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %format!("{e:#}"),
+                            "fill scan for reservation reconciliation failed; keeping rows live (TTL closes them)"
+                        );
+                        std::collections::HashSet::new()
+                    }
+                };
+                let now = auctions::now_ms();
+                let (live, transitions) = book::reconcile_reservations(rows, &filled, now);
+                let mut k = kernel.write();
+                let restored = live.len();
+                for r in live {
+                    k.book.restore_reservation(r);
+                }
+                tracing::info!(
+                    restored,
+                    closed = transitions.len(),
+                    reserved = k.book.reserved_total(),
+                    "quote reservations reconstructed from durable state + chain fills"
+                );
+                h.record_reservations(transitions);
+            }
+            Ok(Err(e)) | Err(e) => tracing::warn!(
+                error = %format!("{e:#}"),
+                "durable reservation load failed; starting with an empty ledger"
+            ),
+        }
+    }
+
+    let sinks = Sinks {
+        pnl_path: Some(std::path::PathBuf::from(&p.cfg.pnl_jsonl_path)),
+        history: p.history.clone(),
+    };
+    let shared = DeskShared::new();
 
     let mut hedge_venues: Vec<Arc<dyn hedge::HedgeVenue>> = Vec::new();
     let mut monitor_venues: Vec<monitors::MonitorVenue> = Vec::new();
@@ -786,9 +769,10 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         api,
         vault_id,
         trading_vault_package: p.trading_vault_package,
-        book: Arc::clone(&book),
-        shared: Arc::clone(&shared),
-        models: Arc::clone(&models),
+        kernel: Arc::clone(&kernel),
+        sinks: sinks.clone(),
+        kill,
+        markets: market_names,
         market_feeds: market_feeds.clone(),
         price_cache: p.price_cache.clone(),
         settlement_feed: p.settlement_feed,
@@ -796,7 +780,6 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         staleness: p.staleness,
         options_package: Some(p.core_package.to_hex_literal()),
         settlement_coin_type: p.settlement_coin_type.clone(),
-        history: p.history.clone(),
     });
 
     // Fill detection → spread-line P&L attribution, resumed from the
@@ -805,27 +788,25 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         cfg: p.cfg.clone(),
         indexer: indexer_graphql::IndexerClient::new(p.indexer_url.clone()),
         api: api_service_client::ApiServiceClient::new(&p.api_url),
-        book: Arc::clone(&book),
-        models: Arc::clone(&models),
+        kernel: Arc::clone(&kernel),
+        sinks: sinks.clone(),
         market_feeds: market_feeds.clone(),
         price_cache: p.price_cache.clone(),
         settlement_feed: p.settlement_feed,
         settlement_decimals: p.settlement_decimals,
         staleness: p.staleness,
         vault_id: protocol_types::ids::ObjectId::new(vault_id.into_bytes()),
-        history: p.history.clone(),
         rfq: p.history.as_ref().and_then(|h| h.rfq_recorder()),
     });
 
     // Hedge rebalancers (bands, not clocks) — primary venue per market.
     for (i, m) in p.markets.iter().enumerate() {
         spawn_rebalancer(RebalancerParams {
-            hedge_cfg: p.cfg.hedge.clone(),
-            pnl_path: std::path::PathBuf::from(&p.cfg.pnl_jsonl_path),
+            interval_secs: p.cfg.hedge.interval_secs,
             venue: Arc::clone(&primary_venues[i]),
-            shared: Arc::clone(&shared),
-            book: Arc::clone(&book),
-            coin_type: m.coin_type.clone(),
+            kernel: Arc::clone(&kernel),
+            sinks: sinks.clone(),
+            market: i,
             symbol: m.symbol.clone(),
             feed: m.feed,
             decimals: m.decimals,
@@ -846,25 +827,19 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
             (Some(options_adapter_package), Some(curator)) => {
                 auctions::spawn_bidder(auctions::AuctionBidderParams {
                     cfg: p.cfg.auctions.clone(),
-                    v1: p.cfg.v1.into(),
-                    limits: p.cfg.limits,
-                    shared: Arc::clone(&shared),
+                    kernel: Arc::clone(&kernel),
                     secrets: p.secrets.clone(),
                     network: p.network,
                     options_adapter_package,
                     curator,
-                    book: Arc::clone(&book),
                     api_url: p.api_url.clone(),
                     indexer_url: p.indexer_url.clone(),
                     price_cache: p.price_cache.clone(),
-                    models: Arc::clone(&models),
                     settlement_feed: p.settlement_feed,
                     settlement_coin_type: p.settlement_coin_type.clone(),
                     settlement_decimals: p.settlement_decimals,
                     market_feeds: market_feeds.clone(),
                     staleness: p.staleness,
-                    expected_holding_years: p.cfg.expected_holding_years,
-                    slippage_bps: primary_spec.slippage_bps,
                 })
             }
             _ => tracing::warn!(
@@ -880,9 +855,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         cfg: p.cfg.exits.clone(),
         secrets: p.secrets.clone(),
         network: p.network,
-        shared: Arc::clone(&shared),
-        book: Arc::clone(&book),
-        models: Arc::clone(&models),
+        kernel: Arc::clone(&kernel),
         market_feeds: market_feeds.clone(),
         price_cache: p.price_cache.clone(),
         settlement_feed: p.settlement_feed,
@@ -906,7 +879,7 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         refresh_secs: p.cfg.refresh_secs,
         secrets: p.secrets.clone(),
         network: p.network,
-        book: Arc::clone(&book),
+        kernel: Arc::clone(&kernel),
         shared: Arc::clone(&shared),
         curator: curator_refs,
         vault_protocol_config: p.vault_protocol_config,
@@ -929,9 +902,8 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         monitors::spawn_monitors(monitors::MonitorsParams {
             cfg: p.cfg.monitors,
             limits: p.cfg.limits,
+            kernel: Arc::clone(&kernel),
             shared: Arc::clone(&shared),
-            book: Arc::clone(&book),
-            models: Arc::clone(&models),
             market_feeds: market_feeds.clone(),
             price_cache: p.price_cache.clone(),
             settlement_feed: p.settlement_feed,
@@ -963,15 +935,11 @@ pub async fn spawn_desk(p: DeskParams) -> Result<Arc<Desk>> {
         })
         .collect();
     Ok(Arc::new(Desk {
-        history: p.history,
-        v1: p.cfg.v1.into(),
-        limits: p.cfg.limits,
-        quote_ttl_ms: p.quote_ttl_ms,
+        sinks,
         cfg: p.cfg,
         vault_id,
+        kernel,
         shared,
-        book,
-        models,
         hedge_venues,
         venue_roster,
         provisioned: resolved.provisioned,
@@ -992,9 +960,13 @@ struct RefresherParams {
     api: api_service_client::ApiServiceClient,
     vault_id: ObjectID,
     trading_vault_package: ObjectID,
-    book: Arc<RwLock<Book>>,
-    shared: Arc<DeskShared>,
-    models: Arc<Vec<MarketModel>>,
+    kernel: Arc<RwLock<DeskKernel>>,
+    sinks: Sinks,
+    /// The kill switch's persisted NAV history: the kernel's state is
+    /// written back every tick.
+    kill: limits::KillSwitch,
+    /// `(symbol, coin type)` per model, aligned with `market_feeds`.
+    markets: Vec<(String, String)>,
     market_feeds: Vec<(PriceFeedId, u8)>,
     price_cache: PriceCache,
     settlement_feed: PriceFeedId,
@@ -1002,8 +974,6 @@ struct RefresherParams {
     staleness: Staleness,
     options_package: Option<String>,
     settlement_coin_type: String,
-    /// Durable reservation ledger sink (TTL expiries) — SO-444.
-    history: Option<Arc<history::History>>,
 }
 
 /// The nonces of every recent chain fill the vault's collateral released
@@ -1028,14 +998,14 @@ async fn recent_fill_nonces(
     Ok(out)
 }
 
-fn spawn_book_refresher(p: RefresherParams) {
+/// The refresher is the kernel's `MarkUpdate` adapter: every tick it
+/// reads the chain and the indexer, hands the observations to the
+/// kernel as one event, and executes what comes back (P&L records,
+/// reservation expiries, policy transitions).
+fn spawn_book_refresher(mut p: RefresherParams) {
     tokio::spawn(async move {
-        let mut kill = limits::KillSwitch::load(
-            std::path::PathBuf::from(&p.cfg.state_dir).join("desk-nav-history.json"),
-        );
         let mut ticker = tokio::time::interval(Duration::from_secs(p.cfg.refresh_secs.max(15)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut last_theta_accrual = auctions::now_ms();
         let mut tick_count: u64 = 0;
         // Last successful chain reads for the capital snapshot: a
         // transient RPC failure reuses them rather than reporting an
@@ -1050,7 +1020,7 @@ fn spawn_book_refresher(p: RefresherParams) {
             // Custody re-sync every 5th tick (auction wins / keeper
             // sweeps / exits / new writes change custody out-of-band):
             // held coins AND written positions, then re-net `covered`.
-            if tick_count % 5 == 1 {
+            let (holdings, written) = if tick_count % 5 == 1 {
                 let holdings = book::fetch_holdings(
                     &p.wrap,
                     &p.indexer,
@@ -1062,21 +1032,24 @@ fn spawn_book_refresher(p: RefresherParams) {
                 .await;
                 let written =
                     book::fetch_written(&p.wrap, &p.indexer, &p.api, p.vault_id).await;
-                let mut b = p.book.write();
-                match holdings {
-                    Ok(h) => b.holdings = h,
+                let holdings = match holdings {
+                    Ok(h) => Some(h),
                     Err(e) => {
-                        tracing::debug!(error = %format!("{e:#}"), "custody re-sync failed; keeping holdings")
+                        tracing::debug!(error = %format!("{e:#}"), "custody re-sync failed; keeping holdings");
+                        None
                     }
-                }
-                match written {
-                    Ok(w) => b.written = w,
+                };
+                let written = match written {
+                    Ok(w) => Some(w),
                     Err(e) => {
-                        tracing::debug!(error = %format!("{e:#}"), "written re-sync failed; keeping written lines")
+                        tracing::debug!(error = %format!("{e:#}"), "written re-sync failed; keeping written lines");
+                        None
                     }
-                }
-                b.recompute_covered();
-            }
+                };
+                (holdings, written)
+            } else {
+                (None, None)
+            };
 
             // Budget base + risk state from the indexer view (SO-418:
             // latest/junior NAV, not total pps × shares — see
@@ -1084,93 +1057,38 @@ fn spawn_book_refresher(p: RefresherParams) {
             // snapshot (appraisal freshness, external account, queued
             // withdrawals — SO-444).
             let mut vault_view: Option<indexer_graphql::TradingVault> = None;
-            let nav = match p.indexer.trading_vaults().await {
+            let (nav, risk_off) = match p.indexer.trading_vaults().await {
                 Ok(vaults) => {
                     let ours = vaults.iter().find(|v| {
                         let hex = p.vault_id.to_hex_literal();
                         v.vault_id.to_hex() == hex || format!("0x{}", v.vault_id.to_hex()) == hex
                     });
                     vault_view = ours.cloned();
-                    if let Some(v) = ours {
-                        // Risk gate refresh, with transition logging: the
-                        // desk keeps running (healthy-but-idle) either way.
-                        let now_off = book::vault_risk_off(v);
-                        let was_off = p.shared.risk_off.swap(now_off, Ordering::Relaxed);
-                        if now_off && !was_off {
-                            tracing::warn!(
-                                vault = %p.vault_id,
-                                risk_state = v.risk_state,
-                                commitment_breached = v.curator_commitment_breached,
-                                state = %v.state,
-                                settled = v.settled,
-                                "desk vault went RISK-OFF — quoting, bids and new listings stop"
-                            );
-                        } else if !now_off && was_off {
-                            tracing::info!(vault = %p.vault_id, "desk vault risk state cured — resuming");
-                        }
-                        metrics::gauge!("mm_desk_vault_risk_off").set(if now_off { 1.0 } else { 0.0 });
-                    }
-                    ours.and_then(book::budget_base)
+                    (ours.and_then(book::budget_base), ours.map(book::vault_risk_off))
                 }
                 Err(e) => {
                     tracing::debug!(error = %format!("{e:#}"), "NAV refresh: indexer unreachable");
-                    None
+                    (None, None)
                 }
             };
 
             // Fresh spot per model (holdings/written marks + `/desk/state`
             // share the same per-tick observation).
-            let spot_by_model: Vec<Option<f64>> = (0..p.models.len())
-                .map(|mi| {
-                    let (feed, decimals) = p.market_feeds[mi];
+            let spot_by_model: Vec<Option<f64>> = p
+                .market_feeds
+                .iter()
+                .map(|(feed, decimals)| {
                     compute_spot_from_cache(
                         &p.price_cache,
-                        feed,
+                        *feed,
                         p.settlement_feed,
-                        decimals,
+                        *decimals,
                         p.settlement_decimals,
                         p.staleness,
                     )
                     .ok()
                 })
                 .collect();
-            {
-                let mut spots = p.shared.spots.write();
-                for (mi, m) in p.models.iter().enumerate() {
-                    if let Some(spot) = spot_by_model[mi] {
-                        spots.insert(m.symbol.clone(), SpotSnapshot { spot, at_ms: now });
-                    }
-                }
-            }
-
-            // Marks + greeks per holding/written line: the kernel's mark
-            // pass (`desk_core::exposure`, SO-450) over the book.
-            let pass = {
-                let b = p.book.read();
-                desk_core::exposure::mark_book(desk_core::exposure::MarkInputs {
-                    models: &p.models,
-                    holdings: &b.holdings,
-                    written: &b.written,
-                    spot_by_model: &spot_by_model,
-                    now_ms: now,
-                    stress_gap_down: p.cfg.monitors.stress_gap_down.abs(),
-                    stress_gap_up: p.cfg.monitors.stress_gap_up.abs(),
-                    quote_flash_capacity: p.cfg.capital.quote_flash_capacity,
-                    base_flash_capacity: p.cfg.capital.base_flash_capacity,
-                })
-            };
-            let desk_core::exposure::MarkPass {
-                mut exposure,
-                marks,
-                delta_by_coin,
-                deployed,
-                call_strike_cash,
-                put_underlying_value,
-                exercise_demand_by_expiry,
-                hedge_notional,
-                hedge_notional_by_expiry,
-            } = pass;
-            *p.shared.marks.write() = marks;
 
             // Capital snapshot inputs read from chain (SO-444): the
             // vault's free settlement + free underlying (valued at spot)
@@ -1187,22 +1105,22 @@ fn spawn_book_refresher(p: RefresherParams) {
                 match settlement {
                     Ok(s) => {
                         let mut underlying = HashMap::new();
-                        for (mi, m) in p.models.iter().enumerate() {
+                        for (mi, (symbol, coin_type)) in p.markets.iter().enumerate() {
                             let Some(spot) = spot_by_model[mi] else { continue };
                             match book::free_balance_of(
                                 &p.wrap,
                                 p.trading_vault_package,
                                 p.vault_id,
-                                &m.coin_type,
+                                coin_type,
                             )
                             .await
                             {
                                 Ok(units) => {
-                                    underlying.insert(m.symbol.clone(), units as f64 * spot);
+                                    underlying.insert(symbol.clone(), units as f64 * spot);
                                 }
                                 Err(e) => tracing::debug!(
                                     error = %format!("{e:#}"),
-                                    symbol = %m.symbol,
+                                    symbol = %symbol,
                                     "free underlying read failed; counted as 0 this tick"
                                 ),
                             }
@@ -1256,71 +1174,56 @@ fn spawn_book_refresher(p: RefresherParams) {
                 None => None,
             };
 
-            // Theta accrual → P&L attribution.
-            let dt_days = now.saturating_sub(last_theta_accrual) as f64 / 86_400_000.0;
-            last_theta_accrual = now;
-            let transitions = {
-                let mut b = p.book.write();
-                if let Some(nav) = nav {
-                    b.nav = nav;
-                }
-                b.deployed = deployed.max(0.0) as u64;
-                b.expire_reservations(now);
-                if dt_days > 0.0 && exposure.theta_cost_per_day > 0.0 {
-                    b.record_pnl(
-                        PnlLine::Theta,
-                        -exposure.theta_cost_per_day * dt_days,
-                        "accrual",
-                        now,
-                    );
-                    book::flush_pnl(
-                        &mut b,
-                        Some(std::path::Path::new(&p.cfg.pnl_jsonl_path)),
-                    );
-                }
-                exposure.nav = b.nav as f64;
-                exposure.reserved = b.reserved_total() as f64;
-                exposure.premium_deployed = b.deployed as f64;
-                *p.shared.naked_written_units.write() = b.naked_written_units();
-                let reserved = b.reserved_split();
-                exposure.capital = limits::build_capital_snapshot(
-                    &p.cfg.capital,
-                    limits::CapitalInputs {
-                        now_ms: now,
-                        appraised_nav: nav.map(|n| n as f64),
-                        appraisal_at: vault_view.as_ref().and_then(|v| v.nav_updated_at_ms),
-                        free_settlement: free.0,
-                        free_underlying_by_asset: free.1,
-                        premium_deployed: exposure.premium_deployed,
-                        call_premium_marked: exposure.call_premium,
-                        put_premium_marked: exposure.put_premium,
-                        premium_by_expiry_marked: &exposure.premium_by_expiry,
-                        call_strike_cash_marked: call_strike_cash,
-                        put_underlying_value_marked: put_underlying_value,
-                        exercise_demand_by_expiry_marked: &exercise_demand_by_expiry,
-                        hedge_notional_marked: hedge_notional,
-                        hedge_notional_by_expiry_marked: &hedge_notional_by_expiry,
-                        reserved: &reserved,
-                        queued_withdrawal_value,
-                        external,
-                        venue: *p.shared.venue_margin.read(),
-                        initial_margin_fraction: p.cfg.hedge.initial_margin_fraction,
-                        stress_gap: p.cfg.monitors.stress_gap_down.abs().max(p.cfg.monitors.stress_gap_up.abs()),
-                    },
-                );
-                b.drain_reservation_transitions()
+            // The observations, as one event; the kernel marks the book,
+            // accrues theta, expires reservations, builds the capital
+            // snapshot and checks the kill switch.
+            let update = desk_core::kernel::MarkUpdate {
+                at_ms: now,
+                holdings,
+                written,
+                nav,
+                appraisal_at: vault_view.as_ref().and_then(|v| v.nav_updated_at_ms),
+                risk_off,
+                spot_by_model,
+                free_settlement: free.0,
+                free_underlying_by_asset: free.1,
+                external,
+                queued_withdrawal_value,
             };
-            if let Some(h) = &p.history {
-                h.record_reservations(transitions);
+            let cmds = p.kernel.write().on_event(Event::MarkUpdate(Box::new(update)));
+            p.sinks.apply(&p.kernel, &cmds);
+            for cmd in &cmds {
+                match cmd {
+                    // Risk gate transitions, with the vault view's detail:
+                    // the desk keeps running (healthy-but-idle) either way.
+                    Command::ActivatePolicy(PolicyState::RiskOff) => {
+                        if let Some(v) = &vault_view {
+                            tracing::warn!(
+                                vault = %p.vault_id,
+                                risk_state = v.risk_state,
+                                commitment_breached = v.curator_commitment_breached,
+                                state = %v.state,
+                                settled = v.settled,
+                                "desk vault went RISK-OFF — quoting, bids and new listings stop"
+                            );
+                        }
+                    }
+                    Command::ClearPolicy(PolicyState::RiskOff) => {
+                        tracing::info!(vault = %p.vault_id, "desk vault risk state cured — resuming");
+                    }
+                    _ => {}
+                }
             }
-            if let Some(r) = exposure.capital.risk_nav {
+            let k = p.kernel.read();
+            if vault_view.is_some() {
+                metrics::gauge!("mm_desk_vault_risk_off").set(if k.risk_off { 1.0 } else { 0.0 });
+            }
+            if let Some(r) = k.exposure.capital.risk_nav {
                 metrics::gauge!("mm_desk_risk_nav").set(r);
             }
             metrics::gauge!("mm_desk_capital_stale")
-                .set(if exposure.capital.stale.is_empty() { 0.0 } else { 1.0 });
-            exposure.kill_switch = kill.check(&p.cfg.limits, exposure.nav as u64, now);
-            *p.shared.book_delta_units.write() = delta_by_coin;
-            *p.shared.exposure.write() = exposure;
+                .set(if k.exposure.capital.stale.is_empty() { 0.0 } else { 1.0 });
+            p.kill.persist(&k.kill_switch);
         }
     });
 }
@@ -1351,15 +1254,14 @@ struct FillPollerParams {
     cfg: DeskConfig,
     indexer: indexer_graphql::IndexerClient,
     api: api_service_client::ApiServiceClient,
-    book: Arc<RwLock<Book>>,
-    models: Arc<Vec<MarketModel>>,
+    kernel: Arc<RwLock<DeskKernel>>,
+    sinks: Sinks,
     market_feeds: Vec<(PriceFeedId, u8)>,
     price_cache: PriceCache,
     settlement_feed: PriceFeedId,
     settlement_decimals: u8,
     staleness: Staleness,
     vault_id: protocol_types::ids::ObjectId,
-    history: Option<Arc<history::History>>,
     /// RFQ-funnel sink (SO-425), `None` unless the recorder flag is on.
     rfq: Option<Arc<dyn history::RfqRecorder>>,
 }
@@ -1375,11 +1277,12 @@ enum FairOutcome {
     Retry,
 }
 
-/// Poll the indexer events feed since the persisted cursor and attribute
-/// each detected fill to the spread line (see `book::apply_fills` for
-/// the documented fair-at-detection approximation). First boot seeds the
-/// cursor at the indexer head so pre-desk history is never replayed as
-/// fills; afterwards the cursor only advances write-after-apply.
+/// Poll the indexer events feed since the persisted cursor and hand
+/// each detected fill to the kernel as a `QuoteFilled` event (see
+/// `book::apply_fills` for the documented fair-at-detection
+/// approximation). First boot seeds the cursor at the indexer head so
+/// pre-desk history is never replayed as fills; afterwards the cursor
+/// only advances write-after-apply.
 fn spawn_fill_poller(p: FillPollerParams) {
     tokio::spawn(async move {
         let cursor_path =
@@ -1506,29 +1409,9 @@ fn spawn_fill_poller(p: FillPollerParams) {
             if priced.is_empty() {
                 continue;
             }
-            let (applied, transitions) = {
-                let mut b = p.book.write();
-                let applied = book::apply_fills(
-                    &mut b,
-                    &mut cur,
-                    &cursor_path,
-                    Some(std::path::Path::new(&p.cfg.pnl_jsonl_path)),
-                    &priced,
-                    now,
-                );
-                // A chain fill closes the quote's reservation (SO-444):
-                // ground truth, idempotent when it is already closed.
-                for (f, _) in &priced {
-                    if let book::FillLink::WsQuote { nonce } = &f.link {
-                        b.fill_reservation_by_nonce(*nonce, now);
-                    }
-                }
-                (applied, b.drain_reservation_transitions())
-            };
+            let applied =
+                book::apply_fills(&p.kernel, &p.sinks, &mut cur, &cursor_path, &priced, now);
             cursor = Some(cur);
-            if let Some(h) = &p.history {
-                h.record_reservations(transitions);
-            }
             close_filled_rfqs(&p.rfq, &priced, now);
             if applied > 0 {
                 tracing::info!(applied, cursor = cur.last_sequence, "fills attributed to spread line");
@@ -1572,7 +1455,8 @@ async fn fill_fair_total(
             return FairOutcome::Retry;
         }
     };
-    let Some(mi) = p.models.iter().position(|m| m.coin_type == bucket.asset_coin_type) else {
+    let k = p.kernel.read();
+    let Some(mi) = k.models.iter().position(|m| m.coin_type == bucket.asset_coin_type) else {
         return FairOutcome::Skip;
     };
     let (feed, decimals) = p.market_feeds[mi];
@@ -1587,21 +1471,19 @@ async fn fill_fair_total(
         return FairOutcome::Retry;
     };
     let t = bucket.expiry_ms.saturating_sub(now_ms) as f64 / 1000.0 / 86_400.0 / 365.0;
-    let k = bucket.strike as f64 / 10f64.powi(bucket.strike_scale as i32);
-    let (sigma, _) = p.models[mi].sigma(spot, k, t);
-    FairOutcome::Total(p.models[mi].fair_per_unit(bucket.is_put, spot, k, t, sigma) * f.amount as f64)
+    let k_strike = bucket.strike as f64 / 10f64.powi(bucket.strike_scale as i32);
+    let (sigma, _) = k.models[mi].sigma(spot, k_strike, t);
+    FairOutcome::Total(k.models[mi].fair_per_unit(bucket.is_put, spot, k_strike, t, sigma) * f.amount as f64)
 }
 
 // ── hedge rebalancer ───────────────────────────────────────────────────
 
 struct RebalancerParams {
-    hedge_cfg: hedge::HedgeConfig,
-    /// P&L attribution JSONL sink (scalp + funding lines).
-    pnl_path: std::path::PathBuf,
+    interval_secs: u64,
     venue: Arc<dyn hedge::HedgeVenue>,
-    shared: Arc<DeskShared>,
-    book: Arc<RwLock<Book>>,
-    coin_type: String,
+    kernel: Arc<RwLock<DeskKernel>>,
+    sinks: Sinks,
+    market: usize,
     symbol: String,
     feed: PriceFeedId,
     decimals: u8,
@@ -1611,55 +1493,39 @@ struct RebalancerParams {
     staleness: Staleness,
 }
 
-/// One market's rebalancer: its dependencies plus the state one tick
-/// hands the next (SO-438 working orders, the scalp high-water mark).
-/// The loop body is [`Rebalancer::rebalance_once`] so the runtime path
-/// is testable tick by tick (SO-447).
+/// One market's rebalancer — the kernel's hedge adapter: venue outcomes
+/// and readbacks go in as events, the kernel's orders come out as
+/// commands the venue executes. The loop body is
+/// [`Rebalancer::rebalance_once`] so the runtime path is testable tick
+/// by tick (SO-447).
 pub(crate) struct Rebalancer {
-    hedge_cfg: hedge::HedgeConfig,
     venue: Arc<dyn hedge::HedgeVenue>,
-    shared: Arc<DeskShared>,
-    book: Arc<RwLock<Book>>,
-    coin_type: String,
+    kernel: Arc<RwLock<DeskKernel>>,
+    sinks: Sinks,
+    market: usize,
     symbol: String,
-    /// Venue realized P&L already attributed to the scalp line.
-    last_realized: f64,
-    /// Process-local order ids (unique per run; the funnel/event log
-    /// carries the venue name alongside).
-    next_order_id: hedge::OrderId,
-    /// Working orders (SO-438): partial fills and late fills arrive
-    /// through `poll_events`; unfilled size counts toward the net so a
-    /// slow fill is never re-submitted, and stale orders are cancelled.
-    open: hedge::OpenOrders,
-    /// P&L attribution JSONL sink (scalp + funding lines); `None` in
-    /// tests.
-    pnl_path: Option<std::path::PathBuf>,
 }
 
 impl Rebalancer {
     async fn new(
-        hedge_cfg: hedge::HedgeConfig,
         venue: Arc<dyn hedge::HedgeVenue>,
-        shared: Arc<DeskShared>,
-        book: Arc<RwLock<Book>>,
-        coin_type: String,
+        kernel: Arc<RwLock<DeskKernel>>,
+        sinks: Sinks,
+        market: usize,
         symbol: String,
-        pnl_path: Option<std::path::PathBuf>,
     ) -> Self {
         // Seed from the venue so a restart doesn't re-attribute the whole
         // persisted realized P&L as fresh scalp.
-        let last_realized = venue.realized_pnl().await.unwrap_or(0.0);
-        Self {
-            hedge_cfg,
-            venue,
-            shared,
-            book,
-            coin_type,
-            symbol,
-            last_realized,
-            next_order_id: 0,
-            open: hedge::OpenOrders::default(),
-            pnl_path,
+        let realized = venue.realized_pnl().await.unwrap_or(0.0);
+        kernel.write().seed_hedge_realized(market, realized);
+        Self { venue, kernel, sinks, market, symbol }
+    }
+
+    /// Hand the venue's events to the kernel.
+    fn feed(&self, events: &[hedge::HedgeEvent], now: u64) {
+        let mut k = self.kernel.write();
+        for ev in events {
+            k.on_event(Event::Hedge { market: self.market, event: ev.clone(), at_ms: now });
         }
     }
 
@@ -1667,21 +1533,16 @@ impl Rebalancer {
     /// working orders are still reconciled (events drained, stale ones
     /// cancelled) but nothing new is planned.
     pub(crate) async fn rebalance_once(&mut self, now: u64, spot: Option<f64>) {
-        let timeout_ms = self.hedge_cfg.order_timeout_secs.max(1) * 1000;
         match self.venue.poll_events().await {
-            Ok(events) => {
-                for ev in &events {
-                    self.open.apply(ev);
-                }
-            }
+            Ok(events) => self.feed(&events, now),
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "hedge event poll failed"),
         }
-        for id in self.open.stale(now, timeout_ms) {
+        let sweep = self.kernel.write().on_event(Event::HedgeTimer { market: self.market, at_ms: now });
+        for cmd in sweep {
+            let Command::CancelHedgeOrder { id, .. } = cmd else { continue };
             match self.venue.execute(hedge::HedgeCommand::Cancel(id)).await {
                 Ok(events) => {
-                    for ev in &events {
-                        self.open.apply(ev);
-                    }
+                    self.feed(&events, now);
                     tracing::warn!(venue = self.venue.name(), symbol = %self.symbol, order = id, "stale hedge order cancelled");
                 }
                 Err(e) => tracing::warn!(error = %format!("{e:#}"), order = id, "hedge cancel failed"),
@@ -1700,14 +1561,6 @@ impl Rebalancer {
         let Some(spot) = spot else {
             return;
         };
-        let nav = self.shared.exposure.read().nav;
-        let delta = self
-            .shared
-            .book_delta_units
-            .read()
-            .get(&self.coin_type)
-            .copied()
-            .unwrap_or(0.0);
         let position = match self.venue.position_units().await {
             Ok(s) => s,
             Err(e) => {
@@ -1715,27 +1568,35 @@ impl Rebalancer {
                 return;
             }
         };
-        self.shared.hedge_position_units.write().insert(self.coin_type.clone(), position);
         // Funding accrues on the signed position every tick, as its
         // own P&L line — never through the fills-only realized figure.
         match self.venue.accrue_funding(now, spot).await {
             Ok(paid) if paid != 0.0 => {
-                let mut b = self.book.write();
-                b.record_pnl(PnlLine::Funding, -paid, "hedge funding accrual", now);
-                book::flush_pnl(&mut b, self.pnl_path.as_deref());
+                let cmds = self.kernel.write().on_event(Event::FundingSettled {
+                    market: self.market,
+                    paid,
+                    at_ms: now,
+                });
+                self.sinks.apply(&self.kernel, &cmds);
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "hedge funding accrual failed"),
         }
-        let band = hedge::band_units(&self.hedge_cfg, nav, spot, funding);
-        if let Some(size) = hedge::plan_hedge_order(delta, position, self.open.working_units(), band) {
-            self.next_order_id += 1;
-            let order = hedge::HedgeOrder { id: self.next_order_id, size_units: size, spot };
-            self.open.submit(&order, now);
+        let cmds = {
+            let mut k = self.kernel.write();
+            k.on_event(Event::Spot { market: self.market, spot, at_ms: now });
+            k.on_event(Event::HedgeTick {
+                market: self.market,
+                position_units: position,
+                funding_rate_annual: funding,
+                at_ms: now,
+            })
+        };
+        for cmd in cmds {
+            let Command::SubmitHedgeOrder { order, .. } = cmd else { continue };
             match self.venue.execute(hedge::HedgeCommand::Submit(order)).await {
                 Ok(events) => {
                     for ev in &events {
-                        self.open.apply(ev);
                         if let hedge::HedgeEvent::Rejected { order, reason } = ev {
                             tracing::error!(
                                 alert_id = "tx-failed-mm-bot-desk",
@@ -1747,6 +1608,7 @@ impl Rebalancer {
                             );
                         }
                     }
+                    self.feed(&events, now);
                 }
                 Err(e) => {
                     tracing::error!(
@@ -1761,13 +1623,13 @@ impl Rebalancer {
             }
             // Long-gamma rebalancing sells high / buys low: realized
             // hedge P&L is the scalp line.
-            let realized = self.venue.realized_pnl().await.unwrap_or(self.last_realized);
-            let scalp = realized - self.last_realized;
-            self.last_realized = realized;
-            if scalp != 0.0 {
-                let mut b = self.book.write();
-                b.record_pnl(PnlLine::Scalp, scalp, "hedge rebalance", auctions::now_ms());
-                book::flush_pnl(&mut b, self.pnl_path.as_deref());
+            if let Ok(realized) = self.venue.realized_pnl().await {
+                let cmds = self.kernel.write().on_event(Event::HedgeRealized {
+                    market: self.market,
+                    realized_pnl: realized,
+                    at_ms: now,
+                });
+                self.sinks.apply(&self.kernel, &cmds);
             }
         }
     }
@@ -1775,19 +1637,9 @@ impl Rebalancer {
 
 fn spawn_rebalancer(p: RebalancerParams) {
     tokio::spawn(async move {
-        let mut ticker =
-            tokio::time::interval(Duration::from_secs(p.hedge_cfg.interval_secs.max(5)));
+        let mut ticker = tokio::time::interval(Duration::from_secs(p.interval_secs.max(5)));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut r = Rebalancer::new(
-            p.hedge_cfg,
-            p.venue,
-            p.shared,
-            p.book,
-            p.coin_type,
-            p.symbol,
-            Some(p.pnl_path),
-        )
-        .await;
+        let mut r = Rebalancer::new(p.venue, p.kernel, p.sinks, p.market, p.symbol).await;
         loop {
             ticker.tick().await;
             let spot = compute_spot_from_cache(
@@ -1854,49 +1706,48 @@ mod tests {
         RfqInputs { write_amount: 1_000_000, is_put, strike: 100, strike_scale: 0, expiry_ms: 30 * DAY_MS }
     }
 
-    fn desk_with(shared: Arc<DeskShared>, venue: Arc<dyn hedge::HedgeVenue>) -> Desk {
-        testkit::desk(shared, Arc::new(RwLock::new(Book::new(1_000_000_000))), venue)
-    }
-
     /// Doc 08 §4.1 gate 1, through `Desk::price_ws_rfq`: a trader-side
     /// RFQ hard-declines with its stable reason and reserves nothing,
     /// while the same spec on the writer side quotes.
     #[tokio::test]
     async fn trader_side_rfq_hard_declines_through_the_desk() {
-        let desk = desk_with(testkit::shared(1e9), testkit::paper_venue("trader", 0.0, 0.0, 1.0));
+        let desk = testkit::desk(testkit::kernel(1e9), testkit::paper_venue("trader", 0.0, 0.0, 1.0));
         let key = QuoteKey { request_id: "t1".into(), nonce: 1 };
         let d = desk.price_ws_rfq(Side::Trader, 0, atm(false), 100.0, Some(key), 0).await;
         assert_eq!(
             d,
             Decision::Decline { reason: "desk does not write options (long-only strategy)".into() }
         );
-        assert_eq!(desk.book.read().reserved_total(), 0, "a decline must not reserve");
+        assert_eq!(desk.kernel.read().book.reserved_total(), 0, "a decline must not reserve");
         let key = QuoteKey { request_id: "w1".into(), nonce: 2 };
         let d = desk.price_ws_rfq(Side::Writer, 0, atm(false), 100.0, Some(key), 0).await;
         assert!(matches!(d, Decision::Quote { .. }), "{d:?}");
-        assert!(desk.book.read().reserved_total() > 0);
+        assert!(desk.kernel.read().book.reserved_total() > 0);
     }
 
-    /// Doc 08 §4.1 gate 3: legacy written inventory the refresher lifts
+    /// Doc 08 §4.1 gate 3: legacy written inventory the mark pass lifts
     /// off the book blocks writer-side quoting until it is unwound.
     #[tokio::test]
     async fn legacy_naked_written_inventory_blocks_quoting() {
-        let shared = testkit::shared(1e9);
-        let desk = desk_with(Arc::clone(&shared), testkit::paper_venue("naked", 0.0, 0.0, 1.0));
+        let kernel = testkit::kernel(1e9);
+        let desk = testkit::desk(Arc::clone(&kernel), testkit::paper_venue("naked", 0.0, 0.0, 1.0));
         // A legacy short line on the book, as `book::fetch_written` would
-        // reconstruct it; the refresher publishes its naked units.
-        desk.book.write().written.push(book::Written {
-            bucket_id: protocol_types::ids::ObjectId::new([1u8; 32]),
-            position_id: protocol_types::ids::ObjectId::new([2u8; 32]),
-            asset_coin_type: COIN.into(),
-            is_put: false,
-            strike: 100,
-            strike_scale: 0,
-            expiry_ms: 30 * DAY_MS,
-            amount: 5,
-            covered: 0,
-        });
-        *shared.naked_written_units.write() = desk.book.read().naked_written_units();
+        // reconstruct it; the mark pass publishes its naked units.
+        {
+            let mut k = kernel.write();
+            k.book.written.push(book::Written {
+                bucket_id: protocol_types::ids::ObjectId::new([1u8; 32]),
+                position_id: protocol_types::ids::ObjectId::new([2u8; 32]),
+                asset_coin_type: COIN.into(),
+                is_put: false,
+                strike: 100,
+                strike_scale: 0,
+                expiry_ms: 30 * DAY_MS,
+                amount: 5,
+                covered: 0,
+            });
+            k.naked_written_units = k.book.naked_written_units();
+        }
         let d = desk.price_ws_rfq(Side::Writer, 0, atm(false), 100.0, None, 0).await;
         assert_eq!(
             d,
@@ -1906,8 +1757,11 @@ mod tests {
             }
         );
         // Unwound ⇒ quoting resumes.
-        desk.book.write().written.clear();
-        *shared.naked_written_units.write() = desk.book.read().naked_written_units();
+        {
+            let mut k = kernel.write();
+            k.book.written.clear();
+            k.naked_written_units = k.book.naked_written_units();
+        }
         let d = desk.price_ws_rfq(Side::Writer, 0, atm(false), 100.0, None, 0).await;
         assert!(matches!(d, Decision::Quote { .. }), "{d:?}");
     }
@@ -1918,92 +1772,96 @@ mod tests {
     const NAV: f64 = 1_000.0;
     const SPOT: f64 = 10.0;
 
-    fn rebalancer(shared: &Arc<DeskShared>, venue: &Arc<hedge::PaperVenue>) -> Rebalancer {
+    fn rebalancer(kernel: &Arc<RwLock<DeskKernel>>, venue: &Arc<hedge::PaperVenue>) -> Rebalancer {
         let venue: Arc<dyn hedge::HedgeVenue> = Arc::clone(venue) as Arc<dyn hedge::HedgeVenue>;
         Rebalancer {
-            hedge_cfg: hedge::HedgeConfig::default(),
             venue,
-            shared: Arc::clone(shared),
-            book: Arc::new(RwLock::new(Book::new(NAV as u64))),
-            coin_type: COIN.into(),
+            kernel: Arc::clone(kernel),
+            sinks: Sinks { pnl_path: None, history: None },
+            market: 0,
             symbol: "TSUI".into(),
-            last_realized: 0.0,
-            next_order_id: 0,
-            open: hedge::OpenOrders::default(),
-            pnl_path: None,
         }
     }
 
-    fn set_delta(shared: &DeskShared, delta: f64) {
-        shared.book_delta_units.write().insert(COIN.into(), delta);
+    fn set_delta(kernel: &RwLock<DeskKernel>, delta: f64) {
+        kernel.write().markets[0].book_delta_units = delta;
     }
 
-    fn published(shared: &DeskShared) -> Option<f64> {
-        shared.hedge_position_units.read().get(COIN).copied()
+    /// The signed position the rebalancer published for pricing.
+    fn published(kernel: &RwLock<DeskKernel>) -> f64 {
+        kernel.read().markets[0].hedge_position_units
+    }
+
+    fn working(kernel: &RwLock<DeskKernel>) -> f64 {
+        kernel.read().markets[0].open_orders.working_units()
+    }
+
+    fn orders(kernel: &RwLock<DeskKernel>) -> hedge::OrderId {
+        kernel.read().markets[0].next_order_id
     }
 
     /// Doc 08 §4.2 gate 1: a long-call book targets a SHORT perp. With a
-    /// half-filling venue the remainder rides in `OpenOrders`, so the
-    /// second tick does not resubmit it.
+    /// half-filling venue the remainder rides in the kernel's working
+    /// orders, so the second tick does not resubmit it.
     #[tokio::test]
     async fn long_call_book_drives_a_short_perp_through_partial_fills() {
-        let shared = testkit::shared(NAV);
+        let kernel = testkit::kernel(NAV);
         let venue = testkit::paper_venue("long-call", 0.0, 0.0, 0.5);
-        let mut r = rebalancer(&shared, &venue);
-        set_delta(&shared, 100.0);
+        let mut r = rebalancer(&kernel, &venue);
+        set_delta(&kernel, 100.0);
         r.rebalance_once(1_000, Some(SPOT)).await;
         // Half filled synchronously; the other half is working.
         assert_eq!(venue.position_units().await.unwrap(), -50.0);
-        assert_eq!(r.open.working_units(), -50.0);
-        assert_eq!(r.next_order_id, 1);
+        assert_eq!(working(&kernel), -50.0);
+        assert_eq!(orders(&kernel), 1);
         // The position published for pricing is the one read at tick
         // start (SO-437 reads it on the NEXT quote).
-        assert_eq!(published(&shared), Some(0.0));
+        assert_eq!(published(&kernel), 0.0);
         // Counting the remainder, nothing more is due right now.
-        assert_eq!(hedge::plan_hedge_order(100.0, -50.0, r.open.working_units(), 15.0), None);
+        assert_eq!(hedge::plan_hedge_order(100.0, -50.0, working(&kernel), 15.0), None);
         // Tick 2: the remainder fills on poll; no second order.
         r.rebalance_once(2_000, Some(SPOT)).await;
         assert_eq!(venue.position_units().await.unwrap(), -100.0);
-        assert!(r.open.is_empty());
-        assert_eq!(r.next_order_id, 1, "a working order must not be resubmitted");
-        assert_eq!(published(&shared), Some(-100.0));
+        assert!(kernel.read().markets[0].open_orders.is_empty());
+        assert_eq!(orders(&kernel), 1, "a working order must not be resubmitted");
+        assert_eq!(published(&kernel), -100.0);
         // A stale spot reconciles working orders but plans nothing.
-        set_delta(&shared, 200.0);
+        set_delta(&kernel, 200.0);
         r.rebalance_once(3_000, None).await;
-        assert_eq!(r.next_order_id, 1);
+        assert_eq!(orders(&kernel), 1);
     }
 
     /// Doc 08 §4.2 gate 2: a long-put book targets a LONG perp.
     #[tokio::test]
     async fn long_put_book_drives_a_long_perp() {
-        let shared = testkit::shared(NAV);
+        let kernel = testkit::kernel(NAV);
         let venue = testkit::paper_venue("long-put", 0.0, 0.0, 0.5);
-        let mut r = rebalancer(&shared, &venue);
-        set_delta(&shared, -80.0);
+        let mut r = rebalancer(&kernel, &venue);
+        set_delta(&kernel, -80.0);
         r.rebalance_once(1_000, Some(SPOT)).await;
         assert_eq!(venue.position_units().await.unwrap(), 40.0);
         r.rebalance_once(2_000, Some(SPOT)).await;
         assert_eq!(venue.position_units().await.unwrap(), 80.0);
-        assert_eq!(r.next_order_id, 1);
-        assert_eq!(published(&shared), Some(80.0));
+        assert_eq!(orders(&kernel), 1);
+        assert_eq!(published(&kernel), 80.0);
     }
 
     /// Doc 08 §4.2 gate 3: equal and opposite deltas net to nothing and
     /// trade nothing; a residual nets before it trades.
     #[tokio::test]
     async fn mixed_book_nets_before_trading() {
-        let shared = testkit::shared(NAV);
+        let kernel = testkit::kernel(NAV);
         let venue = testkit::paper_venue("mixed", 0.0, 0.0, 1.0);
-        let mut r = rebalancer(&shared, &venue);
-        // Calls +100, puts −100 (the refresher nets per underlying).
-        set_delta(&shared, 100.0 + -100.0);
+        let mut r = rebalancer(&kernel, &venue);
+        // Calls +100, puts −100 (the mark pass nets per underlying).
+        set_delta(&kernel, 100.0 + -100.0);
         r.rebalance_once(1_000, Some(SPOT)).await;
-        assert_eq!(r.next_order_id, 0, "a netted book must not trade");
+        assert_eq!(orders(&kernel), 0, "a netted book must not trade");
         assert_eq!(venue.position_units().await.unwrap(), 0.0);
         // Calls +100, puts −70: only the +30 residual is hedged.
-        set_delta(&shared, 100.0 + -70.0);
+        set_delta(&kernel, 100.0 + -70.0);
         r.rebalance_once(2_000, Some(SPOT)).await;
-        assert_eq!(r.next_order_id, 1);
+        assert_eq!(orders(&kernel), 1);
         assert_eq!(venue.position_units().await.unwrap(), -30.0);
     }
 
@@ -2011,66 +1869,68 @@ mod tests {
     /// slice on the scalp line and re-opens the remainder.
     #[tokio::test]
     async fn direction_reversal_realizes_pnl_on_the_scalp_line() {
-        let shared = testkit::shared(NAV);
+        let kernel = testkit::kernel(NAV);
         let venue = testkit::paper_venue("reversal", 0.0, 0.0, 1.0);
-        let mut r = rebalancer(&shared, &venue);
+        let mut r = rebalancer(&kernel, &venue);
         // Short 100 at 10 against a call book.
-        set_delta(&shared, 100.0);
+        set_delta(&kernel, 100.0);
         r.rebalance_once(1_000, Some(SPOT)).await;
         assert_eq!(venue.position_units().await.unwrap(), -100.0);
-        assert_eq!(r.book.read().pnl.scalp, 0.0);
+        assert_eq!(kernel.read().book.pnl.scalp, 0.0);
         // The book flips put-heavy (−50) and spot drops to 8: buy 150 —
         // the 100 short closes at +2 × 100, the 50 long opens at 8.
-        set_delta(&shared, -50.0);
+        set_delta(&kernel, -50.0);
         r.rebalance_once(2_000, Some(8.0)).await;
         assert_eq!(venue.position_units().await.unwrap(), 50.0);
         assert_eq!(venue.snapshot().await.avg_entry, 8.0);
-        assert!((r.book.read().pnl.scalp - 200.0).abs() < 1e-9, "{}", r.book.read().pnl.scalp);
+        let scalp = kernel.read().book.pnl.scalp;
+        assert!((scalp - 200.0).abs() < 1e-9, "{scalp}");
         // Back to call-heavy (+20) at 9: sell 70 — the 50 long closes at
         // +1 × 50, a 20 short opens.
-        set_delta(&shared, 20.0);
+        set_delta(&kernel, 20.0);
         r.rebalance_once(3_000, Some(9.0)).await;
         assert_eq!(venue.position_units().await.unwrap(), -20.0);
-        assert!((r.book.read().pnl.scalp - 250.0).abs() < 1e-9, "{}", r.book.read().pnl.scalp);
-        assert_eq!(r.book.read().pnl.funding, 0.0, "no funding on a flat-rate venue");
+        let pnl = kernel.read().book.pnl;
+        assert!((pnl.scalp - 250.0).abs() < 1e-9, "{}", pnl.scalp);
+        assert_eq!(pnl.funding, 0.0, "no funding on a flat-rate venue");
     }
 
     /// Funding accrues on the signed perp position as `PnlLine::Funding`
     /// — a short RECEIVES positive funding — and never touches scalp.
     #[tokio::test]
     async fn funding_accrual_lands_on_the_funding_line_not_scalp() {
-        let shared = testkit::shared(NAV);
+        let kernel = testkit::kernel(NAV);
         let venue = testkit::paper_venue("funding", 0.0, 0.10, 1.0);
-        let mut r = rebalancer(&shared, &venue);
-        set_delta(&shared, 100.0);
+        let mut r = rebalancer(&kernel, &venue);
+        set_delta(&kernel, 100.0);
         // Tick 1 stamps the funding clock (flat) and opens the short.
         r.rebalance_once(1_000, Some(SPOT)).await;
         assert_eq!(venue.position_units().await.unwrap(), -100.0);
-        assert_eq!(r.book.read().pnl.funding, 0.0);
+        assert_eq!(kernel.read().book.pnl.funding, 0.0);
         // One year later at +10%/yr on a 100-unit short at mark 10: the
         // short receives 0.10 × 100 × 10 = 100.
         let year = 365 * 86_400 * 1000;
         r.rebalance_once(1_000 + year, Some(SPOT)).await;
-        let pnl = r.book.read().pnl;
+        let pnl = kernel.read().book.pnl;
         assert!((pnl.funding - 100.0).abs() < 1e-9, "{}", pnl.funding);
         assert_eq!(pnl.scalp, 0.0, "funding must never leak into scalp");
         assert_eq!(venue.realized_pnl().await.unwrap(), 0.0);
         assert!((venue.funding_paid().await.unwrap() + 100.0).abs() < 1e-9);
-        assert_eq!(r.next_order_id, 1, "net delta is inside the band; nothing traded");
+        assert_eq!(orders(&kernel), 1, "net delta is inside the band; nothing traded");
     }
 
     /// SO-437: the perp position the rebalancer publishes reaches the
-    /// next quote via `flow_context.hedge_position_units`, so a put
-    /// against a call-heavy (short-hedged) book prices as a reduction.
+    /// next quote via the kernel's flow context, so a put against a
+    /// call-heavy (short-hedged) book prices as a reduction.
     #[tokio::test]
     async fn published_hedge_position_flows_into_the_next_quote() {
-        let shared = testkit::shared(1e9);
+        let kernel = testkit::kernel(1e9);
         // Positive funding + margin financing make the hedge direction
         // matter: a fresh long-perp put hedge PAYS, a reducing one does
         // not.
-        *shared.funding_rate_annual.write() = 0.30;
+        kernel.write().funding_rate_annual = 0.30;
         let venue = testkit::paper_venue("position-aware", 0.0, 0.0, 1.0);
-        let desk = desk_with(Arc::clone(&shared), Arc::clone(&venue) as Arc<dyn hedge::HedgeVenue>);
+        let desk = testkit::desk(Arc::clone(&kernel), Arc::clone(&venue) as Arc<dyn hedge::HedgeVenue>);
         async fn put_bid(desk: &Desk) -> u64 {
             match desk.price_ws_rfq(Side::Writer, 0, atm(true), 100.0, None, 0).await {
                 Decision::Quote { premium, .. } => premium,
@@ -2078,17 +1938,17 @@ mod tests {
             }
         }
         let flat = put_bid(&desk).await;
-        assert_eq!(shared.flow_context(100.0, COIN).await.hedge_position_units, 0.0);
+        assert_eq!(kernel.read().flow_context(0, 100.0).hedge_position_units, 0.0);
 
         // A deeply call-heavy book: the rebalancer shorts 10M units at
         // spot 100 (band = 15% × 1e9 / 100 = 1.5M) and publishes it on
         // the following tick.
-        let mut r = rebalancer(&shared, &venue);
-        set_delta(&shared, 10_000_000.0);
+        let mut r = rebalancer(&kernel, &venue);
+        set_delta(&kernel, 10_000_000.0);
         r.rebalance_once(1_000, Some(100.0)).await;
         r.rebalance_once(2_000, Some(100.0)).await;
         assert_eq!(venue.position_units().await.unwrap(), -10_000_000.0);
-        assert_eq!(shared.flow_context(100.0, COIN).await.hedge_position_units, -10_000_000.0);
+        assert_eq!(kernel.read().flow_context(0, 100.0).hedge_position_units, -10_000_000.0);
 
         let reducing = put_bid(&desk).await;
         assert!(reducing > flat, "reducing put bid {reducing} !> opening put bid {flat}");
@@ -2096,7 +1956,7 @@ mod tests {
 }
 
 /// In-process desk fixtures for the runtime-path tests (SO-447): a real
-/// `Desk`/`DeskShared` over an in-memory book and a paper venue, no
+/// `Desk` over a kernel with an in-memory book and a paper venue, no
 /// chain, indexer, or database.
 #[cfg(test)]
 pub(crate) mod testkit {
@@ -2132,36 +1992,31 @@ pub(crate) mod testkit {
         )
     }
 
-    /// Fresh, generously-funded shared state at `nav`; flat funding and
-    /// zero venue costs so hedge-cost assertions are hand-checkable.
-    pub fn shared(nav: f64) -> Arc<DeskShared> {
-        Arc::new(DeskShared {
-            exposure: RwLock::new(BookExposure {
-                nav,
-                capital: limits::CapitalSnapshot::test_fresh(nav, 0),
-                ..Default::default()
-            }),
-            book_delta_units: RwLock::new(HashMap::new()),
-            naked_written_units: RwLock::new(0),
-            funding_rate_annual: RwLock::new(0.0),
-            stress_blocked: AtomicBool::new(false),
-            risk_off: AtomicBool::new(false),
-            expected_holding_years: 21.0 / 365.0,
-            hedge_cost: pricing::desk::HedgeCostParams {
-                slippage_bps: 0.0,
-                taker_fee_bps: 0.0,
-                fixed_fee_per_fill: 0.0,
-                rebalance_turnover_per_year: 0.0,
-                margin_financing_rate_annual: 0.10,
-                initial_margin_fraction: 0.10,
-            },
-            hedge_position_units: RwLock::new(HashMap::new()),
-            marks: RwLock::new(HashMap::new()),
-            spots: RwLock::new(HashMap::new()),
-            stress: RwLock::new(None),
-            listings: RwLock::new(HashMap::new()),
-            venue_margin: RwLock::new(limits::VenueMarginInputs::default()),
-        })
+    /// A kernel serving one market (`COIN`/`SETTLEMENT`) with a fresh,
+    /// generously-funded exposure at `nav`; flat funding and zero venue
+    /// costs (10% margin financing) so hedge-cost assertions are
+    /// hand-checkable.
+    pub fn kernel(nav: f64) -> Arc<RwLock<DeskKernel>> {
+        let mut cfg = DeskConfig::default();
+        cfg.hedge.taker_fee_bps = 0.0;
+        cfg.hedge.fixed_fee_per_fill = 0.0;
+        cfg.hedge.rebalance_turnover_per_year = 0.0;
+        cfg.hedge.margin_financing_rate_annual = 0.10;
+        cfg.hedge.initial_margin_fraction = 0.10;
+        let mut k = DeskKernel::new(
+            kernel_config(&cfg, 0.0, 30_000, 6, false, false),
+            vec![model()],
+            book::Book::new(nav as u64),
+            0.0,
+            false,
+            0,
+        );
+        k.exposure = limits::BookExposure {
+            nav,
+            capital: limits::CapitalSnapshot::test_fresh(nav, 0),
+            ..Default::default()
+        };
+        Arc::new(RwLock::new(k))
     }
 
     /// A paper venue on a fresh temp state file.
@@ -2179,24 +2034,14 @@ pub(crate) mod testkit {
         )
     }
 
-    /// A desk serving one market (`COIN`/`SETTLEMENT`) with no history
-    /// DB and no curator refs.
-    pub fn desk(
-        shared: Arc<DeskShared>,
-        book: Arc<RwLock<Book>>,
-        venue: Arc<dyn hedge::HedgeVenue>,
-    ) -> Desk {
-        let cfg = DeskConfig::default();
+    /// A desk over `kernel` with no history DB and no curator refs.
+    pub fn desk(kernel: Arc<RwLock<DeskKernel>>, venue: Arc<dyn hedge::HedgeVenue>) -> Desk {
         Desk {
-            history: None,
-            v1: cfg.v1.into(),
-            limits: cfg.limits,
-            quote_ttl_ms: 30_000,
-            cfg,
+            sinks: Sinks { pnl_path: None, history: None },
+            cfg: DeskConfig::default(),
             vault_id: ObjectID::ZERO,
-            shared,
-            book,
-            models: Arc::new(vec![model()]),
+            kernel,
+            shared: DeskShared::new(),
             hedge_venues: vec![Arc::clone(&venue)],
             venue_roster: vec![monitors::MonitorVenue { symbol: "TSUI".into(), venue }],
             provisioned: false,
