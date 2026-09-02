@@ -11,7 +11,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray};
+use arrow::array::{
+    ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
@@ -97,6 +99,53 @@ pub struct OptionsQuote {
     pub mark_iv: Option<f64>,
     pub underlying_price: Option<f64>,
     pub open_interest: Option<f64>,
+    pub src_file: String,
+    pub src_line: i32,
+}
+
+/// One price level of an L2 update (`docs/l2-silver-schema-plan.md` §3).
+/// Snapshots and diffs share the shape; `size` is the ABSOLUTE size at
+/// the level after the update (0 = level removed), never a delta.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BookL2 {
+    pub ts_event: Option<i64>,
+    /// Never null: live-capture only, no archive source exists.
+    pub ts_recv: i64,
+    pub exchange: String,
+    pub instrument_id: String,
+    /// Venue sequence at the END of this update (Bluefin `lastUpdateId`;
+    /// DeepBook has none, so the venue timestamp in ms stands in).
+    pub seq: i64,
+    /// Venue sequence at the START of a diff (`firstUpdateId`); a gap is
+    /// `seq_first != prev.seq + 1`. Null on snapshots.
+    pub seq_first: Option<i64>,
+    /// true ⇒ this row belongs to a full-book image at `seq`.
+    pub is_snapshot: bool,
+    /// "bid" | "ask"
+    pub side: String,
+    pub price: f64,
+    pub size: f64,
+    pub src_file: String,
+    pub src_line: i32,
+}
+
+/// One router quote-ladder rung: a measured execution curve point, not a
+/// book (`docs/l2-silver-schema-plan.md` §4). Live-capture only, so
+/// `ts_recv` is never null.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuoteLadder {
+    pub ts_recv: i64,
+    pub exchange: String,
+    /// `BASE-QUOTE`, e.g. `SUI-USDC`, regardless of direction.
+    pub pair: String,
+    /// `sell_base` (base in, quote out) | `buy_base` (quote in, base out).
+    pub direction: String,
+    /// Human units of the coin sent in.
+    pub amount_in: f64,
+    /// Human units of the coin quoted out.
+    pub amount_out: f64,
+    /// Protocols traversed, e.g. `Cetus,Bluefin` — diagnostic.
+    pub route: Option<String>,
     pub src_file: String,
     pub src_line: i32,
 }
@@ -401,6 +450,166 @@ pub fn vol_index_schema() -> Schema {
 
 pub fn vol_index_key(exchange: &str, symbol: &str, date: &str) -> String {
     format!("silver/v1/vol_index/exchange={exchange}/symbol={symbol}/date={date}/part-00.parquet")
+}
+
+pub fn book_l2_schema() -> Schema {
+    let mut f = vec![
+        Field::new("ts_event", DataType::Int64, true),
+        Field::new("ts_recv", DataType::Int64, false),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("instrument_id", DataType::Utf8, false),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("seq_first", DataType::Int64, true),
+        Field::new("is_snapshot", DataType::Boolean, false),
+        Field::new("side", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("size", DataType::Float64, false),
+    ];
+    f.extend(lineage_fields());
+    Schema::new(f)
+}
+
+/// Row order `(ts_recv, seq, side, price)` per the plan, tiebroken by
+/// lineage so the order is total.
+pub fn book_l2_batch(mut rows: Vec<BookL2>) -> anyhow::Result<RecordBatch> {
+    rows.sort_by(|a, b| {
+        (a.ts_recv, a.seq, &a.side)
+            .cmp(&(b.ts_recv, b.seq, &b.side))
+            .then(a.price.total_cmp(&b.price))
+            .then((&a.src_file, a.src_line).cmp(&(&b.src_file, b.src_line)))
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(book_l2_schema()),
+        vec![
+            opt_i64(rows.iter().map(|r| r.ts_event)),
+            Arc::new(Int64Array::from_iter_values(rows.iter().map(|r| r.ts_recv))),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.exchange.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.instrument_id.as_str()),
+            )),
+            Arc::new(Int64Array::from_iter_values(rows.iter().map(|r| r.seq))),
+            opt_i64(rows.iter().map(|r| r.seq_first)),
+            Arc::new(BooleanArray::from_iter(
+                rows.iter().map(|r| Some(r.is_snapshot)),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.side.as_str()),
+            )),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.price))),
+            Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.size))),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.src_file.as_str()),
+            )),
+            Arc::new(Int32Array::from_iter_values(
+                rows.iter().map(|r| r.src_line),
+            )),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// Chunked, temp-file-backed writer for `book_l2` — the first silver
+/// table large enough (1–2M rows/day of 200 ms diffs) that a day of rows
+/// must never sit in memory at once. Same discipline as
+/// [`TradesWriter`]: one row group per chunk, flushed immediately.
+pub struct BookL2Writer {
+    w: ArrowWriter<std::fs::File>,
+    tmp: tempfile::NamedTempFile,
+    rows: usize,
+}
+
+impl BookL2Writer {
+    pub fn new() -> anyhow::Result<Self> {
+        let tmp = tempfile::NamedTempFile::new()?;
+        let file = tmp.reopen()?;
+        let w = ArrowWriter::try_new(file, Arc::new(book_l2_schema()), Some(writer_props()))?;
+        Ok(Self { w, tmp, rows: 0 })
+    }
+
+    /// Chunk rows MUST already be in cross-chunk sorted order (callers
+    /// chunk by bronze hour, which is a `ts_recv` boundary); each chunk
+    /// is order-normalized internally by `book_l2_batch`.
+    pub fn write_chunk(&mut self, rows: Vec<BookL2>) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.rows += rows.len();
+        self.w.write(&book_l2_batch(rows)?)?;
+        self.w.flush()?;
+        Ok(())
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn finish(self) -> anyhow::Result<tempfile::NamedTempFile> {
+        self.w.close()?;
+        Ok(self.tmp)
+    }
+}
+
+pub fn quote_ladder_schema() -> Schema {
+    let mut f = vec![
+        Field::new("ts_recv", DataType::Int64, false),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("pair", DataType::Utf8, false),
+        Field::new("direction", DataType::Utf8, false),
+        Field::new("amount_in", DataType::Float64, false),
+        Field::new("amount_out", DataType::Float64, false),
+        Field::new("route", DataType::Utf8, true),
+    ];
+    f.extend(lineage_fields());
+    Schema::new(f)
+}
+
+/// Row order: capture time, then direction and rung so the two ladders
+/// of one poll cycle interleave deterministically.
+pub fn quote_ladder_batch(mut rows: Vec<QuoteLadder>) -> anyhow::Result<RecordBatch> {
+    rows.sort_by(|a, b| {
+        (a.ts_recv, &a.direction, &a.src_file, a.src_line)
+            .cmp(&(b.ts_recv, &b.direction, &b.src_file, b.src_line))
+            .then(a.amount_in.total_cmp(&b.amount_in))
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(quote_ladder_schema()),
+        vec![
+            Arc::new(Int64Array::from_iter_values(rows.iter().map(|r| r.ts_recv))),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.exchange.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.pair.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.direction.as_str()),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.amount_in),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|r| r.amount_out),
+            )),
+            Arc::new(StringArray::from_iter(
+                rows.iter().map(|r| r.route.as_deref()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.src_file.as_str()),
+            )),
+            Arc::new(Int32Array::from_iter_values(
+                rows.iter().map(|r| r.src_line),
+            )),
+        ],
+    )?;
+    Ok(batch)
+}
+
+/// quote_ladder partitions by PAIR (both directions in one file), not by
+/// the venue's per-rung stream, so a day of ladder is one small parquet.
+pub fn quote_ladder_key(exchange: &str, pair: &str, date: &str) -> String {
+    format!("silver/v1/quote_ladder/exchange={exchange}/pair={pair}/date={date}/part-00.parquet")
 }
 
 /// funding_rates partitions split by row kind so the live (predicted)

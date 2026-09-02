@@ -37,6 +37,31 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         lookback_days: u32,
     },
+    /// Normalize Aftermath router quote-ladder bronze (route.*) for a UTC
+    /// day into quote_ladder, one partition per pair.
+    Aftermath {
+        #[arg(long)]
+        date: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        lookback_days: u32,
+    },
+    /// Normalize Bluefin bronze for a UTC day: L2 depth (diffs + REST
+    /// snapshots) into book_l2, and funding settlements from the
+    /// REST-history poller plus ticker-rollover derivation.
+    Bluefin {
+        #[arg(long)]
+        date: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        lookback_days: u32,
+    },
+    /// Normalize DeepBook indexer depth snapshots (book.*) for a UTC day
+    /// into book_l2.
+    Deepbook {
+        #[arg(long)]
+        date: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        lookback_days: u32,
+    },
     /// Fetch Deribit DVOL hourly candles into vol_index partitions
     /// (full history is free; re-runs repair gaps).
     Dvol {
@@ -136,6 +161,39 @@ async fn main() -> anyhow::Result<()> {
             for day in ws_days(date, lookback_days)? {
                 let n = normalizer::deribit::normalize_day(&store, &day).await?;
                 tracing::info!(day, streams = n, "deribit day normalized");
+            }
+        }
+        Cmd::Aftermath {
+            date,
+            lookback_days,
+        } => {
+            for day in ws_days(date, lookback_days)? {
+                let n = normalizer::aftermath::normalize_day(&store, &day).await?;
+                tracing::info!(day, partitions = n, "aftermath day normalized");
+            }
+        }
+        Cmd::Bluefin {
+            date,
+            lookback_days,
+        } => {
+            for day in ws_days(date, lookback_days)? {
+                let books = normalizer::book_l2::normalize_day(&store, "bluefin", &day).await?;
+                let n = normalizer::bluefin_funding::normalize_day(&store, &day).await?;
+                tracing::info!(
+                    day,
+                    book_l2_partitions = books,
+                    funding_parts = n,
+                    "bluefin day normalized"
+                );
+            }
+        }
+        Cmd::Deepbook {
+            date,
+            lookback_days,
+        } => {
+            for day in ws_days(date, lookback_days)? {
+                let n = normalizer::book_l2::normalize_day(&store, "deepbook", &day).await?;
+                tracing::info!(day, partitions = n, "deepbook day normalized");
             }
         }
         Cmd::Dvol {

@@ -2,9 +2,11 @@
 //! out (spec §7.1). Adapters are pure parse functions — no IO — so golden
 //! fixtures pin every venue format in unit tests.
 
+pub mod aftermath;
 pub mod binance_vision;
 pub mod bluefin;
 pub mod coinbase;
+pub mod deepbook;
 pub mod deribit;
 pub mod hyperliquid;
 
