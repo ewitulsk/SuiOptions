@@ -31,7 +31,7 @@ signing_scheme     = "ed25519"
 # by the bot itself (before the ceremony recorded ids); the SO-325 archival
 # gap makes event re-discovery unreliable, hence the pin. Safe to drop
 # after the next contract redeploy.
-quote_signer_id    = "0x088476762fd3d20ef7ab366fc93ab5e4ce4b68ed904002687c7a8175cf93775f"  # created 2026-09-02 16:09 UTC on core 0xc3ff509e (SO-462)
+quote_signer_id    = "0x028f772ed1c36973164c19c9403aad523cca852acf97b629de71218c4b59b1b1"  # created 2026-09-02 16:50 UTC on core 0xc3ff509e (SO-465; SO-464 tracks why pins fail to verify)
 
 # Derive mode: `underlying_symbols` left unset, so the bot makes markets in
 # every enabled token-info token with a Pyth feed and a watcher restarts
@@ -72,6 +72,9 @@ TWAL = 1.0
 # adopt a vault someone else created.
 [desk]
 enabled = true
+# SO-465: pin the desk vault — discovery drops the desk's own vault once it wires
+# direct exchange custody (SO-463) and provisions a new one on every restart.
+vault_id = "0x3e2356574c990126472ed4cc1a1cee1346d914860a0a2a7126f26090e9c30a5f"
 # mm_release_enabled is now consent to flip the vault_mm release gate when
 # the chain says it is off, not an attestation that it is on — chain state
 # decides, and the bot holds its own CuratorCap.
