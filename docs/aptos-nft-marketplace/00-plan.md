@@ -267,7 +267,28 @@ S3, resized variants served from CloudFront; the API never returns a raw
 `0x3::token::TokenStore` table items) so the hosted indexer stops being a
 dependency.
 
-### 4.4 Tables
+### 4.4 Backfill and pipeline progress
+
+Every long-running fill of the read side records its progress in one table
+so the status page (§6) and Prometheus read the same numbers:
+
+```
+pipeline_progress (pipeline, scope) PK
+  pipeline   'stream' | 'metadata' | 'images' | 'stats'
+  scope      venue name for 'stream' (one row per venue, plus 'all'); collection_id for others, plus 'all'
+  target     tip version (stream) | tokens known (metadata) | images referenced (images)
+  done       cursor version | tokens fetched | images stored
+  failed     permanent failures (unreachable token_uri, unparsable metadata)
+  started_at, updated_at, eta_at (linear estimate from the last 15 min of rate)
+```
+
+The stream row is derived from `stream_cursors` and the ledger tip; the
+metadata and image rows are updated by their workers per batch. Every row is
+also exported as `nft_pipeline_done{pipeline,scope}` / `nft_pipeline_target`
+gauges. Failures keep a reason and are retried on a backoff schedule, with
+a manual "retry" from the admin mux.
+
+### 4.5 Tables
 
 ```
 nft_marketplace_activities (txn_version, event_index, marketplace) PK
@@ -285,6 +306,8 @@ collection_stats (collection_id, window) floor_apt, floor_usd, volume, sales, li
 quote_tokens (metadata_address) symbol, decimals, enabled, min_fee, usd_price
 admin_collections (collection_id) verified, hidden, featured, nsfw
 stream_cursors (stream) version
+pipeline_progress (pipeline, scope) target, done, failed, eta_at      (§4.4)
+image_jobs (token_data_id) state, attempts, last_error, source_url, spaces_key
 ```
 
 Floor and volume are computed per collection in a common denominator: APT
@@ -305,6 +328,7 @@ GET  /collections?sort=volume_24h                 GET /collections/{id}         
 GET  /collections/{id}/activity                   GET /items/{token_data_id}       GET /items/{token_data_id}/offers
 GET  /wallets/{addr}/items                        GET /wallets/{addr}/escrowed     (Tradeport/Wapal/Topaz listings owned by addr)
 GET  /wallets/{addr}/activity                     GET /search?q=
+GET  /status                                       backfill and pipeline progress (§4.4), public, no auth
 POST /tx/buy        {items:[{marketplace, listing_id}], buyer}     -> {payload, simulation, breakdown{price, venue_fee, our_fee, royalty}}
 POST /tx/list       {token_data_id, quote, price}                  -> payload (our venue)
 POST /tx/unlist     {marketplace, listing_id}                      -> payload (ours or foreign "rescue")
@@ -313,6 +337,15 @@ POST /tx/accept-offer / POST /tx/sell-to-offer                     (P1 for forei
 POST /tx/submit     {signed_txn}  (optional; wallets may submit directly)
 GET  /ws            listing_created | listing_filled | offer_* | stats per collection subscription
 ```
+
+`GET /wallets/{addr}/items` returns every NFT the address holds in either
+standard, **unioned with NFTs the address has escrowed in any venue's
+listing object** (ours, Tradeport, Wapal, Topaz, Bluemove). This union
+matters: the ownership table shows an escrowed NFT as owned by the listing
+object, not the seller, so a naive holdings query hides exactly the NFTs a
+Tradeport seller most wants to see. Each item carries `listed_on`,
+`price`, `quote_token`, best offer, floor, and `rescuable: true` when the
+listing is on a foreign venue. `addr` may be an ANS name.
 
 Payload builders (`internal/venues/<name>/payload.go`): tier 0 direct entry
 function to the foreign contract, tier 1 `router::buy_many` args. Every buy
@@ -339,12 +372,32 @@ Pontem, Nightly, OKX, MSafe, Aptos Connect keyless login). Endpoints in
 `src/config.ts` with `VITE_*` overrides and `127.0.0.1:90xx` defaults, like
 `frontend/src/config.ts`. Vercel project with SPA rewrites.
 
-Pages, P0: landing (trending), collection (stats, grid, filters, activity),
-item (buy from any venue, offers, history), wallet (holdings, listed-where,
-offers received, **escrowed-on-other-venues with Rescue / Relist**), cart /
-sweep with pre-flight breakdown, list / offer modals with quote-token
-picker, admin (behind JWT). WS-driven live updates on collection and item
-pages.
+Pages, P0:
+
+- **Landing**: trending collections, recent sales.
+- **Collection**: stats, item grid, attribute filters, activity.
+- **Item**: buy from any venue, offers, price history.
+- **Wallet** (`/wallet/{addr | ans}`, defaults to the connected wallet, any
+  address viewable): every NFT the address owns in either standard,
+  grouped by collection, with a badge for where each is listed and at what
+  price, offers received, and total floor value. Items escrowed on Tradeport,
+  Wapal, Topaz or Bluemove appear here too (see `GET /wallets/{addr}/items`
+  in §5) with **Rescue** (unlist) and **Relist here** (unlist plus list in
+  one transaction) actions. Bulk select for list / transfer / rescue.
+- **Cart / sweep** with pre-flight breakdown (price, venue fee, our fee,
+  royalty) and named failure reasons.
+- **List / offer modals** with the quote-token picker.
+- **Status** (`/status`, public): one card per pipeline from
+  `GET /status`: stream indexer per venue (cursor vs tip, lag, backfill
+  progress bar with ETA), metadata cache (tokens and collections fetched of
+  known), images (fetched, resized, failed, with the failure reasons), and
+  collection stats freshness. Shows the last deploy tag and the daily
+  canary's last result. This is what we look at during the backfill and
+  what users look at when a listing seems missing.
+- **Admin** (behind JWT): verification, hiding, featuring, quote tokens,
+  retry failed image and metadata jobs.
+
+WS-driven live updates on collection, item and wallet pages.
 
 ## 7. Deployment: one droplet, mainnet only
 
@@ -461,9 +514,11 @@ mutation once the shakeout is over, so early mistakes cost nothing but gas.
   v1+v2, Wapal, Rarible, Bluemove v2 and OKX (drop any venue the 7-day
   stream shows has zero fills); fixture suite per venue.
 - Metadata cache, image pipeline to Spaces, collection stats job,
-  quote-token USD prices.
+  quote-token USD prices, `pipeline_progress` and `GET /status` (the
+  status page itself is a plain HTML view of that endpoint until phase 5
+  replaces it with the React page).
 - Gate: backfill from the earliest Tradeport v2 transaction to tip on the
-  droplet; `current_nft_marketplace_listings` for three verified collections
+  droplet, watched on the status page; `current_nft_marketplace_listings` for three verified collections
   matches a hand-check on the explorer within one minute of tip; lag under
   30 s for 24 h; disk growth measured and extrapolated to stay under 80 GiB
   for a year.
@@ -535,3 +590,4 @@ processor, auctions, launchpad.
 - 2026-09-02: added quote-token allowlist decision and fee placement.
 - 2026-09-02: consolidated into a single implementation plan with phases and gates.
 - 2026-09-02: own DigitalOcean droplet, mainnet-only delivery, cost estimate.
+- 2026-09-02: status page for backfill and image pipeline; wallet page spelled out, escrowed-NFT union.
