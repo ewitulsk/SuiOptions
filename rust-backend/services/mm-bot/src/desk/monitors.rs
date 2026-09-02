@@ -25,21 +25,19 @@
 //! (`DeskShared::stress_blocked`) that blocks new short risk.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+use desk_core::kernel::{DeskKernel, Event, PolicyState};
 use pyth_client::{PriceCache, PriceFeedId};
 
 use crate::pricing::{compute_spot_from_cache, Staleness};
 
-use super::book::Book;
 use super::hedge::HedgeVenue;
 use super::limits::LimitsConfig;
-use super::model::MarketModel;
 use super::DeskShared;
 
 /// `[desk.monitors]` knobs. `Serialize` so `/desk/state` can echo the
@@ -157,9 +155,8 @@ pub async fn read_venue(mv: &MonitorVenue, spot: f64) -> Option<VenueReading> {
 pub struct MonitorsParams {
     pub cfg: MonitorsConfig,
     pub limits: LimitsConfig,
+    pub kernel: Arc<RwLock<DeskKernel>>,
     pub shared: Arc<DeskShared>,
-    pub book: Arc<RwLock<Book>>,
-    pub models: Arc<Vec<MarketModel>>,
     pub market_feeds: Vec<(PriceFeedId, u8)>,
     pub price_cache: PriceCache,
     pub settlement_feed: PriceFeedId,
@@ -204,9 +201,8 @@ fn clone_params(p: &MonitorsParams) -> MonitorsParams {
     MonitorsParams {
         cfg: p.cfg,
         limits: p.limits,
+        kernel: Arc::clone(&p.kernel),
         shared: Arc::clone(&p.shared),
-        book: Arc::clone(&p.book),
-        models: Arc::clone(&p.models),
         market_feeds: p.market_feeds.clone(),
         price_cache: p.price_cache.clone(),
         settlement_feed: p.settlement_feed,
@@ -226,7 +222,8 @@ fn clone_params(p: &MonitorsParams) -> MonitorsParams {
 /// Fresh spot per model symbol (venues + stress share it per tick).
 fn spots_by_symbol(p: &MonitorsParams) -> HashMap<String, f64> {
     let mut out = HashMap::new();
-    for (i, model) in p.models.iter().enumerate() {
+    let k = p.kernel.read();
+    for (i, model) in k.models.iter().enumerate() {
         let (feed, decimals) = p.market_feeds[i];
         if let Ok(s) = compute_spot_from_cache(
             &p.price_cache,
@@ -262,14 +259,13 @@ async fn read_all_venues(p: &MonitorsParams, spots: &HashMap<String, f64>) -> Ve
 
 async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64)>) {
     let now = super::auctions::now_ms();
-    let exposure = p.shared.exposure.read().clone();
+    let (exposure, reserved, deployed, pnl) = {
+        let k = p.kernel.read();
+        (k.exposure.clone(), k.book.reserved_total() as f64, k.book.deployed as f64, k.book.pnl)
+    };
     let nav = exposure.nav.max(0.0);
 
     // Reserves.
-    let (reserved, deployed, pnl) = {
-        let book = p.book.read();
-        (book.reserved_total() as f64, book.deployed as f64, book.pnl)
-    };
     metrics::gauge!("mm_desk_nav").set(nav);
     metrics::gauge!("mm_desk_reserved").set(reserved);
     metrics::gauge!("mm_desk_deployed").set(deployed);
@@ -341,38 +337,47 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
     if !readings.is_empty() {
         // The funding input to pricing: notional-weighted across venues.
         metrics::gauge!("mm_desk_funding_rate_annual_weighted").set(agg.funding_weighted);
-        *p.shared.funding_rate_annual.write() = agg.funding_weighted;
         // The venue margin picture the capital snapshot reads (SO-444):
         // margin posted = Σ|position|·spot × initial fraction, the
         // maintenance requirement, and the min headroom across venues.
         let notional: f64 = readings.iter().map(|r| r.notional).sum();
-        *p.shared.venue_margin.write() = super::limits::VenueMarginInputs {
-            initial_margin: notional * p.initial_margin_fraction,
-            maintenance_margin: notional * p.maintenance_margin_fraction,
-            headroom: agg.min_headroom.as_ref().map(|(_, h)| *h).unwrap_or(1.0),
+        p.kernel.write().on_event(Event::VenueMargin {
+            inputs: super::limits::VenueMarginInputs {
+                initial_margin: notional * p.initial_margin_fraction,
+                maintenance_margin: notional * p.maintenance_margin_fraction,
+                headroom: agg.min_headroom.as_ref().map(|(_, h)| *h).unwrap_or(1.0),
+                at_ms: now,
+            },
+            funding_weighted: agg.funding_weighted,
             at_ms: now,
-        };
+        });
     }
 
     // Delta vs band, per market, against the TOTAL signed position
     // across that market's venues.
-    let deltas = p.shared.book_delta_units.read().clone();
-    for model in p.models.iter() {
-        let delta_units = deltas.get(&model.coin_type).copied().unwrap_or(0.0);
-        metrics::gauge!("mm_desk_book_delta_units", "symbol" => model.symbol.clone())
+    let deltas: Vec<(String, f64)> = {
+        let k = p.kernel.read();
+        k.models
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.symbol.clone(), k.markets[i].book_delta_units))
+            .collect()
+    };
+    for (symbol, delta_units) in deltas {
+        metrics::gauge!("mm_desk_book_delta_units", "symbol" => symbol.clone())
             .set(delta_units);
-        let Some(spot) = spots.get(&model.symbol).copied() else {
+        let Some(spot) = spots.get(&symbol).copied() else {
             continue;
         };
-        let hedge_position = agg.position_by_symbol.get(&model.symbol).copied().unwrap_or(0.0);
+        let hedge_position = agg.position_by_symbol.get(&symbol).copied().unwrap_or(0.0);
         let band = super::hedge::band_units_for(p.hedge_band_pct_nav, nav, spot);
         let net = delta_units + hedge_position;
-        metrics::gauge!("mm_desk_delta_net_of_hedge_units", "symbol" => model.symbol.clone())
+        metrics::gauge!("mm_desk_delta_net_of_hedge_units", "symbol" => symbol.clone())
             .set(net);
         if net.abs() > band && band.is_finite() {
             tracing::error!(
                 alert_id = "mm-desk-delta-band",
-                symbol = %model.symbol,
+                symbol = %symbol,
                 net_delta_units = net,
                 band_units = band,
                 "net-of-hedge delta outside the band"
@@ -408,11 +413,17 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
 /// the per-underlying total SIGNED position across venues at that
 /// underlying's spot.
 async fn stress_tick(p: &MonitorsParams) {
-    let holdings = p.book.read().holdings.clone();
-    let nav = p.shared.exposure.read().nav;
+    let (holdings, nav) = {
+        let k = p.kernel.read();
+        (k.book.holdings.clone(), k.exposure.nav)
+    };
     let now = super::auctions::now_ms();
     if nav <= 0.0 || holdings.is_empty() {
-        p.shared.stress_blocked.store(false, Ordering::Relaxed);
+        p.kernel.write().on_event(Event::Policy {
+            state: PolicyState::StressBlocked,
+            active: false,
+            at_ms: now,
+        });
         *p.shared.stress.write() =
             Some(super::StressSnapshot { at_ms: now, ..Default::default() });
         return;
@@ -441,20 +452,22 @@ async fn stress_tick(p: &MonitorsParams) {
     // Spot gaps (config; 00-plan −60% / +80%), book delta-hedged (each
     // underlying's hedge short offsets spot P&L 1:1 on delta; the option
     // legs reprice through the model).
+    let kernel = p.kernel.read();
+    let models = &kernel.models;
     for gap in [-p.cfg.stress_gap_down.abs(), p.cfg.stress_gap_up.abs()] {
         let mut pnl = 0.0;
         for h in &holdings {
-            let Some(mi) = p.models.iter().position(|m| m.coin_type == h.asset_coin_type) else {
+            let Some(mi) = models.iter().position(|m| m.coin_type == h.asset_coin_type) else {
                 continue;
             };
-            let Some(spot) = spots.get(&p.models[mi].symbol).copied() else {
+            let Some(spot) = spots.get(&models[mi].symbol).copied() else {
                 continue;
             };
             let t = h.expiry_ms.saturating_sub(now) as f64 / 1000.0 / 86_400.0 / 365.0;
             let k = h.strike_scaled();
-            let (sigma, _) = p.models[mi].sigma(spot, k, t);
-            let before = p.models[mi].fair_per_unit(h.is_put, spot, k, t, sigma);
-            let after = p.models[mi].fair_per_unit(h.is_put, spot * (1.0 + gap), k, t, sigma);
+            let (sigma, _) = models[mi].sigma(spot, k, t);
+            let before = models[mi].fair_per_unit(h.is_put, spot, k, t, sigma);
+            let after = models[mi].fair_per_unit(h.is_put, spot * (1.0 + gap), k, t, sigma);
             pnl += (after - before) * h.amount() as f64;
         }
         // Hedge legs: signed — a long gains when spot rises, a short
@@ -468,7 +481,8 @@ async fn stress_tick(p: &MonitorsParams) {
     }
 
     // Flat 6 months: pure theta projection at today's bleed rate.
-    let theta_cost = p.shared.exposure.read().theta_cost_per_day;
+    let theta_cost = kernel.exposure.theta_cost_per_day;
+    drop(kernel);
     let flat_6mo = (theta_cost * 182.0 / nav).max(0.0);
     worst_drawdown = worst_drawdown.max(flat_6mo);
     metrics::gauge!("mm_desk_stress_drawdown", "scenario" => "flat_6mo").set(flat_6mo);
@@ -485,7 +499,11 @@ async fn stress_tick(p: &MonitorsParams) {
     metrics::gauge!("mm_desk_stress_drawdown", "scenario" => "funding_minus_50").set(funding_hit);
 
     let blocked = worst_drawdown > p.cfg.stress_max_drawdown;
-    p.shared.stress_blocked.store(blocked, Ordering::Relaxed);
+    p.kernel.write().on_event(Event::Policy {
+        state: PolicyState::StressBlocked,
+        active: blocked,
+        at_ms: now,
+    });
     *p.shared.stress.write() = Some(super::StressSnapshot {
         at_ms: now,
         gap_down_60: gap_drawdowns[0],

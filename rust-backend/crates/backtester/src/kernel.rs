@@ -117,7 +117,8 @@ pub fn kernel(s: &Scenario, symbol: &str, coin_type: &str, booted_at_ms: u64) ->
 pub fn mark_update(nav: u64, spot: f64, at_ms: u64) -> desk_core::Event {
     desk_core::Event::MarkUpdate(Box::new(desk_core::kernel::MarkUpdate {
         at_ms,
-        custody: None,
+        holdings: None,
+        written: None,
         nav: Some(nav),
         appraisal_at: Some(at_ms),
         risk_off: Some(false),

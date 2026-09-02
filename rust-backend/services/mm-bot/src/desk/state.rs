@@ -20,7 +20,7 @@ use super::limits::{
     self, Capacity, CapitalConfig, CapitalPolicy, CapitalSnapshot, FillRatios, GammaByType,
     LimitsConfig,
 };
-use super::model::Greeks;
+use super::model::{EstimatorState, Greeks};
 use super::monitors::{read_venue, MonitorsConfig};
 use super::{Desk, StressSnapshot, SurfaceTomlConfig, V1Config};
 
@@ -404,21 +404,51 @@ pub struct ConfigEchoDto {
 
 // ── snapshot builder ───────────────────────────────────────────────────
 
+/// What the snapshot reads off one market model while it holds the
+/// kernel lock.
+struct MarketView {
+    window_vols: (Option<f64>, Option<f64>),
+    estimator: EstimatorState,
+    surface_is_fallback: bool,
+    carry_yield: f64,
+}
+
 /// Build the snapshot. Reads shared state + the book under short lock
 /// scopes, then does the (in-memory) venue reads.
 pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
     let now = super::auctions::now_ms();
-    let exposure = desk.shared.exposure.read().clone();
-    let marks = desk.shared.marks.read().clone();
-    let spots = desk.shared.spots.read().clone();
     let stress = *desk.shared.stress.read();
-    let stress_blocked = desk
-        .shared
-        .stress_blocked
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let risk_off = desk.shared.risk_off.load(std::sync::atomic::Ordering::Relaxed);
-    let book_delta_units = desk.shared.book_delta_units.read().clone();
-    let funding_rate_annual = *desk.shared.funding_rate_annual.read();
+    // One short read of the kernel for everything the snapshot needs
+    // before the (async) venue reads below.
+    let (exposure, marks, spots, stress_blocked, risk_off, book_delta_units, funding_rate_annual, market_views) = {
+        let k = desk.kernel.read();
+        let book_delta_units: HashMap<String, f64> = k
+            .models
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.coin_type.clone(), k.markets[i].book_delta_units))
+            .collect();
+        let market_views: Vec<MarketView> = k
+            .models
+            .iter()
+            .map(|m| MarketView {
+                window_vols: m.window_vols(),
+                estimator: m.estimator_state(),
+                surface_is_fallback: m.surface_is_fallback(),
+                carry_yield: m.carry_yield,
+            })
+            .collect();
+        (
+            k.exposure.clone(),
+            k.marks.clone(),
+            k.spots.clone(),
+            k.stress_blocked,
+            k.risk_off,
+            book_delta_units,
+            k.funding_rate_annual,
+            market_views,
+        )
+    };
 
     let symbol_of = |coin_type: &str| -> Option<String> {
         desk.market_meta
@@ -431,7 +461,8 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
     let per_unit: HashMap<protocol_types::ids::ObjectId, Greeks> =
         marks.iter().map(|(id, m)| (*id, m.greeks)).collect();
     let (holdings, written, reservations, pnl, naked_written_units, by_expiry, total_greeks, listed_by_bucket) = {
-        let b = desk.book.read();
+        let k = desk.kernel.read();
+        let b = &k.book;
         let (by_expiry, total) = b.net_greeks(&per_unit);
         let listed: HashMap<protocol_types::ids::ObjectId, u64> = b
             .holdings
@@ -595,8 +626,9 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
         .iter()
         .enumerate()
         .map(|(i, m)| {
-            let (short, long) = desk.models[i].window_vols();
-            let est = desk.models[i].estimator_state();
+            let view = &market_views[i];
+            let (short, long) = view.window_vols;
+            let est = &view.estimator;
             let spot = spots.get(&m.symbol);
             MarketDto {
                 symbol: m.symbol.clone(),
@@ -607,10 +639,10 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
                 realized_vol_short: short,
                 realized_vol_long: long,
                 fallback_vol: m.fallback_vol,
-                surface_is_fallback: desk.models[i].surface_is_fallback(),
-                carry_yield: desk.models[i].carry_yield,
+                surface_is_fallback: view.surface_is_fallback,
+                carry_yield: view.carry_yield,
                 estimator: est.estimator,
-                regime: est.regime,
+                regime: est.regime.clone(),
                 sample_interval_ms: est.sample_interval_ms,
                 sigma_mean: est.sigma_mean,
                 sigma_q_bid: est.sigma_q_bid,
@@ -784,7 +816,7 @@ pub fn capacities(
 /// [`limits::throttle`] over gamma by type × expiry, stressed hedge
 /// loss, per-expiry exercise demand and concurrent demand, against the
 /// snapshot's risk NAV and sources. 0 without a usable risk NAV.
-pub fn composition_utilization(cfg: &LimitsConfig, x: &super::BookExposure) -> f64 {
+pub fn composition_utilization(cfg: &LimitsConfig, x: &super::limits::BookExposure) -> f64 {
     let Some(risk_nav) = x.capital.risk_nav.filter(|r| *r > 0.0) else {
         return 0.0;
     };
@@ -833,7 +865,7 @@ pub fn composition_utilization(cfg: &LimitsConfig, x: &super::BookExposure) -> f
 
 /// Utilizations against the SOFT budgets, mirroring `limits::evaluate`'s
 /// ratios with no proposed fill. All 0 when NAV is 0.
-pub fn utilization(cfg: &LimitsConfig, x: &super::BookExposure) -> UtilizationDto {
+pub fn utilization(cfg: &LimitsConfig, x: &super::limits::BookExposure) -> UtilizationDto {
     if x.nav <= 0.0 {
         return UtilizationDto { premium: 0.0, vega: 0.0, theta: 0.0 };
     }
@@ -850,7 +882,7 @@ pub fn utilization(cfg: &LimitsConfig, x: &super::BookExposure) -> UtilizationDt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desk::BookExposure;
+    use crate::desk::limits::BookExposure;
 
     #[test]
     fn utilization_ratios_match_limits_evaluate_conventions() {

@@ -172,11 +172,10 @@ pub fn record(rfq: &Option<Arc<dyn RfqRecorder>>, row: RfqOutcomeRow) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::desk::book::{Book, DetectedFill, FillLink, FillSide};
+    use crate::desk::book::{DetectedFill, FillLink, FillSide};
     use crate::desk::history::MemoryRfqRecorder;
     use crate::desk::testkit::{self, COIN, DAY_MS, SETTLEMENT};
     use crate::desk::{close_filled_rfqs, Desk};
-    use parking_lot::RwLock;
 
     /// Minute-aligned so `NotCreatable` never masks the gate under test.
     const NOW: u64 = 1_699_999_980_000;
@@ -187,9 +186,7 @@ mod tests {
     }
 
     fn desk() -> Desk {
-        let shared = testkit::shared(1e9);
-        let book = Arc::new(RwLock::new(Book::new(1_000_000_000)));
-        testkit::desk(shared, book, testkit::paper_venue("rfq", 0.0, 0.0, 1.0))
+        testkit::desk(testkit::kernel(1e9), testkit::paper_venue("rfq", 0.0, 0.0, 1.0))
     }
 
     struct Harness {
@@ -355,7 +352,8 @@ mod tests {
         close_filled_rfqs(&off, &[(fill, 1.0)], NOW);
         assert!(rec.rows.lock().is_empty());
         // The quote still reserved its premium under the request id.
-        let b = h.desk.book.read();
+        let k = h.desk.kernel.read();
+        let b = &k.book;
         assert!(b.reserved_total() > 0);
         assert!(b.reservations_snapshot().iter().any(|r| r.key == "q1" && r.nonce == Some(7)));
     }

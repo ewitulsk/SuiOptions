@@ -53,7 +53,9 @@ use sui_tx::sui_client::{Network, SuiClientWrapper};
 use sui_tx::tx::exchange as exchange_tx;
 use sui_tx::tx::{owned_object_arg, shared_object_arg, submit_ptb, submit_ptb_rebuilding};
 
-use super::book::{Book, Holding};
+use desk_core::kernel::DeskKernel;
+
+use super::book::Holding;
 use super::exchange_client::{IntakeReject, OrderbookClient, OrderSigner};
 use super::{CuratorRefs, DeskShared};
 
@@ -235,7 +237,7 @@ pub struct ListingsParams {
     pub refresh_secs: u64,
     pub secrets: runtime_config::Secrets,
     pub network: Network,
-    pub book: Arc<RwLock<Book>>,
+    pub kernel: Arc<RwLock<DeskKernel>>,
     pub shared: Arc<DeskShared>,
     /// Curator refs — required: provisioning the direct custody and
     /// releasing coin positions are curator-session PTBs.
@@ -306,7 +308,7 @@ pub fn spawn_listings(p: ListingsParams) {
                 .zip(p.exchange_listing_authority),
             vault_protocol_config: p.vault_protocol_config,
             cfg: p.cfg.clone(),
-            book: Arc::clone(&p.book),
+            kernel: Arc::clone(&p.kernel),
             shared: Arc::clone(&p.shared),
             direct: None,
             allowlisted: HashSet::new(),
@@ -390,7 +392,7 @@ struct Engine {
     listing: Option<(ObjectID, ObjectID)>,
     vault_protocol_config: ObjectID,
     cfg: ListingsConfig,
-    book: Arc<RwLock<Book>>,
+    kernel: Arc<RwLock<DeskKernel>>,
     shared: Arc<DeskShared>,
     direct: Option<DirectCtx>,
     /// Canonical coin types already on the vault's deposit allowlist.
@@ -430,8 +432,10 @@ impl Engine {
             self.recovered = true;
         }
 
-        let holdings: Vec<Holding> = self.book.read().holdings.clone();
-        let marks = self.shared.marks.read().clone();
+        let (holdings, marks, risk_off) = {
+            let k = self.kernel.read();
+            (k.book.holdings.clone(), k.marks.clone(), k.risk_off)
+        };
         let mut live: HashSet<ObjectId> = HashSet::new();
 
         // SO-418 risk gate: placing/replacing an ask escrows option coins
@@ -440,7 +444,6 @@ impl Engine {
         // 91). Skip the placement loop; `live` stays empty, so the stale
         // sweep below pulls the resting asks — deployment stops,
         // unwinding continues.
-        let risk_off = self.shared.risk_off.load(std::sync::atomic::Ordering::Relaxed);
         if risk_off {
             tracing::debug!("listings idle: vault is risk-off; pulling resting asks");
         }
@@ -606,7 +609,7 @@ impl Engine {
     /// Record a resting ask + mirror it to the book ledger and the
     /// `/desk/state` snapshot.
     fn record_resting(&mut self, bucket: ObjectId, ask: RestingAsk, market: &Market, now: u64) {
-        self.book.write().set_listed_units(bucket, ask.size_units);
+        self.kernel.write().book.set_listed_units(bucket, ask.size_units);
         self.shared.listings.write().insert(
             bucket,
             ListingSnapshot {
@@ -628,7 +631,7 @@ impl Engine {
     /// sweep, and clear the book/state mirrors (a following
     /// `record_resting` reinstates them on the replacement).
     async fn cancel_resting(&mut self, bucket: &ObjectId) {
-        self.book.write().set_listed_units(*bucket, 0);
+        self.kernel.write().book.set_listed_units(*bucket, 0);
         self.shared.listings.write().remove(bucket);
         let Some(ask) = self.resting.remove(bucket) else { return };
         let (sig, pk) = self.signer.sign_cancel(&ask.digest);
@@ -730,7 +733,7 @@ impl Engine {
                 return;
             }
         };
-        let holdings: Vec<Holding> = self.book.read().holdings.clone();
+        let holdings: Vec<Holding> = self.kernel.read().book.holdings.clone();
         for entry in orders {
             if entry.status != "OPEN" || entry.order.order.expiry_ms <= now {
                 continue;

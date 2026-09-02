@@ -37,8 +37,11 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use desk_core::kernel::{DeskKernel, Event};
+use parking_lot::RwLock;
 use move_core_types::identifier::Identifier;
 use move_core_types::language_storage::TypeTag;
 use protocol_types::events::{ChainEvent, IndexedEvent};
@@ -49,23 +52,22 @@ use sui_types::programmable_transaction_builder::ProgrammableTransactionBuilder;
 
 pub use desk_core::book::*;
 
-/// Sink every P&L record the book queued since the last flush: the
-/// Prometheus counter/gauge per line and the append-only JSONL ledger.
-pub fn flush_pnl(book: &mut Book, pnl_path: Option<&Path>) {
-    for rec in book.drain_pnl_records() {
-        let label = match rec.line {
-            PnlLine::Spread => "spread",
-            PnlLine::Scalp => "scalp",
-            PnlLine::Theta => "theta",
-            PnlLine::Funding => "funding",
-        };
-        metrics::counter!("mm_desk_pnl_total", "line" => label)
-            .increment(rec.amount.abs().round() as u64);
-        metrics::gauge!("mm_desk_pnl", "line" => label).set(book.pnl_line(rec.line));
-        if let Some(path) = pnl_path {
-            if let Err(e) = append_jsonl(path, &rec) {
-                tracing::warn!(error = %format!("{e:#}"), "pnl jsonl append failed");
-            }
+/// Sink one P&L record the kernel emitted (`Command::RecordPnl`): the
+/// Prometheus counter, the per-line gauge at its running total, and the
+/// append-only JSONL ledger.
+pub fn sink_pnl_record(rec: &PnlRecord, running_total: f64, pnl_path: Option<&Path>) {
+    let label = match rec.line {
+        PnlLine::Spread => "spread",
+        PnlLine::Scalp => "scalp",
+        PnlLine::Theta => "theta",
+        PnlLine::Funding => "funding",
+    };
+    metrics::counter!("mm_desk_pnl_total", "line" => label)
+        .increment(rec.amount.abs().round() as u64);
+    metrics::gauge!("mm_desk_pnl", "line" => label).set(running_total);
+    if let Some(path) = pnl_path {
+        if let Err(e) = append_jsonl(path, rec) {
+            tracing::warn!(error = %format!("{e:#}"), "pnl jsonl append failed");
         }
     }
 }
@@ -630,16 +632,17 @@ pub fn classify_ticket_win(
     })
 }
 
-/// Apply detected fills (paired with their model fair TOTAL premium at
-/// detection) to the spread line, advance the cursor, then persist it
-/// (write-after-apply). Fills at or below the cursor are skipped, so a
-/// replay of an already-applied batch is a no-op. Returns how many fills
-/// were applied.
+/// Hand detected fills (paired with their model fair TOTAL premium at
+/// detection) to the kernel as `QuoteFilled` events — the spread line
+/// and the reservation the fill closes (SO-444) — advance the cursor,
+/// then persist it (write-after-apply). Fills at or below the cursor are
+/// skipped, so a replay of an already-applied batch is a no-op. Returns
+/// how many fills were applied.
 pub fn apply_fills(
-    book: &mut Book,
+    kernel: &Arc<RwLock<DeskKernel>>,
+    sinks: &super::Sinks,
     cursor: &mut FillCursor,
     cursor_path: &Path,
-    pnl_path: Option<&Path>,
     fills: &[(DetectedFill, f64)],
     now_ms: u64,
 ) -> usize {
@@ -648,20 +651,16 @@ pub fn apply_fills(
         if f.sequence <= cursor.last_sequence {
             continue;
         }
-        let (spread, label) = match f.side {
-            FillSide::Bought => (fair_total - f.premium as f64, "bought"),
-            FillSide::Wrote => (f.premium as f64 - fair_total, "wrote"),
+        let label = match f.side {
+            FillSide::Bought => "bought",
+            FillSide::Wrote => "wrote",
         };
-        let note = format!(
-            "fill seq={} bucket={} {} amount={} premium={}",
-            f.sequence,
-            f.bucket_id.to_hex(),
-            label,
-            f.amount,
-            f.premium
-        );
-        book.record_pnl(PnlLine::Spread, spread, &note, now_ms);
-        flush_pnl(book, pnl_path);
+        let cmds = kernel.write().on_event(Event::QuoteFilled {
+            fill: f.clone(),
+            fair_total: *fair_total,
+            at_ms: now_ms,
+        });
+        sinks.apply(kernel, &cmds);
         metrics::counter!("mm_desk_fills_total", "side" => label).increment(1);
         cursor.last_sequence = f.sequence;
         applied += 1;
@@ -843,20 +842,21 @@ mod tests {
             (win, 850.0),
         ];
 
-        let mut book = Book::new(0);
+        let kernel = crate::desk::testkit::kernel(0.0);
+        let sinks = crate::desk::Sinks { pnl_path: None, history: None };
         let mut cursor = FillCursor::default();
-        let applied = apply_fills(&mut book, &mut cursor, &cursor_path, None, &fills, 1);
+        let applied = apply_fills(&kernel, &sinks, &mut cursor, &cursor_path, &fills, 1);
         assert_eq!(applied, 2);
-        assert!((book.pnl.spread - 50.0).abs() < 1e-9);
+        assert!((kernel.read().book.pnl.spread - 50.0).abs() < 1e-9);
         assert_eq!(cursor.last_sequence, 101);
 
         // Restart: reload the persisted cursor, replay the same batch —
         // nothing double-counts.
         let mut cursor2 = FillCursor::load(&cursor_path).expect("cursor persisted");
         assert_eq!(cursor2.last_sequence, 101);
-        let applied = apply_fills(&mut book, &mut cursor2, &cursor_path, None, &fills, 2);
+        let applied = apply_fills(&kernel, &sinks, &mut cursor2, &cursor_path, &fills, 2);
         assert_eq!(applied, 0);
-        assert!((book.pnl.spread - 50.0).abs() < 1e-9);
+        assert!((kernel.read().book.pnl.spread - 50.0).abs() < 1e-9);
         let _ = std::fs::remove_file(&cursor_path);
     }
 
@@ -867,7 +867,9 @@ mod tests {
         let mut b = Book::new(0);
         b.record_pnl(PnlLine::Spread, 10.0, "fill", 1);
         b.record_pnl(PnlLine::Theta, -3.0, "decay", 2);
-        flush_pnl(&mut b, Some(&path));
+        for rec in b.drain_pnl_records() {
+            sink_pnl_record(&rec, b.pnl_line(rec.line), Some(&path));
+        }
         assert_eq!(b.pnl.spread, 10.0);
         assert_eq!(b.pnl.theta, -3.0);
         let text = std::fs::read_to_string(&path).unwrap();
