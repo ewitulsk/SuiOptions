@@ -108,6 +108,15 @@ terms_version              = 1
 enabled       = true
 orderbook_url = "http://orderbook:9014"
 
+# Capital policy (doc 08 §4.6, SO-444). Flash capacity is an ASSUMPTION
+# (decision 2026-08-22): $10M base + quote at TUSDC's 6 decimals so the
+# exercise-capacity leg never binds on the $1.1M staging vault; the
+# snapshot labels it and /desk/state reports whenever it binds. Venue
+# margin stays unbounded while the hedge is paper.
+[desk.capital]
+base_flash_capacity  = 10_000_000_000_000
+quote_flash_capacity = 10_000_000_000_000
+
 # Hedge venues: omit for the single legacy paper venue; declare
 # [[desk.hedge.venues]] entries (kind = "paper", name, slippage_bps,
 # funding_rate_annual) for multi-venue monitoring — see config.toml.

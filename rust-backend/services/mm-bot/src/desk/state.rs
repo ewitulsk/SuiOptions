@@ -16,7 +16,9 @@ use serde::Serialize;
 
 use super::book::Reservation;
 use super::hedge;
-use super::limits::LimitsConfig;
+use super::limits::{
+    Capacity, CapitalConfig, CapitalPolicy, CapitalSnapshot, FillRatios, LimitsConfig,
+};
 use super::model::Greeks;
 use super::monitors::{read_venue, MonitorsConfig};
 use super::{Desk, StressSnapshot, SurfaceTomlConfig, V1Config};
@@ -43,6 +45,10 @@ pub struct DeskStateDto {
     pub exposure: ExposureDto,
     pub utilization: UtilizationDto,
     pub limits: LimitsConfig,
+    /// The capital snapshot every dollar cap derives from (doc 08 §4.6,
+    /// SO-444) and the headline effective capacities over it.
+    pub capital: CapitalSnapshot,
+    pub capacities: CapacitiesDto,
     pub greeks: GreeksDto,
     /// Net book delta per underlying coin type, underlying raw units.
     pub book_delta_units: HashMap<String, f64>,
@@ -114,6 +120,36 @@ pub struct UtilizationDto {
     pub premium: f64,
     pub vega: f64,
     pub theta: f64,
+}
+
+/// Headline effective capacities (doc 08 §4.6) at the configured
+/// reference ATM ratios; `None` while the snapshot cannot back new risk
+/// (`stale` says why).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapacitiesDto {
+    pub risk_nav: Option<f64>,
+    pub stale: Option<&'static str>,
+    pub reference_ratios: ReferenceRatiosDto,
+    pub effective_call_capacity: Option<Capacity>,
+    pub effective_put_capacity: Option<Capacity>,
+    /// Ascending by expiry, over the expiries the book/reservations hold.
+    pub effective_expiry_capacity: Vec<ExpiryCapacityDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceRatiosDto {
+    pub hedge_notional_per_premium: f64,
+    pub exercise_cash_per_premium: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpiryCapacityDto {
+    pub expiry_ms: u64,
+    #[serde(flatten)]
+    pub capacity: Capacity,
 }
 
 #[derive(Serialize, Default)]
@@ -249,7 +285,8 @@ pub struct WrittenDto {
 pub struct ReservationsDto {
     pub count: usize,
     pub total: u64,
-    /// Soonest-expiry first. In-memory only — resets on restart.
+    /// Live (`quoted` / `accepted`) reservations, soonest-expiry first.
+    /// Durable in the history DB and reconstructed at boot (SO-444).
     pub entries: Vec<Reservation>,
 }
 
@@ -340,6 +377,7 @@ pub struct ConfigEchoDto {
     pub expected_holding_years: f64,
     pub surface: SurfaceTomlConfig,
     pub v1: V1Config,
+    pub capital: CapitalConfig,
     pub monitors: MonitorsConfig,
     pub auctions_enabled: bool,
     pub exits_enabled: bool,
@@ -563,6 +601,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
         .collect();
 
     let limits = desk.cfg.limits;
+    let capacities = capacities(&limits, &desk.cfg.capital, &exposure.capital, now);
     DeskStateDto {
         generated_at_ms: now,
         booted_at_ms: desk.booted_at_ms,
@@ -598,6 +637,8 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             risk_off,
         },
         limits,
+        capital: exposure.capital.clone(),
+        capacities,
         greeks: GreeksDto {
             total: GreeksAggDto {
                 delta_units: total_greeks.delta_units,
@@ -640,6 +681,7 @@ pub async fn snapshot(desk: &Desk, network: &str) -> DeskStateDto {
             expected_holding_years: desk.cfg.expected_holding_years,
             surface: desk.cfg.surface,
             v1: desk.cfg.v1,
+            capital: desk.cfg.capital.clone(),
             monitors: desk.cfg.monitors,
             auctions_enabled: desk.cfg.auctions.enabled,
             exits_enabled: desk.cfg.exits.enabled,
@@ -659,6 +701,53 @@ impl From<StressSnapshot> for StressDto {
             worst_drawdown: s.worst_drawdown,
             blocked: s.blocked,
         }
+    }
+}
+
+/// Headline effective capacities over the snapshot at the reference
+/// ratios (doc 08 §4.6); every expiry the book or reservations hold.
+pub fn capacities(
+    limits: &LimitsConfig,
+    cfg: &CapitalConfig,
+    snap: &CapitalSnapshot,
+    now_ms: u64,
+) -> CapacitiesDto {
+    let ratios = FillRatios {
+        hedge_notional_per_premium: cfg.reference_hedge_notional_per_premium,
+        exercise_cash_per_premium: cfg.reference_exercise_cash_per_premium,
+    };
+    let reference_ratios = ReferenceRatiosDto {
+        hedge_notional_per_premium: ratios.hedge_notional_per_premium,
+        exercise_cash_per_premium: ratios.exercise_cash_per_premium,
+    };
+    match snap.risk_nav_at(now_ms) {
+        Ok(risk_nav) => {
+            let p = CapitalPolicy { limits, snap, risk_nav };
+            let mut expiries: Vec<u64> = snap.premium_by_expiry.keys().copied().collect();
+            expiries.sort_unstable();
+            CapacitiesDto {
+                risk_nav: Some(risk_nav),
+                stale: None,
+                reference_ratios,
+                effective_call_capacity: Some(p.call_capacity(&ratios)),
+                effective_put_capacity: Some(p.put_capacity(&ratios)),
+                effective_expiry_capacity: expiries
+                    .into_iter()
+                    .map(|expiry_ms| ExpiryCapacityDto {
+                        expiry_ms,
+                        capacity: p.expiry_capacity(expiry_ms, &ratios),
+                    })
+                    .collect(),
+            }
+        }
+        Err(stale) => CapacitiesDto {
+            risk_nav: None,
+            stale: Some(stale.as_str()),
+            reference_ratios,
+            effective_call_capacity: None,
+            effective_put_capacity: None,
+            effective_expiry_capacity: Vec::new(),
+        },
     }
 }
 

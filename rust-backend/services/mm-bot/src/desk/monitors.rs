@@ -58,6 +58,11 @@ pub struct MonitorsConfig {
     /// V2 gate: block new short risk when stressed drawdown exceeds this
     /// fraction of NAV. 00-plan V2 §7: 25%.
     pub stress_max_drawdown: f64,
+    /// Stress spot gaps (fractions): the crash the long-perp put hedges
+    /// are sized for and the rally the short-perp call hedges are sized
+    /// for. 00-plan: −60% / +80%. Also the capital policy's top-up gap.
+    pub stress_gap_down: f64,
+    pub stress_gap_up: f64,
 }
 
 impl Default for MonitorsConfig {
@@ -68,6 +73,8 @@ impl Default for MonitorsConfig {
             margin_headroom_floor: 0.25,
             stress_interval_secs: 86_400,
             stress_max_drawdown: 0.25,
+            stress_gap_down: 0.60,
+            stress_gap_up: 0.80,
         }
     }
 }
@@ -161,6 +168,11 @@ pub struct MonitorsParams {
     /// The whole hedge roster (every venue instance, per underlying).
     pub venues: Vec<MonitorVenue>,
     pub hedge_band_pct_nav: f64,
+    /// Venue margin fractions of hedge notional (`[desk.hedge]` initial,
+    /// `[desk.capital]` maintenance) — the capital snapshot's margin
+    /// picture (SO-444).
+    pub initial_margin_fraction: f64,
+    pub maintenance_margin_fraction: f64,
 }
 
 pub fn spawn_monitors(p: MonitorsParams) {
@@ -206,6 +218,8 @@ fn clone_params(p: &MonitorsParams) -> MonitorsParams {
             .map(|v| MonitorVenue { symbol: v.symbol.clone(), venue: Arc::clone(&v.venue) })
             .collect(),
         hedge_band_pct_nav: p.hedge_band_pct_nav,
+        initial_margin_fraction: p.initial_margin_fraction,
+        maintenance_margin_fraction: p.maintenance_margin_fraction,
     }
 }
 
@@ -328,6 +342,16 @@ async fn monitor_tick(p: &MonitorsParams, bleed_samples: &mut Vec<(u64, f64, f64
         // The funding input to pricing: notional-weighted across venues.
         metrics::gauge!("mm_desk_funding_rate_annual_weighted").set(agg.funding_weighted);
         *p.shared.funding_rate_annual.write() = agg.funding_weighted;
+        // The venue margin picture the capital snapshot reads (SO-444):
+        // margin posted = Σ|position|·spot × initial fraction, the
+        // maintenance requirement, and the min headroom across venues.
+        let notional: f64 = readings.iter().map(|r| r.notional).sum();
+        *p.shared.venue_margin.write() = super::limits::VenueMarginInputs {
+            initial_margin: notional * p.initial_margin_fraction,
+            maintenance_margin: notional * p.maintenance_margin_fraction,
+            headroom: agg.min_headroom.as_ref().map(|(_, h)| *h).unwrap_or(1.0),
+            at_ms: now,
+        };
     }
 
     // Delta vs band, per market, against the TOTAL signed position
@@ -414,10 +438,10 @@ async fn stress_tick(p: &MonitorsParams) {
         .map(|(sym, pos)| (-pos * spots.get(sym).copied().unwrap_or(0.0)).max(0.0))
         .sum();
 
-    // Spot gaps: −60% / +80%, book delta-hedged (each underlying's hedge
-    // short offsets spot P&L 1:1 on delta; the option legs reprice
-    // through the model).
-    for gap in [-0.60, 0.80] {
+    // Spot gaps (config; 00-plan −60% / +80%), book delta-hedged (each
+    // underlying's hedge short offsets spot P&L 1:1 on delta; the option
+    // legs reprice through the model).
+    for gap in [-p.cfg.stress_gap_down.abs(), p.cfg.stress_gap_up.abs()] {
         let mut pnl = 0.0;
         for h in &holdings {
             let Some(mi) = p.models.iter().position(|m| m.coin_type == h.asset_coin_type) else {
