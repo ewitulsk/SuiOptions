@@ -319,3 +319,44 @@ stated priors until mainnet capture exists. The framework reports
 survival, capacity, and break-even surfaces conditional on those priors,
 plus a bid-discipline result that is real because it is measured against
 realized history. It does not report an APY.
+
+---
+
+## 6. Delivery log (2026-09-02)
+
+Everything in §4 and every doc 08 PR (H through O) merged to staging on
+2026-09-02, one squash-merged PR per item (SO-435 … SO-462, SO-465). The
+validation results live in `11-validation-report.md`; its §12 checklist is
+the honest state of "validated": ledger reconciliation, live/sim parity,
+no-writing, call/put lifecycle, the three put PTBs, no-resale survival,
+uncertainty labels and capacity bounds pass; the return hurdle on the
+sealed holdout, the lower-confidence-bound, the drawdown limits under the
+10× margin model, and the call/put/mixed robustness items do not yet.
+
+Rollout (SO-458), same day, all services on the new images. What broke
+and what fixed it:
+
+1. **mm-bot health gate failed twice and rolled the whole fleet back.**
+   The pinned `quote_signer_id` predated the 2026-08-22 core package,
+   chain-event discovery is pruned on publicnode, so every boot minted a
+   fresh QuoteSigner with a 0.2 SUI gas budget the deployer wallet could
+   not cover from one source (0.116 SUI in coin objects, 0.199 as address
+   balance — gas is paid from one or the other, never both). Fix:
+   `MM_BOT_GAS_BUDGET` (SO-460, 0.1 SUI on staging) plus a 10 SUI top-up.
+2. **The staging maker bot burned 0.63 SUI in 8 hours** resubmitting a
+   Switchboard-attested vault deposit every minute that aborts on chain
+   (SO-432). Fix: dev-inspect first, per-ticker backoff 5 min → 6 h,
+   alert on the first failure of a streak only (SO-461). Zero failed
+   on-chain transactions since.
+3. **Vault churn.** Discovery drops the desk's own vault once it wires
+   direct exchange custody for listings, so every restart provisioned a
+   new 1.1M-TUSDC vault (SO-463), and a valid pinned signer fails
+   `fields_match` so every boot mints a stray signer (SO-464). Stopgap:
+   pinned `vault_id` and `quote_signer_id` in the staging config (SO-465).
+4. **Deploy recipe that works on staging:** roll the indexer alone, wait
+   for it to catch up, roll mm-bot alone, then the rest via
+   `only_services`. `force_all` restarts the indexer under mm-bot and trips
+   its health gate.
+
+Open after this log: SO-432 (oracle attestation), SO-463, SO-464, and the
+doc 11 §12 items that fail.
