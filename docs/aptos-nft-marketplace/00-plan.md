@@ -1,541 +1,456 @@
-# Aptos NFT marketplace: landscape, feature set, and cross-market buy design
+# Aptos NFT marketplace: implementation plan
 
-Status: **IDEATION**. This chapter answers three questions before any build
-planning starts: what is live on Aptos today, what a marketplace must ship to
-be credible, and how we let our users buy NFTs that are listed on *other*
-marketplaces' contracts. Chapter `01-` (build plan) follows once the feature
-cut is agreed.
+Status: **PLANNED, not scheduled.** One document: what exists on Aptos today,
+what we build, in what order, and how each step is verified. The address
+list lives in `appendix-addresses.md`. Facts about mainnet were read directly
+from the chain on 2026-09-02 (module ABIs, package registries, hosted
+indexer); anything not verified is marked **unverified**.
 
-Everything on-chain below was read directly from mainnet on 2026-09-02
-(module ABIs via the fullnode REST API, package registries, and the hosted
-indexer's `account_transactions` table). Where a claim could not be verified
-it is marked **unverified**.
+## 0. Decisions (agreed)
 
-## Executive recommendation
+1. **Aggregator first, venue second.** Every live marketplace contract on
+   Aptos exposes its buy path as `public entry`, so one router module of
+   ours fills listings on any of them in one transaction. Tradeport's
+   `markets_v2::buy_tokens_v2` did exactly this with one-function adapter
+   modules per venue plus a Tradeport fee. Day-one liquidity is everything
+   already listed on Aptos.
+2. **Own venue = fork of the `aptos-core` reference marketplace**
+   (`aptos-move/move-examples/marketplace`), which Wapal, Rarible and Topaz
+   v2 also forked. Its payment leg is `Coin<CoinType>`-generic; we replace
+   it with Fungible Asset (FA) so listings can be priced in APT, USDC or
+   USDt, and the quote token becomes a data field, not a type parameter.
+3. **Quote tokens are allowlisted.** Any FA the admin enables, seeded with
+   APT (`0xa`), USDC, USDt. Native USDC and USDt have no Coin type at all,
+   and both carry dispatchable transfer hooks, so a permissionless quote
+   token is both a liveness and a griefing risk. Floor and volume also need
+   a common denominator.
+4. **Fees.** Percentage commission from the seller's proceeds on our-venue
+   fills; a buyer-side add-on on routed buys through foreign venues; zero
+   listing and bidding fees; per-token `min_fee`, per-collection overrides,
+   per-wallet discounts. Fees accrue in the trade's quote token, no on-chain
+   swap.
+5. **Own the index.** The hosted NFT Aggregator GraphQL endpoint returned
+   404 anonymously today (**unverified** whether it moved behind API keys).
+   Marketplace state comes from our own Transaction Stream processor. The
+   hosted Indexer GraphQL is used for token metadata and ownership at P0 and
+   treated as a rebuildable cache, never as the source of truth for
+   listings.
+6. **Tradeport's contract is a live venue.** Its frontend shut down; the
+   contract had 50 transactions in the last 1.3 days (27 new listings, 12
+   unlists, 5 router buys). We index it, route buys to it, and ship a
+   "rescue my escrowed NFTs" flow on day one.
+7. **Repo layout.** `aptos/contracts` (Aptos Move, Aptos CLI toolchain, own
+   CI) and `aptos/go-backend` (separate Go module; copies the four platform
+   packages it needs from `go-backend/internal/platform`). New
+   `aptos-frontend/` Vite app. Registered in the three deploy lists like any
+   other service.
 
-1. **Build the aggregator first, the venue second.** Every live Aptos
-   marketplace contract exposes its buy path as `public entry`, so a single
-   router module of ours can fill listings on any of them in one transaction.
-   Tradeport proved this exact design: its `markets_v2::buy_tokens_v2` is a
-   router with adapter modules (`wapal_listings`, `bluemove_v2_listings`,
-   `topaz_v2_listings`) that wrap the other venues' purchase functions and
-   skim a Tradeport fee on top. Day-one liquidity is "everything already
-   listed on Aptos", not "whatever our users list with us".
-2. **Fork the `aptos-core` reference marketplace for our own venue.** Wapal,
-   Rarible, and the Topaz v2 contract are all forks of
-   `aptos-move/move-examples/marketplace` (same `coin_listing` /
-   `fee_schedule` / `collection_offer` / `token_offer` module set, same event
-   shapes). Starting from the same base gives us a reviewed design that
-   already handles legacy TokenV1 and Digital Asset (v2) tokens, Coin and
-   Fungible Asset payment, fixed price, auctions, token offers, and
-   collection offers. It also means one adapter shape covers three foreign
-   venues.
-3. **Own the index.** Aptos Labs' hosted NFT Aggregator GraphQL endpoint
-   returned 404 anonymously today (**unverified** whether it moved behind
-   API keys or was retired). Do not build a product on it. Run our own
-   processor over the Transaction Stream (gRPC) into Postgres, following the
-   `go-backend/internal/eventingestor` poller idiom, and treat the aggregator
-   only as an optional backfill source.
-4. **Treat Tradeport's contract as a live venue, not a dead one.** Its
-   frontend is what shut down; the contract is still the most active
-   marketplace contract on the chain (see §2.3), because wallets and other
-   frontends embed its SDK, and sellers are actively unlisting escrowed
-   NFTs. Two product consequences: index and route buys for Tradeport
-   listings, and ship a "rescue my listed NFTs" flow that calls
-   `listings_v2::unlist_tokens` on the seller's behalf.
-5. **Layout in this repo:** `aptos/contracts` (Aptos Move packages, Aptos
-   CLI toolchain, own CI workflow mirroring `move-ci.yml`) and
-   `aptos/go-backend` (a second Go module: indexer + API + router-payload
-   builder, reusing the platform patterns from `go-backend/internal/platform`).
+## 1. What is on chain (condensed)
 
-## 1. Token standards we must support
+Token standards, both mandatory: legacy TokenV1 (`0x3::token`, identity is
+`TokenId { creator, collection_name, token_name, property_version }`, every
+2022-2023 collection) and Digital Asset v2 (`0x4::token`, identity is the
+object address, everything since late 2023). Every read model keys on a
+canonical `token_data_id` that covers both, matching the Aptos indexer's
+`current_token_ownerships_v2`. Royalties: `0x4::royalty` for v2, `TokenData`
+for v1; the reference `listing::compute_royalty` handles both.
 
-| Standard | Address | Identity of an NFT | Share of live listings |
-|---|---|---|---|
-| Legacy Token (TokenV1) | `0x3::token` | `TokenId { creator, collection_name, token_name, property_version }` | Large: every 2022-2023 collection (Aptos Monkeys, Aptomingos, ...). Every venue keeps a separate `*_tokenv1` code path. |
-| Digital Asset (TokenV2 / DA) | `0x4::token`, `0x4::collection`, `0x4::royalty` | `Object<Token>` address | All collections minted since late 2023. |
+| Venue | Contract | Upgrade policy | Buy entry (all `public entry`) | Status 2026-09-02 |
+|---|---|---|---|---|
+| Tradeport | `0xe11c...3c26` | compatible, 20 upgrades | `listings_v2::buy_token(Object<Listing>)`, `listings::buy_token(creator, collection, name, pv)` for v1; router `markets_v2::buy_tokens_v2(...)` | contract busiest on chain; frontend gone |
+| Wapal | `0x584b...58c9` | compatible, 15 | `coin_listing::purchase<T>(Object<Listing>)`, `purchase_many<T>` | live, ~2 tx/day |
+| Rarible | `0x465a...e790` | **immutable** | `coin_listing::purchase<T>(Object<Listing>)`, auctions via `bid<T>` | live, volume **unverified** |
+| Bluemove v2 | `0xd520...6f5` | compatible | `coin_listing::purchase<T>(Object<Listing>, price)` | activity **unverified** |
+| Bluemove v1 | `0xd1fd...614e` | compatible | `marketplaceV2::batch_buy_script(creators, collections, names, pvs)` | dormant since 2025-07 |
+| OKX | `0x1e60...7a43` | compatible | `okx_fixed_price::buy_direct_listing<T>(listing, price)` | dormant since 2025-07 |
+| Topaz v1 | `0x2c7b...10a2` | compatible | `marketplace_v2::buy<T>(seller, id, price, creator, collection, name, pv)` | deprecated 2023; residual listings still bought through Tradeport's router |
+| Topaz v2 | `0x6de3...67e0` | compatible | reference surface | dormant |
+| Souffl3, Seashrine, Ozozoz, Mercato | see appendix | | | dead; history only |
 
-Rules that fall out of this:
+Wapal, Rarible, Topaz v2 (and Bluemove v2 with tweaks) share the reference
+surface: `coin_listing`, `fee_schedule`, `listing`, `token_offer`,
+`collection_offer`, `events`, `marketplace_scripts`. One adapter covers them.
 
-- Every read model keys NFTs by a canonical `token_data_id` that works for
-  both standards (v1: hash of creator+collection+name; v2: object address).
-  This is the same shape the Aptos indexer's `current_token_ownerships_v2`
-  uses, so joins stay cheap.
-- Every write path (list, buy, offer) has a v1 and a v2 variant. The
-  reference marketplace already splits them (`init_fixed_price` vs
-  `init_fixed_price_for_tokenv1`).
-- Royalties are read from `0x4::royalty` for DA and from `TokenData` for
-  v1; the reference `listing::compute_royalty` handles both and pays the
-  creator on fill. Royalties are enforced by *our* contract on *our*
-  listings; on foreign listings the foreign contract decides.
-- Payment: APT as `Coin<AptosCoin>` today, plus Fungible Asset (FA) for
-  stablecoins. The reference marketplace already accepts either.
+Data sources: Transaction Stream gRPC (`grpc.mainnet.aptoslabs.com:443`, API
+key) is the primary feed; hosted Indexer GraphQL
+(`api.mainnet.aptoslabs.com/v1/graphql`) for `current_token_datas_v2`,
+`current_collections_v2`, `current_token_ownerships_v2`, ANS; fullnode REST
+for ABIs, views, simulation, submission. The hosted indexer's `events` table
+is deprecated (2026-09-08) and the public fullnode returns `410 Gone` beyond
+its prune window, so all history comes from our own store. The open-source
+`aptos-labs/aptos-nft-aggregator` (Rust) has the per-venue event mappings
+we copy.
 
-## 2. The landscape (mainnet, 2026-09-02)
-
-### 2.1 Venues and their contracts
-
-| Venue | Contract account | Upgrade policy | Source on chain | Token support | Status |
-|---|---|---|---|---|---|
-| **Tradeport** | `0xe11c12ec495f3989c35e1c6a0af414451223305b579291fc8f3d9d0575a23c26` | compatible (upgraded 20 times) | no | v1 (`listings`, `biddings`, `markets`) and v2 (`listings_v2`, `biddings_v2`, `markets_v2`) | Frontend shut down; contract live and busiest on chain |
-| **Wapal** (Mokshya) | `0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9` | compatible (15 upgrades) | no | v1 + v2 | Live, low volume |
-| **Rarible** | `0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790` | **immutable** | yes | v1 + v2 | Frontend live (**unverified** volume) |
-| **Bluemove v1** | `0xd1fd99c1944b84d1670a2536417e997864ad12303d19eac725891691b04d614e` | compatible | yes | v1 only (`0x3::token::TokenId`) | No user activity since 2025-07 |
-| **Bluemove v2** | `0xd520d8669b0a3de23119898dcdff3e0a27910db247663646ad18cf16e44c6f5` | compatible | no | v2 (reference-marketplace fork) | No indexed activity |
-| **OKX NFT** | `0x1e6009ce9d288f3d5031c06ca0b19a334214ead798a0cb38808485bd6d997a43` | compatible | no | `okx_fixed_price::buy_direct_listing<T>` | No user activity since 2025-07 |
-| Topaz (v1 contract) | `0x2c7bccf7b31baf770fdbcc768d9e9cb3d87805e255355df5db32ac9a669010a2` | compatible | no | v1 | Deprecated 2023; residual listings still being bought via Tradeport's router |
-| Topaz v2 | `0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0` | compatible | no | reference-marketplace fork | Dormant |
-| Souffl3, Seashrine, Ozozoz, Mercato | `0xf699...`, `0xd543...`, `0xded0...`, n/a | | | | Dead; only worth indexing for history |
-
-The full address list, including Tradeport's own dependency graph (which is
-the most complete "who existed" list on Aptos), is in
-`docs/aptos-nft-marketplace/appendix-addresses.md`.
-
-### 2.2 Buy entry points, per venue (verbatim from on-chain ABIs)
-
-All of these are `public entry`, so they can be called both directly from a
-transaction and from another Move module. `T` is the payment coin type
-(`0x1::aptos_coin::AptosCoin` in practice).
-
-Tradeport (native listings):
+## 2. Architecture
 
 ```
-listings_v2::buy_token(&signer, Object<listings_v2::Listing>)             // DA tokens
-listings_v2::buy_tokens(&signer, vector<Object<listings_v2::Listing>>)
-listings::buy_token(&signer, creator: address, collection: String, name: String, property_version: u64)  // TokenV1
-listings::buy_tokens(&signer, vector<address>, vector<String>, vector<String>, vector<u64>)
-listings_v2::unlist_token(s)(...)   // the "rescue" path for sellers
+                 Transaction Stream (gRPC)            hosted Indexer GraphQL
+                          |                                    |
+                 aptos/go-backend/cmd/nft-indexer  <-----------+  (metadata, ownership, ANS)
+                          |  venue event mappers + our-venue mapper + router attribution
+                          v
+                      Postgres (nft_*)
+                          |
+                 aptos/go-backend/cmd/nft-api  --- REST + WS ---> aptos-frontend (Vite/React)
+                          |  payload builders (tier 0 direct, tier 1 router), simulation,
+                          |  image proxy/CDN, admin mux
+                          v
+              fullnode REST (simulate/submit)      wallet signs (wallet adapter, AIP-62)
+                          |
+      aptos/contracts/marketplace (our venue)   aptos/contracts/router (adapters -> foreign venues)
 ```
 
-Tradeport (its own cross-venue router, the design we copy):
+Two Go services, two Move packages, one frontend. Everything read-side is
+rebuildable from the stream plus the hosted indexer.
+
+## 3. Contracts (`aptos/contracts`)
+
+Toolchain: Aptos CLI (pinned version in CI via the official
+`install_cli.sh`), `aptos move test --dev`, compiler v2. Deployment as
+**object code deployment** (`aptos move deploy-object`, upgrades with
+`aptos move upgrade-object`), policy `compatible`, owner is a
+`0x1::multisig_account` on mainnet and a plain key on testnet. Package ids
+and object addresses recorded in `aptos/deployments.json` keyed by env,
+mirroring `rust-backend/deployments.json`.
+
+### 3.1 `marketplace` package (our venue)
+
+Fork of the reference marketplace; keep its module boundaries and event
+names so the indexer mapper for "ours" is the Wapal mapper with a different
+address.
+
+| Module | Keep / change |
+|---|---|
+| `listing` | Keep: `Listing` object holding the token (v2 via object transfer, v1 via `TokenV1Container`), `compute_royalty`, `close`. Change: add `quote: Object<Metadata>` field. |
+| `fa_listing` (replaces `coin_listing`) | `init_fixed_price(seller, token: Object<ObjectCore>, quote, price)`, `init_fixed_price_for_tokenv1(...)`, `init_fixed_price_many`, `update_fixed_price`, `end_fixed_price`, `purchase(buyer, listing)`, `purchase_many`. Payment via `primary_fungible_store::withdraw(buyer, quote, price)`; royalty, commission, seller paid with `primary_fungible_store::deposit`. No type parameters. Auctions dropped at P0 (module stays out of the build; P2). |
+| `token_offer`, `collection_offer` | Same FA change: offer escrow is an object-owned `FungibleStore` in the quote token; `sell_tokenv2`, `sell_tokenv1_entry`, `cancel`, expiry. Collection offers carry `remaining` quantity. |
+| `fee_schedule` | Keep percentage commission, fee address, mutation events. Add `QuoteAllowlist { tokens: SmartTable<address, QuoteToken { enabled, min_fee }> }` under the same admin object, and per-collection commission overrides (`upsert_collection_numerator`, Tradeport's shape) and per-wallet discounts (`loyalty`). Zero listing and bidding fees (functions kept, set to 0, never surfaced). |
+| `events` | Keep reference event structs (`ListingPlacedEvent`, `ListingFilledEvent`, ... with `TokenMetadata`), add `quote: address` and `fee: u64` fields. |
+| `marketplace_scripts` | Vector-of-address convenience entries, as in reference. |
+
+Invariants to test (Move unit tests, `--dev`):
+
+- Fill pays exactly `price = royalty + commission + seller_proceeds`, in the
+  listing's quote token, with `commission >= min_fee` for that token.
+- Listing, offering, or filling in a non-allowlisted or disabled quote token
+  aborts; disabling a token after a listing exists still allows `end_fixed_price`
+  (seller can always get the NFT back) but blocks `purchase`.
+- Both token standards round-trip (list, buy, cancel) with royalties honoured.
+- Collection offer with quantity N fills N times then is closed; expired
+  offers cannot be filled but can be cancelled by anyone (refund to bidder).
+- Fee-schedule mutations apply to existing listings (listings reference the
+  shared schedule object, not a snapshot).
+
+### 3.2 `router` package (cross-venue)
 
 ```
-markets_v2::buy_tokens_v2(&signer,
-  vector<u64>      listing_ids,
-  vector<String>   marketplace_names,      // "tradeport" | "wapal" | "topaz" | "bluemove" | ...
-  vector<address>  creators,
-  vector<u64>      prices,
-  vector<address>  sellers,
-  vector<String>   collection_names,
-  vector<String>   token_names,
-  vector<u64>      property_versions,
-  vector<u128>     nonces,
-  vector<address>  listing_objects)
-wapal_listings::buy_token(&signer, listing: address)
-bluemove_v2_listings::buy_token(&signer, listing: address, price: u64)
-topaz_v2_listings::buy_token(&signer, listing: address)
+router::buy_many(buyer, venues: vector<u8>, listings: vector<address>,
+                 expected_prices: vector<u64>, extra: vector<u64>)
+router::sell_to_offer(seller, venue: u8, offer: address, token: address)      // P1
 ```
 
-Wapal, Rarible, Topaz v2 (identical reference-marketplace surface, different
-account address):
+Adapters, one function each, calling the venue's `public entry` purchase
+(a `public entry` function is callable from another module):
 
-```
-coin_listing::purchase<T>(&signer, Object<listing::Listing>)
-coin_listing::purchase_many<T>(&signer, vector<Object<listing::Listing>>)   // Wapal only
-coin_listing::bid<T>(&signer, Object<Listing>, amount)                     // auctions (Rarible)
-collection_offer::sell_tokenv2<T>(&signer, Object<CollectionOffer>, Object<0x4::token::Token>)
-collection_offer::sell_tokenv1_entry<T>(&signer, Object<CollectionOffer>, token_name, property_version)
-token_offer::sell_tokenv2<T>(&signer, Object<TokenOffer>)
-token_offer::sell_tokenv1_entry<T>(&signer, Object<TokenOffer>, token_name, property_version)
-```
-
-Bluemove v2 (reference fork with tweaks):
-
-```
-coin_listing::purchase<T>(&signer, Object<listing::Listing>, price: u64)
-coin_listing::batch_buy_token_v2<T0, T1>(&signer, vector<Object<T0>>, vector<u64>)
-token_offer::sell_instantly_token_v2<T>(&signer, Object<TokenOffer>, Option<Object<Listing>>)
-```
-
-Bluemove v1 (TokenV1 only):
-
-```
-marketplaceV2::batch_buy_script(&signer, vector<address> creators, vector<String> collections, vector<String> names, vector<u64> property_versions)
-marketplaceV2::accept_offer(&signer, offer_id, creator, collection, name, property_version)
-```
-
-OKX:
-
-```
-okx_fixed_price::buy_direct_listing<T>(&signer, listing: address, price: u64)
-```
-
-Topaz v1 (residual listings):
-
-```
-marketplace_v2::buy<T>(&signer, seller, listing_id, price, creator, collection, name, property_version)
-marketplace_v2::buy_many_v2<T>(... vectors ..., vector<vector<u8>> signatures)   // Topaz-signed listings
-collection_marketplace::fill<T>(&signer, bid_id, price, creator, collection, name, property_version)
-```
-
-### 2.3 Where the activity is right now
-
-Last 50 user transactions touching each contract account, read from the
-hosted indexer on 2026-09-02:
-
-| Contract | Latest tx | Span of last 50 txs | What those txs were |
-|---|---|---|---|
-| Tradeport | 2026-09-02 12:12 UTC | **1.3 days** | 27 `markets_v2::list_tokens_v2`, 12 `listings_v2::unlist_tokens`, 5 `markets_v2::buy_tokens_v2`, 3 `biddings_v2::collection_bids` |
-| Wapal | 2026-09-01 | 20.8 days | 24 buys, all via Tradeport's `markets_v2::buy_tokens_v2`; 13 collection-offer cancels; 8 delists |
-| Topaz v1 | 2026-08-26 | 96.5 days | 30 buys via Tradeport's router, 9 lists, 7 collection-offer fills |
-| Bluemove v1 | 2025-07-31 | 1016 days | package publishes and coin transfers only |
-| OKX | 2025-07-31 | 1001 days | housekeeping only |
-| Topaz v2 | 2025-07-30 | 741 days | housekeeping only |
-| Rarible | (publish tx only) | n/a | Rarible stores listings as objects at other addresses, so this table is blind to it. **Unverified.** |
-| Bluemove v2 | none | n/a | Same caveat as Rarible. **Unverified.** |
-
-Reading: the Aptos NFT market today is small (tens of fills a day chain-wide)
-and it flows almost entirely through Tradeport's router contract, whether the
-listing sits on Tradeport, Wapal, or a 2023 Topaz escrow. Whoever indexes
-those listings and offers a working buy button captures the whole market.
-The 12 `unlist_tokens` in a day and a half are sellers pulling NFTs out of
-Tradeport escrow by hand, which is the onboarding wedge in §3.6.
-
-Two caveats. First, we cannot see from this table who is submitting the
-`list_tokens_v2` calls (Petra and other wallets embed Tradeport's SDK, and
-Tradeport's own site may still serve Aptos in read-only mode); it does not
-change the design. Second, the hosted indexer deprecated its `events` table
-on 2026-09-08 and the public fullnode returns `410 Gone` for transactions
-older than its prune window, so all historical work needs our own store.
-
-### 2.4 Data sources
-
-| Source | What it gives | Access | Verdict |
-|---|---|---|---|
-| Transaction Stream Service (gRPC, `grpc.mainnet.aptoslabs.com:443`) | Every transaction with events and write sets, from any version | API key from Aptos Build (free tier) | **Primary feed** for our indexer |
-| Hosted Indexer GraphQL (`api.mainnet.aptoslabs.com/v1/graphql`) | `current_token_ownerships_v2`, `current_token_datas_v2`, `current_collections_v2`, `account_transactions`, ANS names | Anonymous with low rate limits; API key for more | **Metadata + ownership backfill**, wallet portfolio reads |
-| Aptos NFT Aggregator GraphQL (`.../nft-aggregator/v1/graphql`) | Normalized `current_nft_marketplace_listings` / `_token_offers` / `_collection_offers` / `nft_marketplace_activities` across Tradeport, Wapal, Bluemove, Rarible, Topaz | Returned **404** anonymously today | Nice-to-have backfill if it still exists behind a key; never a dependency |
-| `aptos-labs/aptos-nft-aggregator` (Rust, open source) | The processor behind the table above: YAML config maps each venue's events to standard `listing_created` / `listing_filled` / `token_offer_*` / `collection_offer_*` rows | Self-host | **Fork its event mappings** into our Go processor; they are the exact schema we want |
-| Fullnode REST (`fullnode.mainnet.aptoslabs.com/v1`) | Module ABIs, resources, view functions, simulation, submission | Anonymous | Tx build/simulate/submit, ABI-driven adapters |
-| Tradeport / indexer.xyz GraphQL and `@tradeport/aptos-trading-sdk` | Their normalized listings API and payload builder | API key; company shut down | Do not depend on it. Useful only as a reference for payload shapes |
-
-## 3. Feature set
-
-Grouped by what a user is doing. "P0" is the launch cut; "P1" is the first
-follow-up; "P2" is later. The cut is deliberately weighted toward buying
-across venues, because that is where the liquidity is.
-
-### 3.1 Discover
-
-| Feature | Priority | Notes |
+| Adapter | Calls | Notes |
 |---|---|---|
-| Collection pages: floor, listed count, 24h/7d volume, sales, owners, supply | P0 | Floor and volume computed **across all venues**, not only ours |
-| Item grid with attribute filters, price/rarity sort, "buy now only" | P0 | Attributes from `token_properties` (v1) / property map (v2) |
-| Rarity ranks | P1 | Statistical rarity over the collection's attribute frequencies |
-| Global search: collections, items, wallets, ANS names | P0 | ANS resolution via the indexer |
-| Activity feed per collection / item / wallet | P0 | From `nft_marketplace_activities` |
-| Price history chart per item and floor chart per collection | P1 | Reuse `lightweight-charts` already in `frontend/` |
-| Trending / top collections landing | P0 | Volume-ranked over 24h / 7d |
-| Collection verification badge, spam/scam hiding, NSFW flag | P0 | Admin-curated allowlist plus heuristics; spam is a real problem on Aptos |
+| `ref_market_adapter` | `wapal::coin_listing::purchase<AptosCoin>`, `rarible::coin_listing::purchase<AptosCoin>`, `topaz_v2::coin_listing::purchase<AptosCoin>` | Reads `coin_listing::price` view and asserts `== expected_price` before calling |
+| `tradeport_adapter` | `listings_v2::buy_token(Object<Listing>)`; v1 `listings::buy_token(creator, collection, name, pv)` | v1 args packed by the payload builder |
+| `bluemove_v2_adapter` | `coin_listing::purchase<AptosCoin>(listing, price)` | |
+| `okx_adapter` | `okx_fixed_price::buy_direct_listing<AptosCoin>(listing, price)` | Dormant; include only if the spike shows live listings |
+| `topaz_v1_adapter`, `bluemove_v1_adapter` | table-based `buy` / `batch_buy_script` | P1; Topaz signed listings (`buy_v2` with signature) are dead liquidity and are indexed as cancelled when simulation fails |
 
-### 3.2 Buy
+Fee: `buy_many` withdraws `sum(expected_prices) * fee_bps / 10_000`
+(floored at `min_fee`) from the buyer in APT and deposits it to the treasury
+before dispatching; emits `RouterFill { venue, listing, price, fee, buyer }`
+per item. Sweeps are atomic at P0 (any stale listing aborts the whole
+transaction; the API re-simulates right before signing). P1: best-effort on
+object-based venues (skip when the `price` view mismatches or the object is
+gone, emit `Skipped`).
 
-| Feature | Priority | Notes |
-|---|---|---|
-| Buy a listing on **any venue** in one click | P0 | §4 |
-| Sweep / cart: buy N cheapest across venues in one transaction | P0 | Router batch call; partial-fill semantics in §4.4 |
-| Pre-flight simulation with clear failure reasons (sold, delisted, price changed) | P0 | Fullnode `/transactions/simulate`; stale listings are the number-one UX failure on aggregators |
-| Fee and royalty breakdown before signing | P0 | Ours, the venue's, the creator's |
-| Instant sell into best collection offer (any venue) | P1 | `collection_offer::sell_tokenv2` on foreign venues |
-| Sponsored gas for first purchase | P2 | Aptos fee-payer transactions; there is a Sui gas station service in `rust-backend/` to crib from |
+Dependencies: foreign packages are fetched with `aptos move download` into
+`router/deps/<venue>/` and referenced as local deps. Only Rarible and
+Bluemove v1 publish source; the others are bytecode-only. Phase 0 spike
+confirms the compiler links against bytecode packages (the TS SDK Script
+Composer does this at runtime, so the linker path exists). Fallback: build a
+Move script per transaction (same adapters as script code, fee as a
+`coin::transfer` in the same script).
 
-### 3.3 Sell
+Foreign venue commission still goes to that venue; ours is additive on the
+buyer side. `compatible` upgrade policy on every venue means their public
+function signatures cannot change under us; Rarible is immutable.
 
-| Feature | Priority | Notes |
-|---|---|---|
-| List fixed price (single and bulk), edit price, delist | P0 | Our contract, both token standards |
-| Offers: token offer, collection offer (with quantity), accept / cancel, expiry | P0 | Reference marketplace has all three |
-| Auctions (timed, reserve, buy-now) | P2 | Reference marketplace has it; Wapal and Rarible ship it; volume is negligible |
-| "Rescue" escrowed NFTs: unlist from Tradeport / Wapal / Topaz from our UI | P0 | §3.6 |
-| Bulk transfer | P1 | |
+### 3.3 Testing the router
 
-### 3.4 Portfolio
+Local testnet (`aptos node run-local-testnet`) with our own reference fork
+published at Wapal's, Rarible's and Topaz v2's addresses via named-address
+substitution (they are the same code shape), plus Bluemove v1 from its
+published source. Adapter tests list on the "foreign" venue and buy through
+`router::buy_many`. Mainnet acceptance: one canary buy per live venue of the
+cheapest listing on a verified collection, from a dedicated ops wallet,
+before the router address is enabled in the API.
 
-| Feature | Priority | Notes |
-|---|---|---|
-| Holdings with floor value, listed-where badge, offers received | P0 | From `current_token_ownerships_v2` plus our listings/offers tables |
-| Activity and realized P&L per wallet | P1 | |
-| Hidden items | P1 | |
-| Watchlist and price alerts | P2 | |
+## 4. Indexer (`aptos/go-backend/cmd/nft-indexer`)
 
-### 3.5 Creators
+Go 1.24, module `github.com/ewitulsk/SuiOptions/aptos/go-backend`, pgx/v5,
+goose migrations embedded, TOML config with `${VAR}` expansion, Prometheus
+`/metrics`, `/health` returning `ok`, `slog` structured logging (new for the
+Go side; required so `alert_id` fields exist for Loki grouping).
 
-| Feature | Priority | Notes |
-|---|---|---|
-| Royalties honoured on our venue for both standards | P0 | Enforced in contract at fill |
-| Creator dashboard (volume, royalties earned, holders) | P1 | |
-| Launchpad / minting | P2 | Wapal's core business; not ours at launch |
+### 4.1 Stream client
 
-### 3.6 Onboarding wedge: the Tradeport diaspora
+`internal/stream`: generated Go from the `aptos.indexer.v1` protos in
+`aptos-core/protos` (vendored; `buf generate`), `RawData/GetTransactions`
+with `starting_version`, `Authorization: Bearer <key>`. Processor loop:
+batch of N transactions, apply all mappers, one DB transaction per batch,
+commit the batch's last version to `stream_cursors(stream_name, version)`;
+on crash replay from the cursor (upserts are idempotent on
+`(txn_version, event_index, marketplace)`). Metrics: `nft_indexer_lag_seconds`,
+`nft_indexer_batch_versions`, `nft_indexer_mapper_errors_total{venue}`.
 
-Tradeport-listed NFTs are still sitting in Tradeport `Listing` objects. Their
-owners have two options today: sign an `unlist` call by hand through an
-explorer, or wait. We ship, on day one:
+### 4.2 Mappers
 
-- A wallet view that shows every NFT the connected wallet has escrowed on
-  Tradeport, Wapal, Topaz, and Bluemove, with a one-click unlist (or
-  "relist with us at the same price" which composes unlist plus list in one
-  transaction).
-- Their Tradeport listings and collection bids kept live and buyable on our
-  site until they choose to move them.
+One package per venue under `internal/venues/<name>` implementing:
 
-This is cheap (adapters we build anyway, §4) and it is the honest story for
-launch: "your listings still work, and here is the button Tradeport no
-longer gives you".
-
-### 3.7 Platform
-
-| Feature | Priority | Notes |
-|---|---|---|
-| Wallet adapter: Petra, Pontem, Nightly, OKX, MSafe, Aptos Connect (keyless Google/Apple login) | P0 | `@aptos-labs/wallet-adapter-react`, AIP-62 |
-| Real-time updates (new listing, sold, offer) over WebSocket | P0 | Same fan-out idiom as the Rust indexer |
-| Image/metadata pipeline: fetch IPFS/Arweave/HTTP `token_uri`, cache, resize, serve from CDN | P0 | The single biggest operational cost of an NFT marketplace; never hotlink |
-| Public REST API (listings, offers, collections, activity) | P1 | Tradeport's developer API was a moat; wallets need somewhere to point |
-| Points / loyalty, referral | P1 | Tradeport had per-wallet fee discounts (`loyalty` module); we already run a leaderboard service in `go-backend` |
-| Admin: verify/hide collections, feature collections, fee schedule edits | P0 | JWT-gated admin mux like `eventingestor/api_admin` |
-| Observability: Prometheus metrics, `/health`, `alert_id` on every tx-submission failure | P0 | `.claude/tx-alerting.md`; note Go has no structured logger yet |
-
-## 4. Cross-venue buying: technical design
-
-### 4.1 Why it works on Aptos
-
-Three properties of Move on Aptos make aggregation straightforward:
-
-1. Every venue's buy function is `public entry` (verified per function in
-   §2.2). A `public entry` function can be called by another module, so our
-   router can wrap them.
-2. Packages with the `compatible` upgrade policy cannot remove or change
-   the signature of a public function, so a compile-time dependency on
-   Wapal or Tradeport does not break when they upgrade. Rarible is
-   `immutable`, which is even safer.
-3. The compiler can link against on-chain bytecode. Only Rarible and
-   Bluemove v1 publish source, but `aptos move download` fetches the
-   bytecode package and the Move compiler (and the TS SDK's Script
-   Composer, which does this at runtime) links against it. This is the one
-   item to spike before committing to the router (§5).
-
-### 4.2 Three integration tiers
-
-**Tier 0: direct payload.** Our backend builds the entry-function payload
-against the foreign contract (for example
-`0x584b...::coin_listing::purchase<AptosCoin>(listing_object)`), the user
-signs it in their wallet, we submit or the wallet submits. No contract of
-ours involved. Works today for every venue in §2.2, one listing per
-transaction, no fee for us. This is the fallback and the first thing to ship
-so buying works while the router is being written.
-
-**Tier 1: router module (the Tradeport design).** A package
-`aptos/contracts/router` with one adapter module per foreign venue and a
-`router::buy_many` entry that takes parallel vectors of
-`(venue_id, listing_address, expected_price, ...)`, dispatches to the right
-adapter, charges our aggregator fee (basis points on `expected_price`, paid
-to our treasury), and emits our own `RouterFill` event so our indexer
-attributes volume. Adapter shape, for the three reference-marketplace forks:
-
-```move
-module router::ref_market_adapter {
-    // Wapal, Rarible and Topaz v2 all expose this exact surface.
-    public fun buy<CoinType>(buyer: &signer, listing: address, venue: u8) {
-        if (venue == VENUE_WAPAL) {
-            wapal::coin_listing::purchase<CoinType>(buyer, object::address_to_object(listing))
-        } else if (venue == VENUE_RARIBLE) {
-            rarible::coin_listing::purchase<CoinType>(buyer, object::address_to_object(listing))
-        } ...
-    }
+```go
+type Mapper interface {
+    Marketplace() string
+    ContractAddress() string
+    Map(tx *Transaction) ([]Activity, error)   // raw events -> normalized rows
 }
 ```
 
-Tradeport's adapters are one function each (`wapal_listings::buy_token(&signer, address)`),
-which is the right size.
-
-Price protection: the foreign listing's price is read on-chain via the
-venue's `price` view (`coin_listing::price` exists on every reference fork)
-and asserted against the caller's `expected_price` before the call, so a
-seller repricing between quote and fill aborts instead of overcharging.
-
-**Tier 2: offers and instant-sell.** Same adapter pattern for
-`collection_offer::sell_tokenv2` / `token_offer::sell_tokenv2` on foreign
-venues, so a holder can hit the best bid anywhere from our portfolio page.
-Foreign offers are in the same normalized tables (§4.3), so "best offer" is
-one query.
-
-### 4.3 Indexing foreign venues
-
-One Go processor (`aptos/go-backend/cmd/nft-indexer`) consumes the
-Transaction Stream and applies per-venue event mappings into three current
-tables plus one activity table, with the exact schema of the Aptos NFT
-Aggregator (`nft_marketplace_activities`, `current_nft_marketplace_listings`,
-`current_nft_marketplace_token_offers`,
-`current_nft_marketplace_collection_offers`), keyed by
-`(token_data_id, marketplace)` and carrying `contract_address`,
-`listing_id` (the listing object address for v2 venues), `price`, `seller`,
-`buyer`, `expiration_time`, `is_deleted`.
-
-Event mappings per venue (the raw event names the processor matches; all
-verified from ABIs):
+Normalized rows and current-state tables use the Aptos NFT Aggregator
+schema so its config file is a direct reference:
 
 | Venue | listing created / cancelled / filled | token offer placed / cancelled / filled | collection offer placed / cancelled / filled |
 |---|---|---|---|
 | Tradeport v2 | `listings_v2::InsertListingEvent` / `DeleteListingEvent` / `BuyEvent` | `biddings_v2::InsertTokenBidEvent` / `DeleteTokenBidEvent` / `AcceptTokenBidEvent` | `biddings_v2::InsertCollectionBidEvent` / `DeleteCollectionBidEvent` / `AcceptCollectionBidEvent` |
-| Tradeport v1 | `listings::InsertListingEvent` / `DeleteListingEvent` / `BuyEvent` (plus `UpdateListingEvent`) | `biddings::Insert/Delete/AcceptTokenBidEvent` | `biddings::Insert/Delete/AcceptCollectionBidEvent` |
-| Wapal | `events::ListingPlacedEvent` / `ListingCanceledEvent` / `ListingFilledEvent` | `events::TokenOfferPlacedEvent` / `...CanceledEvent` / `...FilledEvent` | `events::CollectionOfferPlacedEvent` / `...CanceledEvent` / `...FilledEvent` |
-| Rarible | `events::ListingPlaced` / `ListingCanceled` / `ListingFilled` | `events::TokenOfferPlaced` / `TokenOfferCanceled` / `TokenOfferFilled` | `events::CollectionOfferPlaced` / `CollectionOfferCanceled` / `CollectionOfferFilled` |
+| Tradeport v1 | `listings::InsertListingEvent` / `DeleteListingEvent` / `BuyEvent` (+`UpdateListingEvent`) | `biddings::Insert/Delete/AcceptTokenBidEvent` | `biddings::Insert/Delete/AcceptCollectionBidEvent` |
+| Wapal, ours | `events::ListingPlacedEvent` / `ListingCanceledEvent` / `ListingFilledEvent` | `events::TokenOffer{Placed,Canceled,Filled}Event` | `events::CollectionOffer{Placed,Canceled,Filled}Event` |
+| Rarible | `events::ListingPlaced` / `ListingCanceled` / `ListingFilled` | `events::TokenOffer{Placed,Canceled,Filled}` | `events::CollectionOffer{Placed,Canceled,Filled}` |
 | Bluemove v1 | `marketplaceV2::ListEvent` / `DelistEvent` / `BuyEvent` | `offer_lib::OfferEvent` / `CancelOfferEvent` / `AcceptOfferEvent` | `offer_lib::OfferCollectionEvent` / `CancelOfferCollectionEvent` / `AcceptOfferCollectionEvent` |
 | Topaz v1 | `events::ListEvent` / `DelistEvent` / `BuyEvent` | `events::BidEvent` / `CancelBidEvent` / `SellEvent` | `events::CollectionBidEvent` / `CancelCollectionBidEvent` / `FillCollectionBidEvent` |
-| Ours | mirror Wapal's names (reference fork) | | |
+| Router (ours) | `RouterFill` recorded as attribution only, never as a second sale | | |
 
-Two subtleties the aggregator's config handles and we must copy:
+`token_data_id` derivation: reference-style events carry
+`TokenMetadata { creator_address, collection_name, token_name, token: Option<Object<Token>>, property_version: Option<u64> }`
+so v1 or v2 is decided per event; Tradeport v1, Bluemove v1 and Topaz emit
+`0x3::token::TokenId` and need the v1 hash. Addresses are canonicalized
+(`0x`-prefixed, 64 hex) at the mapper boundary, the Aptos twin of the
+`.claude/move-type-normalization.md` rule.
 
-- Wapal/Rarible/ours carry `TokenMetadata { creator_address, collection_name, token_name, token: Option<Object<Token>>, property_version: Option<u64> }` inside the event, so the processor derives `token_data_id` for either standard from one struct. Tradeport v1 / Bluemove / Topaz emit `0x3::token::TokenId` and need the v1 hash.
-- Fills on foreign venues that happen *through our router* emit both the venue's fill event and our `RouterFill`; the activity table records the venue's event as the sale and our event as attribution, never two sales.
+Fixtures: the Aptos docs list one example transaction version per event
+type per venue (e.g. Wapal `listing_filled` at 2382221134, Tradeport v2
+`listing_filled` at 2386455218, Rarible `listing_placed` at 2417694028).
+Fetch each once from the stream, store as JSON under
+`internal/venues/<name>/testdata/`, and assert the exact normalized row.
+This is the mapper regression suite.
 
-Cursor persistence follows `eventingestor/poller.go`: the processor stores
-the last fully-committed transaction version per stream and replays a batch
-on crash, with idempotent upserts keyed by `(txn_version, event_index,
-marketplace)`.
+### 4.3 Metadata and ownership
 
-### 4.4 Failure handling on multi-venue sweeps
+P0: `internal/metadata` pulls `current_token_datas_v2`,
+`current_collections_v2`, `current_token_ownerships_v2` from the hosted
+indexer for every `token_data_id` / `collection_id` the mappers touch (lazy,
+cached in `nft_tokens` / `nft_collections` / `nft_ownerships`, refreshed on
+each sale and on demand). Attributes parsed from `token_properties`. Image
+pipeline: `token_uri` fetched through IPFS/Arweave/HTTP gateways, stored in
+S3, resized variants served from CloudFront; the API never returns a raw
+`token_uri` to the browser. P1: own token processor from the stream
+(write-set changes on `0x4::token::Token`, `0x4::collection::Collection`,
+`0x3::token::TokenStore` table items) so the hosted indexer stops being a
+dependency.
 
-A Move transaction is atomic: if one of five listings in a sweep was sold a
-block earlier, the whole `buy_many` aborts. Tradeport accepted this. Options:
-
-1. Accept atomic all-or-nothing, and re-simulate right before signing with
-   the freshest listing set (P0; simplest, matches user expectation of "the
-   cart either fills or it doesn't").
-2. Best-effort sweep: the router skips listings whose `price` view no longer
-   matches or whose object no longer exists, and emits a `Skipped` event.
-   Possible for reference-fork venues because their state is object-based
-   and readable; harder for Tradeport v1 and Bluemove v1 table-based
-   listings. P1.
-
-### 4.5 What we cannot do
-
-- We cannot list on a foreign venue on the user's behalf without them
-  signing that venue's `init_fixed_price`; there is no reason to.
-- We cannot collect a fee on a Tier 0 buy (no contract of ours runs).
-- We cannot make Tradeport v1 or Topaz signed listings (`buy_v2` with a
-  `vector<u8>` signature from Topaz's `verify` module) work if the signing
-  key holder is gone; those listings are dead liquidity and should be
-  indexed as cancelled if simulation fails.
-
-## 5. Open questions and spikes before the build plan
-
-1. **Bytecode-dependency compile.** Spike: `aptos move download` Wapal's
-   `Marketplace` package and compile a one-function adapter against it on
-   testnet-equivalent addresses. If this fails, Tier 1 becomes a Move script
-   composed per transaction (the TS SDK Script Composer path), and the fee
-   is collected by a separate `coin::transfer` in the same script.
-2. **Aggregator endpoint status.** Ask Aptos Labs whether
-   `nft-aggregator/v1/graphql` moved behind API keys. If it exists, it is a
-   free historical backfill; if not, backfill from the Transaction Stream
-   from the first Tradeport v2 transaction.
-3. **Rarible and Bluemove v2 live volume.** The `account_transactions`
-   table is blind to object-based venues; measure from the stream during the
-   indexer spike.
-4. **Fee level.** Tradeport charged a router fee with a per-wallet loyalty
-   discount. Decide our aggregator fee (bps) and whether our own venue's
-   commission is lower to pull listings across.
-5. **Go module boundary.** Separate `aptos/go-backend` module (own CI, own
-   bake context) versus adding `cmd/nft-*` services to the existing
-   `go-backend` module (free reuse of `internal/platform`, but any change
-   under `go-backend/**` rebuilds the Sui services). Recommendation: separate
-   module, copy the four platform packages it needs.
-6. **Structured logging in Go.** `tx-alerting.md` requires
-   `alert_id` fields; Go services use `log.Printf`. Adopt `slog` in the new
-   module from the start.
-7. **Image pipeline hosting.** S3 + CloudFront versus an image-proxy service;
-   budget item, not a design question.
-
-## 6. Proposed repository layout
+### 4.4 Tables
 
 ```
-aptos/
-  README.md
-  contracts/
-    marketplace/        # fork of aptos-core move-examples/marketplace: listing, coin_listing,
-                        # fee_schedule, token_offer, collection_offer, events
-    router/             # buy_many + one adapter module per foreign venue; depends on
-                        # downloaded on-chain packages under router/deps/<venue>/
-  go-backend/
-    go.mod              # github.com/ewitulsk/SuiOptions/aptos/go-backend
-    cmd/nft-indexer/    # transaction-stream processor -> Postgres (venues + ours + metadata)
-    cmd/nft-api/        # public REST + WS; admin mux
-    internal/
-      venues/<name>/    # event mapping + payload builder per venue (tier 0 + tier 1 args)
-      stream/           # gRPC transaction stream client (generated from aptos-core protos)
-      store/            # pgx + goose migrations
-      platform/         # copied from go-backend/internal/platform: config, db, obs, cors
-.github/workflows/
-  aptos-move-ci.yml     # aptos CLI: `aptos move test` per package
-  aptos-go-ci.yml       # gofmt / vet / test with postgres service
-docs/aptos-nft-marketplace/
-  00-plan.md            # this chapter
-  appendix-addresses.md
+nft_marketplace_activities (txn_version, event_index, marketplace) PK
+  listing_id, offer_id, raw_event_type, standard_event_type, creator_address,
+  collection_id, collection_name, token_data_id, token_name, token_standard,
+  price, quote_token, token_amount, buyer, seller, expiration_time,
+  contract_address, block_timestamp, router_fee
+current_nft_marketplace_listings (token_data_id, marketplace) PK
+  listing_id, collection_id, seller, price, quote_token, token_amount,
+  is_deleted, contract_address, last_transaction_version, last_transaction_timestamp
+current_nft_marketplace_token_offers (token_data_id, buyer, marketplace) PK
+current_nft_marketplace_collection_offers (collection_offer_id) PK  + remaining_token_amount
+nft_collections, nft_tokens, nft_ownerships, nft_attributes, nft_images
+collection_stats (collection_id, window) floor_apt, floor_usd, volume, sales, listed, owners
+quote_tokens (metadata_address) symbol, decimals, enabled, min_fee, usd_price
+admin_collections (collection_id) verified, hidden, featured, nsfw
+stream_cursors (stream) version
 ```
 
-Frontend: a new `aptos-frontend/` Vite app (or a route tree inside
-`frontend/`) using `@aptos-labs/wallet-adapter-react`; decided in chapter 01.
+Floor and volume are computed per collection in a common denominator: APT
+for the default UI, USD via `usd_price` refreshed from a DEX/oracle quote.
+Listings in a token without a price feed count for the item page but not for
+stats.
 
-## 7. Quote tokens: list in any allowlisted Fungible Asset
+## 5. API (`aptos/go-backend/cmd/nft-api`)
 
-Decision: the seller picks the quote token per listing; the contract accepts
-any token on an admin-managed allowlist; every price, offer, fee and royalty
-is denominated in that listing's quote token.
+Stdlib `net/http` with method+wildcard patterns, two muxes (public;
+JWT-gated admin on a compose-internal port) as in `eventingestor/server`.
+CORS from `platform/cors`.
 
-Why not literally "any token":
-
-- The reference marketplace is `Coin<CoinType>`-generic
-  (`coin::withdraw<CoinType>`, `aptos_account::deposit_coins`). Native USDC
-  (`0xbae2...46f3b`) and USDt (`0x357b...dc2b`) on Aptos are Fungible
-  Assets with **no Coin type at all**, so the reference contract cannot
-  price a listing in either. Aptos has also migrated every CoinStore to a
-  FungibleStore, so FA is the one payment primitive that reaches everything.
-  Our fork replaces the Coin leg with `primary_fungible_store::withdraw` /
-  `deposit` against an `Object<Metadata>` stored in the listing.
-- The quote token becomes a **data field, not a type parameter**. One
-  `list(seller, token, quote: Object<Metadata>, price)` entry, one event
-  shape, one indexer path, instead of an event type per `CoinType`.
-- USDC and USDt both carry dispatchable transfer hooks
-  (`0x1::fungible_asset::DispatchFunctionStore` exists on both). A
-  permissionless quote token means a malicious FA's hook can abort selectively
-  (grief a specific buyer or our fee address), skim a transfer tax so the
-  seller receives less than `price`, or freeze the store that escrows
-  collection-offer funds. Allowlisting is the only cheap defence.
-- Floor price and volume need a common denominator. A listing in a token the
-  UI cannot price is invisible to the stats and useless to buyers.
-
-Allowlist shape (admin-editable object, mirrors `exchange-listing`'s
-per-quote-coin economics on the Sui side):
+Public:
 
 ```
-struct QuoteToken has store { metadata: Object<Metadata>, enabled: bool, min_fee: u64 }
+GET  /collections?sort=volume_24h                 GET /collections/{id}            GET /collections/{id}/items?traits=&sort=price
+GET  /collections/{id}/activity                   GET /items/{token_data_id}       GET /items/{token_data_id}/offers
+GET  /wallets/{addr}/items                        GET /wallets/{addr}/escrowed     (Tradeport/Wapal/Topaz listings owned by addr)
+GET  /wallets/{addr}/activity                     GET /search?q=
+POST /tx/buy        {items:[{marketplace, listing_id}], buyer}     -> {payload, simulation, breakdown{price, venue_fee, our_fee, royalty}}
+POST /tx/list       {token_data_id, quote, price}                  -> payload (our venue)
+POST /tx/unlist     {marketplace, listing_id}                      -> payload (ours or foreign "rescue")
+POST /tx/offer      {token_data_id | collection_id, quote, price, qty, expiry}
+POST /tx/accept-offer / POST /tx/sell-to-offer                     (P1 for foreign)
+POST /tx/submit     {signed_txn}  (optional; wallets may submit directly)
+GET  /ws            listing_created | listing_filled | offer_* | stats per collection subscription
 ```
 
-Seed: APT (`0xa`), USDC, USDt. Add others on request. Offers and collection
-offers escrow the quote FA in an object-owned fungible store, so they work
-in any allowlisted token too. Foreign venues stay `Coin<T>`-generic, which is
-APT in practice; the router does not change that.
+Payload builders (`internal/venues/<name>/payload.go`): tier 0 direct entry
+function to the foreign contract, tier 1 `router::buy_many` args. Every buy
+payload is simulated against the fullnode before it is returned; a failed
+simulation returns the reason (sold, delisted, price changed, insufficient
+balance) and marks the listing stale for re-check. The API holds no keys and
+signs nothing; the only server-side signer is the ops canary wallet, kept
+out of the service.
 
-## 8. Fees
+Admin: verify / hide / feature / nsfw collections, quote-token list edits
+(mirrors the on-chain allowlist; the on-chain change is a multisig
+transaction), fee schedule display, re-index a collection, purge an image.
 
-| Where | Who pays | Mechanism | Level |
-|---|---|---|---|
-| Fill on our venue (listing bought, or our-venue offer accepted) | Seller, deducted from proceeds after royalty | `fee_schedule::commission` (percentage) in the listing's quote token, paid to the treasury at fill | P0 |
-| Buy on a foreign venue through our router | Buyer, added on top of the venue's price | `router::buy_many` withdraws `price + fee` and pays the fee before calling the venue; the venue's own commission still goes to that venue | P0 |
-| Instant-sell into a foreign bid through our router | Seller, from proceeds | Same adapter, fee taken from what the foreign contract pays out | P1 |
-| Listing fee, bidding fee | nobody | Reference supports fixed fees at list and bid time; set to zero, they only suppress supply | never |
-| Launchpad mints, featured placement, API keys, gas sponsorship markup | | Non-trading revenue; not in scope now | P2 |
+Alerting: per `.claude/tx-alerting.md`, `alert_id = "tx-failed-nft-api"`
+on any submission failure at the handler (if `/tx/submit` is kept), and
+`"tx-failed-nft-canary"` for the acceptance canary. Both added to that
+file's list.
 
-Mechanics worth copying from Tradeport: a `min_fee` floor per quote token so
-dust trades do not produce dust fees (`update_min_fee_amount`), per-collection
-overrides for partner and zero-fee deals (`fees::upsert_collection_numerator`),
-and per-wallet loyalty discounts (`loyalty::add_per_wallet_numerators`). In
-the reference design a listing references a `FeeSchedule` object at list
-time, so rate changes are made by mutating that shared object rather than by
-relisting. Fees accrue in whatever quote token the trade used; the treasury
-holds a basket, and there is no on-chain swap.
+## 6. Frontend (`aptos-frontend/`)
+
+Vite 5 + React 18 + TypeScript + react-router-dom 7 + TanStack Query 5, same
+as `frontend/`. Wallets via `@aptos-labs/wallet-adapter-react` (Petra,
+Pontem, Nightly, OKX, MSafe, Aptos Connect keyless login). Endpoints in
+`src/config.ts` with `VITE_*` overrides and `127.0.0.1:90xx` defaults, like
+`frontend/src/config.ts`. Vercel project with SPA rewrites.
+
+Pages, P0: landing (trending), collection (stats, grid, filters, activity),
+item (buy from any venue, offers, history), wallet (holdings, listed-where,
+offers received, **escrowed-on-other-venues with Rescue / Relist**), cart /
+sweep with pre-flight breakdown, list / offer modals with quote-token
+picker, admin (behind JWT). WS-driven live updates on collection and item
+pages.
+
+## 7. Repo and deploy wiring
+
+- `.github/workflows/aptos-move-ci.yml`: matrix over `aptos/contracts/*`,
+  install pinned Aptos CLI, `aptos move test --dev`; paths `aptos/contracts/**`.
+- `.github/workflows/aptos-go-ci.yml`: copy of `go-ci.yml` with
+  `working-directory: aptos/go-backend`, gofmt gate, vet, tests against the
+  `postgres:16` service; paths `aptos/go-backend/**`.
+- Dockerfiles `aptos/go-backend/Dockerfile.nft-indexer`, `Dockerfile.nft-api`
+  (multi-stage `golang:1.24-bookworm` to `debian:bookworm-slim`, `APP_ENV`
+  entrypoint) like `go-backend/Dockerfile.event-ingestor`.
+- Register `nft-indexer` and `nft-api` in the three lists a test keeps in
+  sync: `rust-backend/deployment/affected.py` (`ALL_SERVICES` and the Go
+  glob map, `"nft-indexer": ["aptos/go-backend/**"]`),
+  `rust-backend/deployment/ec2/deploy.sh` `ALL_SERVICES`, and
+  `rust-backend/deployment/bake.hcl` (targets with `context = "../aptos/go-backend"`
+  and the `--allow=fs.read` flag in `_deploy.yml`). Compose entries in
+  `docker-compose.{staging,prod}.yml`, nginx routes `/<env>/nft-api`,
+  Prometheus scrape targets, gatus `/health` checks, a Grafana alert row per
+  `alert_id`.
+- Secrets: `APTOS_STREAM_API_KEY`, `APTOS_INDEXER_API_KEY`, `NFT_DB_PASSWORD`,
+  S3/CloudFront credentials, in the SOPS file.
+- `.claude/CLAUDE.md` project rules: add `aptos-addresses.md` (canonical
+  64-hex `0x` form at every boundary; `token_data_id` derivation per
+  standard) and extend `tx-alerting.md` with the two new ids.
+- Root `README.md` repository map gains an `aptos/` entry.
+
+## 8. Phases and gates
+
+Durations assume two engineers (one Move, one Go/frontend) and overlap where
+noted. Each gate is a check, not a feeling.
+
+**Phase 0: spikes (1 week).**
+- Compile a one-function adapter against Wapal's downloaded bytecode
+  package. Gate: `aptos move compile` succeeds and a local-testnet call
+  through the adapter fills a listing on a locally published reference fork.
+  If it fails, switch tier 1 to per-transaction Move scripts and re-run the
+  same gate.
+- Stream hello-world: read 10k transactions from mainnet, print every Wapal
+  and Tradeport v2 marketplace event. Gate: the fixture versions from §4.2
+  decode to the expected event names.
+- Hosted indexer API key, measured rate limit, confirmation of the
+  aggregator endpoint's status. Gate: written down in this doc.
+- Confirm Rarible and Bluemove v2 live volume from the stream over 7 days.
+  Gate: adapter list for P0 fixed (drop venues with zero fills).
+
+**Phase 1: indexer (3 weeks, parallel with Phase 2).**
+- Stream client, cursor, batch loop, metrics, `slog`.
+- Mappers for Tradeport v1+v2, Wapal, Rarible, plus whichever Phase 0 kept;
+  fixture suite per venue.
+- Metadata cache, image pipeline, collection stats job, quote-token USD
+  prices.
+- Gate: backfill from the earliest Tradeport v2 transaction to tip;
+  `current_nft_marketplace_listings` for three verified collections matches
+  a hand-check on the explorer (listing count, floor, seller) within one
+  minute of tip; indexer lag under 30 s for 24 h on staging.
+
+**Phase 2: marketplace contract (3 weeks, parallel with Phase 1).**
+- Fork, FA payment leg, quote allowlist, fee schedule extensions, events.
+- Unit tests for the invariants in §3.1; testnet object deployment;
+  `aptos/deployments.json`.
+- Gate: full list / offer / fill / cancel matrix passes on testnet in APT
+  and a testnet FA with dispatch hooks enabled; our-venue mapper indexes
+  those testnet fills correctly.
+
+**Phase 3: router (2 weeks, after Phase 0 and 2).**
+- Adapters for the kept venues, `buy_many`, fee, `RouterFill`; local-testnet
+  suite; mainnet deployment under multisig.
+- Gate: one canary buy per live venue on mainnet succeeds through the
+  router with the expected fee split, and the indexer attributes it
+  correctly without a duplicate sale row.
+
+**Phase 4: API (2 weeks, overlaps Phase 3).**
+- Read endpoints, WS, payload builders (tier 0 first, then router), pre-flight
+  simulation and breakdown, escrowed-elsewhere endpoint, admin mux.
+- Gate: a scripted end-to-end run on staging (testnet chain, mainnet-read
+  indexer for foreign venues) lists, buys, offers and rescues; simulation
+  reports each stale-listing failure class by name.
+
+**Phase 5: frontend (4 weeks, starts with Phase 4's read endpoints).**
+- Pages in §6, wallet adapter, cart, quote-token picker, rescue flow.
+- Gate: a new wallet can log in with Aptos Connect, buy a Wapal-listed and
+  a Tradeport-listed NFT in one sweep, list it in USDC on our venue, and a
+  second wallet buys it, all on staging; Lighthouse performance above 80
+  on collection pages with images served from the CDN.
+
+**Phase 6: launch (2 weeks).**
+- Deploy wiring (§7), monitoring, alert rows, runbooks (indexer replay from
+  a version, fee schedule change via multisig, disable a quote token,
+  hide a collection), fee schedule initialised on mainnet, allowlist seeded.
+- Gate: 72 h on production with the indexer within 30 s of tip, zero
+  `tx-failed-*` alerts from the canary, and a successful Tradeport-escrow
+  rescue by an external user.
+
+After launch, in order: instant-sell into foreign offers (router tier 2),
+best-effort sweeps, rarity, price charts, public API and points, own token
+processor, auctions, launchpad.
+
+## 9. Risks
+
+| Risk | Mitigation |
+|---|---|
+| Bytecode-dependency compile fails | Phase 0 gate; script fallback keeps the same adapters |
+| A venue upgrades in a way that breaks an adapter | `compatible` policy forbids signature changes; the daily canary catches behavioural changes; adapter can be disabled per venue in the API without a redeploy |
+| Hosted indexer rate limits or deprecations | Metadata is a cache; P1 own token processor removes the dependency |
+| Malicious or hooked quote token | Allowlist; disabling a token always leaves `end_fixed_price` and offer cancel available |
+| Stale-listing failures on sweeps | Simulation immediately before signing; best-effort sweeps at P1 |
+| Spam collections and images | Admin hide/verify, heuristics, image proxy with size and type limits |
+| Tradeport's frontend or wallets keep listing on their contract | Fine: we index and route to it; the rescue flow moves listings to us over time |
 
 ## Revision history
 
 - 2026-09-02: initial landscape, feature cut, and cross-venue design.
-- 2026-09-02: added quote-token allowlist decision (§7) and fee placement (§8).
+- 2026-09-02: added quote-token allowlist decision and fee placement.
+- 2026-09-02: consolidated into a single implementation plan with phases and gates.
