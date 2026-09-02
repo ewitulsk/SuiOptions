@@ -86,7 +86,7 @@ The launch policy is:
 
 | Decision | Launch policy |
 |---|---:|
-| Net annualized return hurdle | `max(12%, settlement cash yield + 8%)`, after every cost |
+| Net annualized return hurdle | `max(12%, settlement cash yield + 8%)`, **depositor-net**: after every desk cost AND after the trading vault's curator performance fee and the protocol's share of it (doc 09 G7, 2026-09-02) |
 | Maximum historical drawdown | 15% of risk NAV |
 | Maximum synthetic-stress drawdown | 25% of risk NAV |
 | Liquidation tolerance | Zero in historical replay and required stresses |
@@ -233,6 +233,13 @@ NAV = settlement cash
 
 The attribution layer explains changes but never defines NAV. It reports:
 
+- Protocol premium fee (`ProtocolConfig.fee_bps`, skimmed from gross
+  premium on every write): a writer-side wedge, not a desk cost — the desk
+  pays gross, the writer receives net, so it lowers the DISPLAYED APY the
+  flow model sees (doc 09 G7).
+- Curator performance fee and protocol share (trading vault): the split
+  between the desk's gross return and the depositor-net return the hurdle
+  is tested against.
 - Model edge at entry.
 - Realized option payoff/resale P&L.
 - Delta, gamma, theta, vega, and basis contributions.
