@@ -371,7 +371,10 @@ fn aggregate(s: &Scenario, outs: &[RunOutput], nav: f64) -> Aggregate {
         median(&mut v)
     };
     let st = |f: &dyn Fn(&RunStats) -> f64| med(&|o: &RunOutput| f(&o.stats));
-    let summaries: Vec<report::Summary> = outs.iter().map(|o| report::summarize(s, o)).collect();
+    // The runs were made at `nav`, not the base scenario's nav0: returns
+    // and the hurdle are relative to the capital actually deployed.
+    let at_nav = Scenario { nav0: nav, ..s.clone() };
+    let summaries: Vec<report::Summary> = outs.iter().map(|o| report::summarize(&at_nav, o)).collect();
     let hurdle_pass = summaries.iter().filter(|m| m.hurdle_pass).count() as f64 / summaries.len().max(1) as f64;
     let flash_cap = s.venue.flash_max_notional_per_exercise;
     let router_cap = s.venue.router_capacity_notional;
@@ -848,6 +851,7 @@ mod tests {
         // nearest lattice strike; the 10%-per-expiry cap binds first
         // (10% < 20% < 30%), so NAV_min = fair / 0.10.
         let mut probe = s.clone();
+        set_target(&mut probe, v, Mix::CallOnly);
         probe.nav0 = nav;
         let out = data.run(&probe).unwrap();
         assert_eq!(out.stats.quotes_accepted, 1);
@@ -863,6 +867,10 @@ mod tests {
         assert!(lb.required_nav <= nav * 1.03 && lb.required_nav >= nav * 0.9, "bound {} vs {nav}", lb.required_nav);
         assert_eq!(r.provenance, PRIOR_LABEL);
         let a = r.at_min_nav.as_ref().unwrap();
+        // The aggregate's return is measured against the solved NAV, not
+        // the base scenario's nav0 (one seed: median = the run itself).
+        let fresh = report::summarize(&probe, &out);
+        assert!((a.returns.depositor_net_return_annualized - fresh.depositor_net_return_annualized).abs() < 1e-9, "{} vs {}", a.returns.depositor_net_return_annualized, fresh.depositor_net_return_annualized);
         assert!((a.volumes.accepted_earn_notional - v).abs() < 1e-6);
         assert!(a.volumes.premium_turnover > 0.0 && a.volumes.hedge_turnover > 0.0);
         assert_eq!(a.volumes.exercise_spot_turnover, 0.0, "ATM call on a flat path expires worthless");
