@@ -1,0 +1,25 @@
+[package]
+name = "desk-backtester"
+version = "0.1.0"
+edition = "2021"
+description = "Thin-slice conditional backtester for the mm-bot long-option desk (doc 09 G4)"
+
+[[bin]]
+name = "desk-backtester"
+path = "src/main.rs"
+
+[dependencies]
+pricing = { path = "../pricing" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+object_store = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+url = { workspace = true }
+bytes = "1"

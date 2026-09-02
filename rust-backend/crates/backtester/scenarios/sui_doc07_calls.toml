@@ -1,0 +1,36 @@
+# Doc 07 §5 reproduction: 30d ATM calls, 30% NAV premium budget (M ≈ 3×
+# NAV notional), Aug 2025 – Jul 2026, SUI spot as the path and the perp
+# mark (proxy_venue). Sweep --bands to reproduce the turnover table.
+name = "sui-doc07-calls"
+asset = "SUI"
+spot_exchange = "binance"
+spot_symbol = "SUI-USDT"
+funding_exchange = "binance"
+funding_symbol = "SUI-USDT-PERP"
+from = "2025-08-01"
+to = "2026-07-31"
+nav0 = 1_000_000.0
+
+# Doc 07 ran one position per turn, so the whole 30% budget sits in one
+# expiry: lift the doc 08 per-expiry/per-type caps to the total budget.
+[limits]
+per_expiry_max = 0.30
+call_premium_max = 0.30
+
+# Doc 07 priced fair − 5 vol points with no size penalty on a single
+# 30%-NAV position.
+[bid]
+size_penalty_volpts_per_pct_nav = 0.0
+
+[flow]
+mode = "per_turn"
+notional_nav_multiple = 3.0
+call_share = 1.0
+tenor_days = 30.0
+
+[estimator]
+sample_interval_s = 900
+
+[hedge]
+band_pct_nav = 20.0
+band_wide_pct_nav = 30.0
