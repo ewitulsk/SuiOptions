@@ -38,23 +38,25 @@ jobs:
       - name: Mint canary token
         run: |
           set -o pipefail
-          TOKEN="Canary-${{ github.run_id }}"
-          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          # Fixed collection/tokendata with room for every run; property
+          # version == run number keeps each canary's token unique.
+          echo "TOKEN=CanarySweep" >> "$GITHUB_ENV"
+          echo "PV=${{ github.run_number }}" >> "$GITHUB_ENV"
           # shellcheck disable=SC2086
           aptos move run \
             --function-id 0x3::token::create_collection_script \
-            --args string:Canary string:"Canary collection" string:https://example.com u64:1000000 'bool:[false,false,false]' \
+            --args string:CanarySweep string:"Canary collection" string:https://example.com u64:1000000 'bool:[false,false,false]' \
             --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2 || echo "collection exists, continuing"
           # shellcheck disable=SC2086
           aptos move run \
             --function-id 0x3::token::create_token_script \
-            --args string:Canary string:"$TOKEN" string:"Canary token" u64:1 u64:1 string:https://example.com \
+            --args string:CanarySweep string:CanarySweep string:"Canary token" u64:1000000 u64:1000000 string:https://example.com \
               address:$DEPLOYER u64:100 u64:1 'bool:[false,false,false,false,false]' 'string:[]' 'u8:[]' 'string:[]' \
-            --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2
+            --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2 || echo "tokendata exists, continuing"
           # shellcheck disable=SC2086
           aptos move run \
             --function-id 0x3::token::mint_script \
-            --args address:$DEPLOYER string:Canary string:"$TOKEN" u64:0 \
+            --args address:$DEPLOYER string:CanarySweep string:CanarySweep u64:${{ github.run_number }} \
             --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2
       - name: List on our venue
         run: |
@@ -63,7 +65,7 @@ jobs:
           # shellcheck disable=SC2086
           aptos move run \
             --function-id "$VENUE::fa_listing::init_fixed_price_for_tokenv1" \
-            --args address:$DEPLOYER string:Canary string:"$TOKEN" u64:0 \
+            --args address:$DEPLOYER string:CanarySweep string:"$TOKEN" u64:$PV \
               address:$SCHEDULE address:0xa u64:$START u64:1000 \
             --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tee /tmp/list.txt
           HASH=$(grep -oE '0x[0-9a-fA-F]{64}' /tmp/list.txt | head -1)
@@ -81,7 +83,7 @@ jobs:
             sleep 20
           done
           curl -s "$API/listings?seller=${DEPLOYER}&limit=50" > /tmp/listings.json
-          python3 -c "import json,os; rows = json.load(open('/tmp/listings.json')); assert any(r['token_name'] == os.environ['TOKEN'] for r in rows), rows; print('listed OK')"
+          python3 -c "import json,os; rows = json.load(open('/tmp/listings.json')); assert any(r['listing_id'].lower() == os.environ['LISTING'].lower() for r in rows), rows; print('listed OK')"
       - name: Buy back
         run: |
           set -o pipefail
@@ -104,7 +106,7 @@ jobs:
             sleep 20
           done
           curl -s "$API/listings?seller=${DEPLOYER}&limit=50" > /tmp/listings2.json
-          python3 -c "import json,os; rows = json.load(open('/tmp/listings2.json')); assert all(r['token_name'] != os.environ['TOKEN'] for r in rows), rows; print('fill observed OK')"
+          python3 -c "import json,os; rows = json.load(open('/tmp/listings2.json')); assert all(r['listing_id'].lower() != os.environ['LISTING'].lower() for r in rows), rows; print('fill observed OK')"
       - name: Router sim path (sold listing must 422, not 5xx)
         run: |
           CODE=$(curl -s -o /tmp/sweep.json -w "%{http_code}" -X POST "$API/tx/sweep" \
