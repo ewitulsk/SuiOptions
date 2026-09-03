@@ -89,7 +89,10 @@ func main() {
 		txs, err := client.Fetch(ctx, cursor)
 		if err != nil {
 			log.Printf("indexer: fetch: %v", err)
-			client.Backoff(ctx)
+			// Fetch errors are usually 429s: wait out the quota window
+			// instead of hammering it. Empty tip polls keep the short
+			// Backoff below.
+			time.Sleep(10 * time.Second)
 			continue
 		}
 		if len(txs) == 0 {
@@ -117,6 +120,8 @@ func main() {
 		cursor = last + 1
 		// Pace successful polls: the anonymous fullnode quota (~40k compute
 		// units/5min) cannot sustain a tight fetch loop during backfill.
-		time.Sleep(time.Second)
+		// A 100-tx page costs well over 150 units, so ~0.5 rps keeps us
+		// under the sustained rate; errors (usually 429s) wait longer.
+		time.Sleep(2 * time.Second)
 	}
 }

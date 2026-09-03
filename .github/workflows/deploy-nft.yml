@@ -110,7 +110,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no root@"$HOST" 'cat > /opt/nft/nft.toml' <<'EOF'
           fullnode_url = "https://fullnode.mainnet.aptoslabs.com/v1"
           database_url = "postgres://nft:${DB_PASSWORD}@postgres:5432/nft?sslmode=disable"
-          bind_addr = "127.0.0.1:8090"
+          bind_addr = "0.0.0.0:8090"
           our_venue_address = "${OUR_VENUE_ADDRESS}"
           start_version = 0
           EOF
