@@ -83,6 +83,8 @@ jobs:
           [ -z "$ROUTER_PKG" ] && ROUTER_PKG="${{ vars.NFT_ROUTER_PACKAGE }}"
           ROUTER_CFG="${{ inputs.router_config }}"
           [ -z "$ROUTER_CFG" ] && ROUTER_CFG="${{ vars.NFT_ROUTER_CONFIG }}"
+          # Intentional client-side expansion: runner values into the host .env.
+          # shellcheck disable=SC2087
           ssh -o StrictHostKeyChecking=no root@"$HOST" \
             "cat > /opt/nft/.env" <<EOF
           REGISTRY=${{ vars.ECR_REGISTRY }}
@@ -93,17 +95,17 @@ jobs:
           ROUTER_CONFIG=$ROUTER_CFG
           ADMIN_TOKEN=$ADMIN_TOKEN
           EOF
-          # The ${...} below must stay literal for the service binary,
+          # Single-quoted so ${...} stays literal for the service binary,
           # which expands env placeholders itself at boot.
-          # shellcheck disable=SC2087
-          ssh -o StrictHostKeyChecking=no root@"$HOST" \
-            "cat > /opt/nft/nft.toml" <<'EOF'
-          fullnode_url = "https://fullnode.mainnet.aptoslabs.com/v1"
-          database_url = "postgres://nft:${DB_PASSWORD}@postgres:5432/nft?sslmode=disable"
-          bind_addr = "127.0.0.1:8090"
-          our_venue_address = "${OUR_VENUE_ADDRESS}"
-          start_version = 0
-          EOF
+          {
+            echo 'fullnode_url = "https://fullnode.mainnet.aptoslabs.com/v1"'
+            # shellcheck disable=SC2016
+            echo 'database_url = "postgres://nft:${DB_PASSWORD}@postgres:5432/nft?sslmode=disable"'
+            echo 'bind_addr = "127.0.0.1:8090"'
+            # shellcheck disable=SC2016
+            echo 'our_venue_address = "${OUR_VENUE_ADDRESS}"'
+            echo 'start_version = 0'
+          } | ssh -o StrictHostKeyChecking=no root@"$HOST" 'cat > /opt/nft/nft.toml'
           ssh -o StrictHostKeyChecking=no root@"$HOST" \
             'cd /opt/nft && docker compose --env-file .env pull && docker compose --env-file .env up -d --remove-orphans && sleep 15 && docker compose --env-file .env ps'
       - name: Health check

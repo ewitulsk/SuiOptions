@@ -33,8 +33,8 @@ jobs:
           APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
         run: |
           aptos move deploy-object \
-            --package-dir aptos/contracts/marketplace \
-            --address-name marketplace \
+            --package-dir "aptos/contracts/marketplace" \
+            --address-name "marketplace" \
             --private-key "$APTOS_KEY" \
             --url https://fullnode.mainnet.aptoslabs.com/v1 \
             --assume-yes --json | tee /tmp/venue-deploy.json
@@ -45,8 +45,8 @@ jobs:
           APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
         run: |
           aptos move deploy-object \
-            --package-dir aptos/contracts/router \
-            --address-name router \
+            --package-dir "aptos/contracts/router" \
+            --address-name "router" \
             --private-key "$APTOS_KEY" \
             --url https://fullnode.mainnet.aptoslabs.com/v1 \
             --assume-yes --json | tee /tmp/router-deploy.json
@@ -81,7 +81,7 @@ jobs:
         run: |
           aptos move run \
             --function-id "$VENUE::fee_schedule::allow_quote_token" \
-            --args address:$VENUE_CAP address:$SCHEDULE address:0xa u64:0 \
+            --args "address:$VENUE_CAP address:$SCHEDULE address:0xa u64:0" \
             --private-key "$APTOS_KEY" --url https://fullnode.mainnet.aptoslabs.com/v1 \
             --assume-yes
       - name: Init router and discover config
