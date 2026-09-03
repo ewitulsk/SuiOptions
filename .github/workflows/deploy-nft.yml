@@ -122,6 +122,39 @@ jobs:
             "sed -i 's/^start_version.*/start_version = $START/' /opt/nft/nft.toml"
           ssh -o StrictHostKeyChecking=no root@"$HOST" \
             'cd /opt/nft && docker compose --env-file .env pull && docker compose --env-file .env up -d --remove-orphans && sleep 15 && docker compose --env-file .env ps'
+      - name: Edge TLS (nginx + certbot for nft.sui-options.com)
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          HOST=$(doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header)
+          ssh -o StrictHostKeyChecking=no root@"$HOST" 'cat > /etc/nginx/sites-available/nft' <<'EOF'
+          server {
+              listen 80;
+              server_name nft.sui-options.com;
+              location /.well-known/acme-challenge/ {
+                  root /var/www/certbot;
+              }
+              location / {
+                  proxy_pass http://127.0.0.1:8091;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+          }
+          EOF
+          ssh -o StrictHostKeyChecking=no root@"$HOST" 'set -e
+            mkdir -p /var/www/certbot
+            ln -sf /etc/nginx/sites-available/nft /etc/nginx/sites-enabled/nft
+            nginx -t && systemctl reload nginx
+            if [ ! -d /etc/letsencrypt/live/nft.sui-options.com ]; then
+              certbot --nginx -d nft.sui-options.com --non-interactive \
+                --agree-tos --register-unsafely-without-email --redirect
+            fi
+            nginx -t && systemctl reload nginx'
       - name: Health check
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}

@@ -29,6 +29,8 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       OUR_VENUE_ADDRESS: ${OUR_VENUE_ADDRESS:-}
       BIND_ADDR: 127.0.0.1:8090
+    ports:
+      - "127.0.0.1:8090:8090"
     volumes:
       - /opt/nft/nft.toml:/etc/nft/nft.toml:ro
 
@@ -47,5 +49,8 @@ services:
       ROUTER_PACKAGE: ${ROUTER_PACKAGE:-}
       ROUTER_CONFIG: ${ROUTER_CONFIG:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+    ports:
+      - "127.0.0.1:8091:8091"
+      - "127.0.0.1:8092:8092"
     volumes:
       - /opt/nft/nft.toml:/etc/nft/nft.toml:ro

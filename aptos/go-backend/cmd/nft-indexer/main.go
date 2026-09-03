@@ -115,5 +115,8 @@ func main() {
 		}
 		log.Printf("indexer: applied %d txs (%d activities), cursor=%d", len(txs), len(acts), last)
 		cursor = last + 1
+		// Pace successful polls: the anonymous fullnode quota (~40k compute
+		// units/5min) cannot sustain a tight fetch loop during backfill.
+		time.Sleep(time.Second)
 	}
 }
