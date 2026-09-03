@@ -90,7 +90,7 @@ jobs:
           DEPLOYER=0x1df6c735c4765960187911abcedc498deb7d2a3f2a347f2d69bbe685108d3dee
           aptos move run \
             --function-id "$ROUTER::router::init" \
-            --args address:$DEPLOYER u64:0 u64:0 "vector<u8>:[1,2,3,4,5,6,7]" \
+            --args address:$DEPLOYER u64:0 u64:0 hex:01020304050607 \
             --private-key "$APTOS_KEY" --url https://fullnode.mainnet.aptoslabs.com/v1 \
             --assume-yes 2>&1 | tee /tmp/router-init.txt
           HASH=$(grep -oE '0x[0-9a-fA-F]{64}' /tmp/router-init.txt | head -1)
