@@ -20,12 +20,6 @@ jobs:
           curl -fsSL https://aptos.dev/scripts/install_cli.py -o install_cli.py
           python3 install_cli.py --cli-version 9.5.1
           echo "$HOME/.aptos/bin" >> "$GITHUB_PATH"
-      - name: Init Aptos profile
-        env:
-          APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
-        run: |
-          aptos init --network mainnet --private-key "$APTOS_KEY" \
-            --skip-faucet --assume-yes
       - name: Fund check
         env:
           DEPLOYER: "0x1df6c735c4765960187911abcedc498deb7d2a3f2a347f2d69bbe685108d3dee"
@@ -43,8 +37,9 @@ jobs:
             --address-name "marketplace" \
             --private-key "$APTOS_KEY" \
             --url https://fullnode.mainnet.aptoslabs.com/v1 \
-            --assume-yes | tee /tmp/venue-deploy.txt
+            --assume-yes 2>&1 | tee /tmp/venue-deploy.txt
           grep -oE '0x[0-9a-fA-F]{64}' /tmp/venue-deploy.txt | head -1 > /tmp/venue.txt
+          test -s /tmp/venue.txt
           echo "VENUE=$(cat /tmp/venue.txt)" >> "$GITHUB_ENV"
       - name: Deploy router package
         env:
@@ -55,8 +50,9 @@ jobs:
             --address-name "router" \
             --private-key "$APTOS_KEY" \
             --url https://fullnode.mainnet.aptoslabs.com/v1 \
-            --assume-yes | tee /tmp/router-deploy.txt
+            --assume-yes 2>&1 | tee /tmp/router-deploy.txt
           grep -oE '0x[0-9a-fA-F]{64}' /tmp/router-deploy.txt | head -1 > /tmp/router.txt
+          test -s /tmp/router.txt
           echo "ROUTER=$(cat /tmp/router.txt)" >> "$GITHUB_ENV"
       - name: Init marketplace and discover objects
         env:
