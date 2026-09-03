@@ -39,7 +39,7 @@ jobs:
             --private-key "$APTOS_KEY" \
             --url https://fullnode.mainnet.aptoslabs.com/v1 \
             --assume-yes 2>&1 | tee /tmp/venue-deploy.txt
-          grep -oE '0x[0-9a-fA-F]{64}' /tmp/venue-deploy.txt | head -1 > /tmp/venue.txt
+          grep -oE 'object address 0x[0-9a-fA-F]{64}' /tmp/venue-deploy.txt | grep -oE '0x[0-9a-fA-F]{64}' | head -1 > /tmp/venue.txt
           test -s /tmp/venue.txt
           echo "VENUE=$(cat /tmp/venue.txt)" >> "$GITHUB_ENV"
       - name: Deploy router package
@@ -53,7 +53,7 @@ jobs:
             --private-key "$APTOS_KEY" \
             --url https://fullnode.mainnet.aptoslabs.com/v1 \
             --assume-yes 2>&1 | tee /tmp/router-deploy.txt
-          grep -oE '0x[0-9a-fA-F]{64}' /tmp/router-deploy.txt | head -1 > /tmp/router.txt
+          grep -oE 'object address 0x[0-9a-fA-F]{64}' /tmp/router-deploy.txt | grep -oE '0x[0-9a-fA-F]{64}' | head -1 > /tmp/router.txt
           test -s /tmp/router.txt
           echo "ROUTER=$(cat /tmp/router.txt)" >> "$GITHUB_ENV"
       - name: Init marketplace and discover objects
