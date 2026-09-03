@@ -291,12 +291,6 @@ export function Header() {
         >
           Earn
         </button>
-        <button
-          className={pathname === "/buy" ? "is-active" : ""}
-          onClick={() => navigate("/buy")}
-        >
-          Buy
-        </button>
         {/* The covered-call "Vaults" tab (/vault) went away with that product
             (SO-332); the curated vaults take over the name. */}
         <button
