@@ -21,11 +21,13 @@ jobs:
           python3 install_cli.py --cli-version 9.5.1
           echo "$HOME/.aptos/bin" >> "$GITHUB_PATH"
       - name: Fund check
+        env:
+          DEPLOYER: 0x0686db96a7fddab470d8823898b51f1460ee27f637a794f525c5057f719c6055
         run: |
-          BAL=$(curl -s "https://fullnode.mainnet.aptoslabs.com/v1/accounts/0x0686db96a7fddab470d8823898b51f1460ee27f637a794f525c5057f719c6055/balance/0x1::aptos_coin::AptosCoin")
+          BAL=$(curl -s "https://fullnode.mainnet.aptoslabs.com/v1/accounts/${DEPLOYER}/balance/0x1::aptos_coin::AptosCoin")
           echo "deployer balance: $BAL octas"
-          python3 -c "import sys; sys.exit(0 if int('$BAL') > 100000000 else 1)" \
-            || { echo "FUND 0x0686db96a7fddab470d8823898b51f1460ee27f637a794f525c5057f719c6055 BEFORE DEPLOYING" >&2; exit 1; }
+          BAL="$BAL" python3 -c 'import os, sys; sys.exit(0 if int(os.environ["BAL"]) > 100000000 else 1)' \
+            || { echo "FUND ${DEPLOYER} BEFORE DEPLOYING" >&2; exit 1; }
       - name: Deploy marketplace package
         env:
           APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}

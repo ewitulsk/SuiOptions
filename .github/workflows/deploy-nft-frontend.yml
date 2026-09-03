@@ -48,9 +48,11 @@ jobs:
           [ -z "$PKG" ] && PKG="${{ vars.NFT_ROUTER_PACKAGE }}"
           CFG="${{ inputs.router_config }}"
           [ -z "$CFG" ] && CFG="${{ vars.NFT_ROUTER_CONFIG }}"
-          echo "VENUE=$VENUE" >> "$GITHUB_ENV"
-          echo "PKG=$PKG" >> "$GITHUB_ENV"
-          echo "CFG=$CFG" >> "$GITHUB_ENV"
+          {
+            echo "VENUE=$VENUE"
+            echo "PKG=$PKG"
+            echo "CFG=$CFG"
+          } >> "$GITHUB_ENV"
       - name: Set Vercel env vars
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}

@@ -93,8 +93,9 @@ jobs:
           ROUTER_CONFIG=$ROUTER_CFG
           ADMIN_TOKEN=$ADMIN_TOKEN
           EOF
-          # shellcheck disable=SC2087: ${...} must stay literal for the
-          # service binary, which expands env placeholders itself at boot.
+          # The ${...} below must stay literal for the service binary,
+          # which expands env placeholders itself at boot.
+          # shellcheck disable=SC2087
           ssh -o StrictHostKeyChecking=no root@"$HOST" \
             "cat > /opt/nft/nft.toml" <<'EOF'
           fullnode_url = "https://fullnode.mainnet.aptoslabs.com/v1"
