@@ -24,8 +24,11 @@ on:
         required: false
         default: "https://nft.sui-options.com"
 
+  pull_request:  # TEMPORARY: index workflow for dispatch; jobs skip unless dispatched
+
 jobs:
   deploy:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
