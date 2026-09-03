@@ -22,7 +22,7 @@ jobs:
           echo "$HOME/.aptos/bin" >> "$GITHUB_PATH"
       - name: Fund check
         env:
-          DEPLOYER: 0x0686db96a7fddab470d8823898b51f1460ee27f637a794f525c5057f719c6055
+          DEPLOYER: "0x0686db96a7fddab470d8823898b51f1460ee27f637a794f525c5057f719c6055"
         run: |
           BAL=$(curl -s "https://fullnode.mainnet.aptoslabs.com/v1/accounts/${DEPLOYER}/balance/0x1::aptos_coin::AptosCoin")
           echo "deployer balance: $BAL octas"
