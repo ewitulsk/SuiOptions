@@ -114,6 +114,12 @@ jobs:
           our_venue_address = "${OUR_VENUE_ADDRESS}"
           start_version = 0
           EOF
+          # Index from recent history: version 0 is long pruned on mainnet.
+          HEAD=$(curl -s https://fullnode.mainnet.aptoslabs.com/v1 | python3 -c "import json,sys; print(json.load(sys.stdin)['ledger_version'])")
+          START=$((HEAD - 200000)); [ "$START" -lt 0 ] && START=0
+          echo "start_version=$START (head $HEAD)"
+          ssh -o StrictHostKeyChecking=no root@"$HOST" \
+            "sed -i 's/^start_version.*/start_version = $START/' /opt/nft/nft.toml"
           ssh -o StrictHostKeyChecking=no root@"$HOST" \
             'cd /opt/nft && docker compose --env-file .env pull && docker compose --env-file .env up -d --remove-orphans && sleep 15 && docker compose --env-file .env ps'
       - name: Health check
@@ -125,7 +131,10 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           HOST=$(doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header)
           for _attempt in $(seq 1 20); do
-            if ssh -o StrictHostKeyChecking=no root@"$HOST" 'curl -sf http://127.0.0.1:8090/health && curl -sf http://127.0.0.1:8091/health'; then
+            A=$(ssh -o StrictHostKeyChecking=no root@"$HOST" 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8090/health' || true)
+            B=$(ssh -o StrictHostKeyChecking=no root@"$HOST" 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8091/health' || true)
+            echo "attempt $_attempt: indexer=$A api=$B"
+            if [ "$A" = "200" ] && [ "$B" = "200" ]; then
               echo HEALTHY; exit 0
             fi
             sleep 10
