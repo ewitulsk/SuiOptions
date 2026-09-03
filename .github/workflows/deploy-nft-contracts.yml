@@ -80,7 +80,7 @@ jobs:
           set -o pipefail
           aptos move run \
             --function-id "$VENUE::fee_schedule::allow_quote_token" \
-            --args "address:$VENUE_CAP address:$SCHEDULE address:0xa u64:0" \
+            --args address:$VENUE_CAP address:$SCHEDULE address:0xa u64:0 \
             --private-key "$APTOS_KEY" --url https://fullnode.mainnet.aptoslabs.com/v1 \
             --assume-yes
       - name: Init router and discover config
