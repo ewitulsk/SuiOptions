@@ -37,8 +37,8 @@ jobs:
             --address-name "marketplace" \
             --private-key "$APTOS_KEY" \
             --url https://fullnode.mainnet.aptoslabs.com/v1 \
-            --assume-yes --json | tee /tmp/venue-deploy.json
-          python3 -c "import json; print(json.load(open('/tmp/venue-deploy.json'))['Result']['object_address'])" > /tmp/venue.txt
+            --assume-yes | tee /tmp/venue-deploy.txt
+          grep -oE '0x[0-9a-fA-F]{64}' /tmp/venue-deploy.txt | head -1 > /tmp/venue.txt
           echo "VENUE=$(cat /tmp/venue.txt)" >> "$GITHUB_ENV"
       - name: Deploy router package
         env:
@@ -49,8 +49,8 @@ jobs:
             --address-name "router" \
             --private-key "$APTOS_KEY" \
             --url https://fullnode.mainnet.aptoslabs.com/v1 \
-            --assume-yes --json | tee /tmp/router-deploy.json
-          python3 -c "import json; print(json.load(open('/tmp/router-deploy.json'))['Result']['object_address'])" > /tmp/router.txt
+            --assume-yes | tee /tmp/router-deploy.txt
+          grep -oE '0x[0-9a-fA-F]{64}' /tmp/router-deploy.txt | head -1 > /tmp/router.txt
           echo "ROUTER=$(cat /tmp/router.txt)" >> "$GITHUB_ENV"
       - name: Init marketplace and discover objects
         env:
