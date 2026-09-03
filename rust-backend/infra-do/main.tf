@@ -187,3 +187,80 @@ output "data_room_private_ip" {
 output "reserved_ip" {
   value = digitalocean_reserved_ip.ingress.ip_address
 }
+
+# ---- NFT marketplace host (aptos-nft-marketplace) ---------------------------
+# Cost-sized sibling of staging: same image/region/VPC/keys, smaller plan,
+# no volume, no backups. All service state is rebuildable (Postgres reseeds
+# from chain; images in DOCR; secrets in SOPS + GH secrets).
+
+resource "digitalocean_droplet" "nft" {
+  name      = "options-nft-host-do"
+  size      = var.nft_droplet_size
+  image     = var.droplet_image
+  region    = var.region
+  vpc_uuid  = data.digitalocean_vpc.main.id
+  ssh_keys  = local.ssh_key_ids
+  backups   = false
+  user_data = format("#!/bin/bash\nexport ROLE=nft\n%s", file("${path.module}/../deployment/do/host-bootstrap.sh"))
+  tags      = ["options", "nft"]
+}
+
+resource "digitalocean_reserved_ip" "nft" {
+  region     = var.region
+  droplet_id = digitalocean_droplet.nft.id
+}
+
+resource "digitalocean_record" "nft" {
+  domain = "sui-options.com"
+  type   = "A"
+  name   = "nft"
+  value  = digitalocean_reserved_ip.nft.ip_address
+}
+
+resource "digitalocean_firewall" "nft" {
+  name        = "options-nft"
+  droplet_ids = [digitalocean_droplet.nft.id]
+
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "22"
+    source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "80"
+    source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+  inbound_rule {
+    protocol         = "tcp"
+    port_range       = "443"
+    source_addresses = ["0.0.0.0/0", "::/0"]
+  }
+
+  outbound_rule {
+    protocol              = "tcp"
+    port_range            = "1-65535"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
+  outbound_rule {
+    protocol              = "udp"
+    port_range            = "1-65535"
+    destination_addresses = ["0.0.0.0/0", "::/0"]
+  }
+}
+
+resource "digitalocean_project" "nft" {
+  name = "options-nft"
+  resources = [
+    digitalocean_droplet.nft.urn,
+    digitalocean_reserved_ip.nft.urn,
+  ]
+}
+
+output "nft_public_ip" {
+  value = digitalocean_reserved_ip.nft.ip_address
+}
+
+output "nft_domain" {
+  value = var.nft_domain
+}

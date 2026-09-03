@@ -1,0 +1,110 @@
+#[test_only]
+module aptos_framework::permissioned_token_tests {
+    use aptos_framework::fungible_asset::{Self, Metadata, TestToken};
+    use aptos_framework::dispatchable_fungible_asset;
+    use aptos_framework::permissioned_token;
+    use std::option;
+
+    #[test(creator = @aptos_framework, aaron = @0xface)]
+    fun test_permissioned_e2e_basic_flow(
+        creator: &signer,
+        aaron: &signer,
+    ) {
+        let (creator_ref, token_object) = fungible_asset::create_test_token(creator);
+        let (mint, _, _, _) = fungible_asset::init_test_metadata(&creator_ref);
+        let metadata = token_object.convert<TestToken, Metadata>();
+
+        let creator_store = fungible_asset::create_test_store(creator, metadata);
+        let aaron_store = fungible_asset::create_test_store(aaron, metadata);
+        let allowed_sender = vector[
+            creator_store.object_address(),
+            aaron_store.object_address(),
+        ];
+
+        permissioned_token::initialize(creator, &creator_ref, allowed_sender);
+
+        assert!(fungible_asset::supply(metadata) == option::some(0), 1);
+        // Mint
+        let fa = mint.mint(100);
+        assert!(fungible_asset::supply(metadata) == option::some(100), 2);
+        // Deposit
+        dispatchable_fungible_asset::deposit(creator_store, fa);
+        // Withdraw
+        let fa = dispatchable_fungible_asset::withdraw(creator, creator_store, 5);
+        assert!(fungible_asset::supply(metadata) == option::some(100), 3);
+        dispatchable_fungible_asset::deposit(aaron_store, fa);
+
+        let fa = dispatchable_fungible_asset::withdraw(creator, creator_store, 10);
+        assert!(fungible_asset::supply(metadata) == option::some(100), 3);
+        dispatchable_fungible_asset::deposit(aaron_store, fa);
+    }
+
+    #[test(creator = @aptos_framework, aaron = @0xface)]
+    #[expected_failure(abort_code = 1, location = aptos_framework::permissioned_token)]
+    fun test_permissioned_disallowed_sender(
+        creator: &signer,
+        aaron: &signer,
+    ) {
+        let (creator_ref, token_object) = fungible_asset::create_test_token(creator);
+        let (mint, _, _, _) = fungible_asset::init_test_metadata(&creator_ref);
+        let metadata = token_object.convert<TestToken, Metadata>();
+
+        let creator_store = fungible_asset::create_test_store(creator, metadata);
+        let aaron_store = fungible_asset::create_test_store(aaron, metadata);
+        let allowed_sender = vector[
+            creator_store.object_address(),
+        ];
+
+        permissioned_token::initialize(creator, &creator_ref, allowed_sender);
+
+        assert!(fungible_asset::supply(metadata) == option::some(0), 1);
+        // Mint
+        let fa = mint.mint(100);
+        assert!(fungible_asset::supply(metadata) == option::some(100), 2);
+        // Deposit
+        dispatchable_fungible_asset::deposit(creator_store, fa);
+        // Withdraw
+        let fa = dispatchable_fungible_asset::withdraw(creator, creator_store, 5);
+        assert!(fungible_asset::supply(metadata) == option::some(100), 3);
+        dispatchable_fungible_asset::deposit(aaron_store, fa);
+
+        // aaron_store is not allowed to perform withdraw according to the allowlist rule
+        let fa = dispatchable_fungible_asset::withdraw(aaron, aaron_store, 10);
+        assert!(fungible_asset::supply(metadata) == option::some(100), 3);
+        dispatchable_fungible_asset::deposit(creator_store, fa);
+    }
+
+    #[test(creator = @aptos_framework, aaron = @0xface)]
+    fun test_permissioned_update_disallowed_sender(
+        creator: &signer,
+        aaron: &signer,
+    ) {
+        let (creator_ref, token_object) = fungible_asset::create_test_token(creator);
+        let (mint, _, _, _) = fungible_asset::init_test_metadata(&creator_ref);
+        let metadata = token_object.convert<TestToken, Metadata>();
+
+        let creator_store = fungible_asset::create_test_store(creator, metadata);
+        let aaron_store = fungible_asset::create_test_store(aaron, metadata);
+        let allowed_sender = vector[
+            creator_store.object_address(),
+        ];
+
+        permissioned_token::initialize(creator, &creator_ref, allowed_sender);
+
+        assert!(fungible_asset::supply(metadata) == option::some(0), 1);
+        // Mint
+        let fa = mint.mint(100);
+        assert!(fungible_asset::supply(metadata) == option::some(100), 2);
+        // Deposit
+        dispatchable_fungible_asset::deposit(creator_store, fa);
+        // Withdraw
+        let fa = dispatchable_fungible_asset::withdraw(creator, creator_store, 5);
+        assert!(fungible_asset::supply(metadata) == option::some(100), 3);
+        dispatchable_fungible_asset::deposit(aaron_store, fa);
+
+        permissioned_token::add_to_allow_list(creator, aaron_store.object_address());
+        // aaron_store is now allowed to perform withdraw
+        let fa = dispatchable_fungible_asset::withdraw(aaron, aaron_store, 1);
+        dispatchable_fungible_asset::deposit(creator_store, fa);
+    }
+}

@@ -1,0 +1,63 @@
+# Provision the NFT droplet via Terraform. Dispatch-only, targeted at the
+# new resources so existing droplets are never touched. Creates: droplet
+# (cost-sized s-2vcpu-2gb), reserved IP, nft.sui-options.com A record,
+# firewall, project. State: shared remote backend (Spaces).
+name: provision-nft-host
+
+on:
+  workflow_dispatch:
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-backend/infra-do
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.*"
+      - name: Terraform init
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+        run: terraform init -input=false
+      - name: Derive deploy pubkey
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          printf '%s\n' "$DEPLOY_SSH_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          echo "TF_VAR_deploy_ssh_pubkey=$(ssh-keygen -y -f /tmp/deploy_key)" >> "$GITHUB_ENV"
+          rm -f /tmp/deploy_key
+      - name: Terraform plan (NFT targets only)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        run: |
+          terraform plan -input=false -out=nft.tfplan \
+            -target=digitalocean_droplet.nft \
+            -target=digitalocean_reserved_ip.nft \
+            -target=digitalocean_record.nft \
+            -target=digitalocean_firewall.nft \
+            -target=digitalocean_project.nft
+      - name: Terraform apply
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          TF_VAR_deploy_ssh_pubkey: ${{ vars.DEPLOY_SSH_PUBKEY }}
+        run: terraform apply -input=false -auto-approve nft.tfplan
+      - name: Outputs
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
+          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        run: terraform output nft_public_ip && terraform output nft_domain

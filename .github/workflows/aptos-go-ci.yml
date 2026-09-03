@@ -1,0 +1,30 @@
+# NFT Go backend CI: build, vet, unit tests (mapper fixtures + payload).
+# No DB needed: store tests are compile-covered; DB paths run on the droplet.
+name: aptos-go-ci
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "aptos/go-backend/**"
+      - ".github/workflows/aptos-go-ci.yml"
+  pull_request:
+    paths:
+      - "aptos/go-backend/**"
+  workflow_dispatch:
+
+jobs:
+  go-ci:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aptos/go-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: aptos/go-backend/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...

@@ -1,0 +1,4 @@
+.vercel
+
+# Move build output
+aptos/contracts/*/build/

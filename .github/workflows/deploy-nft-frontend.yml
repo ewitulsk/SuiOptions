@@ -1,0 +1,76 @@
+# Deploy the NFT frontend to the aptos-nft-marketplace Vercel project.
+# Dispatch-only: the project is NOT connected to git, so Vercel never
+# auto-deploys — every production deploy runs here, from this branch.
+# Requires the VERCEL_TOKEN repo secret (ask the repo owner).
+name: deploy-nft-frontend
+
+on:
+  workflow_dispatch:
+    inputs:
+      venue_address:
+        description: "Our venue object address (default: NFT_VENUE_ADDRESS var)"
+        required: false
+        default: ""
+      router_package:
+        description: "Router package address (default: NFT_ROUTER_PACKAGE var)"
+        required: false
+        default: ""
+      router_config:
+        description: "RouterConfig object address (default: NFT_ROUTER_CONFIG var)"
+        required: false
+        default: ""
+      api_url:
+        description: "Public API URL (default: https://nft.sui-options.com)"
+        required: false
+        default: "https://nft.sui-options.com"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aptos-frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: aptos-frontend/package-lock.json
+      - run: npm ci
+      - name: Resolve addresses
+        run: |
+          VENUE="${{ inputs.venue_address }}"
+          [ -z "$VENUE" ] && VENUE="${{ vars.NFT_VENUE_ADDRESS }}"
+          PKG="${{ inputs.router_package }}"
+          [ -z "$PKG" ] && PKG="${{ vars.NFT_ROUTER_PACKAGE }}"
+          CFG="${{ inputs.router_config }}"
+          [ -z "$CFG" ] && CFG="${{ vars.NFT_ROUTER_CONFIG }}"
+          echo "VENUE=$VENUE" >> "$GITHUB_ENV"
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          echo "CFG=$CFG" >> "$GITHUB_ENV"
+      - name: Set Vercel env vars
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_7Bcyz1zVzBeOkGtAszffi8yg
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_NFT_PROJECT_ID }}
+        run: |
+          npx vercel env rm VITE_NFT_API_URL production --yes --token "$VERCEL_TOKEN" >/dev/null 2>&1 || true
+          npx vercel env rm VITE_OUR_VENUE_ADDRESS production --yes --token "$VERCEL_TOKEN" >/dev/null 2>&1 || true
+          npx vercel env rm VITE_ROUTER_PACKAGE production --yes --token "$VERCEL_TOKEN" >/dev/null 2>&1 || true
+          npx vercel env rm VITE_ROUTER_CONFIG production --yes --token "$VERCEL_TOKEN" >/dev/null 2>&1 || true
+          printf '%s' "${{ inputs.api_url }}" | npx vercel env add VITE_NFT_API_URL production --token "$VERCEL_TOKEN"
+          printf '%s' "$VENUE" | npx vercel env add VITE_OUR_VENUE_ADDRESS production --token "$VERCEL_TOKEN"
+          printf '%s' "$PKG" | npx vercel env add VITE_ROUTER_PACKAGE production --token "$VERCEL_TOKEN"
+          printf '%s' "$CFG" | npx vercel env add VITE_ROUTER_CONFIG production --token "$VERCEL_TOKEN"
+      - name: Deploy to production
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: team_7Bcyz1zVzBeOkGtAszffi8yg
+          VERCEL_PROJECT_ID: ${{ vars.VERCEL_NFT_PROJECT_ID }}
+        run: |
+          npx vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+          npx vercel build --prod --token "$VERCEL_TOKEN"
+          npx vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN"

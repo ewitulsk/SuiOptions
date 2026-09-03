@@ -1,0 +1,31 @@
+# NFT frontend CI: typecheck + production build. Deploys happen only in
+# deploy-nft-frontend.yml (manual dispatch), never on push.
+name: aptos-frontend-ci
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "aptos-frontend/**"
+      - ".github/workflows/aptos-frontend-ci.yml"
+  pull_request:
+    paths:
+      - "aptos-frontend/**"
+  workflow_dispatch:
+
+jobs:
+  frontend-ci:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aptos-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: aptos-frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc -b
+      - run: npm run build

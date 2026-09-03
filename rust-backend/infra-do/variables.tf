@@ -31,6 +31,20 @@ variable "data_room_volume_gb" {
   default = 100
 }
 
+variable "nft_droplet_size" {
+  type = string
+  # Cost-sized: s-2vcpu-2gb ($18/mo) instead of the plan's s-2vcpu-4gb
+  # ($24/mo). Keeps 2 vCPUs for the stream decoder; 2 GB RAM fits P0
+  # (postgres + indexer + api, near-zero traffic). Resize in place if
+  # memory pressure appears; backups stay OFF (pg_dump to Spaces instead).
+  default = "s-2vcpu-2gb"
+}
+
+variable "nft_domain" {
+  type    = string
+  default = "nft.sui-options.com"
+}
+
 variable "deploy_ssh_pubkey" {
   description = "Public key used by GitHub Actions deploys (private half in the DEPLOY_SSH_KEY repo secret)"
   type        = string

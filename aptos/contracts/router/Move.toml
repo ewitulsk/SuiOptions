@@ -1,0 +1,18 @@
+[package]
+name = "Router"
+version = "1.0.0"
+
+[addresses]
+router = "_"
+
+[dev-addresses]
+router = "0xCAFE"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-framework.git", subdir = "aptos-framework", rev = "mainnet" }
+Wapal = { local = "deps/wapal" }
+Rarible = { local = "deps/rarible" }
+TopazV2 = { local = "deps/topaz_v2" }
+BluemoveV2 = { local = "deps/bluemove_v2" }
+Tradeport = { local = "deps/tradeport" }
+Okx = { local = "deps/okx" }

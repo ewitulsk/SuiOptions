@@ -1,0 +1,31 @@
+# NFT marketplace Move CI: unit tests for both packages on every push/PR
+# touching them. No secrets, no deploys.
+name: aptos-move-ci
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "aptos/contracts/**"
+      - ".github/workflows/aptos-move-ci.yml"
+  pull_request:
+    paths:
+      - "aptos/contracts/**"
+  workflow_dispatch:
+
+jobs:
+  move-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Aptos CLI
+        run: |
+          curl -fsSL https://aptos.dev/scripts/install_cli.py -o install_cli.py
+          python3 install_cli.py --version 9.5.1
+          echo "$HOME/.aptos/bin" >> "$GITHUB_PATH"
+      - name: Test marketplace package
+        working-directory: aptos/contracts/marketplace
+        run: aptos move test --dev
+      - name: Test router package
+        working-directory: aptos/contracts/router
+        run: aptos move test --dev

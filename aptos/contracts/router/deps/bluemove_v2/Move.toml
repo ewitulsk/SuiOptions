@@ -1,0 +1,6 @@
+[package]
+name = "BluemoveV2"
+version = "0.0.0"
+
+[addresses]
+bluemove_v2 = "0x0d520d8669b0a3de23119898dcdff3e0a27910db247663646ad18cf16e44c6f5"
