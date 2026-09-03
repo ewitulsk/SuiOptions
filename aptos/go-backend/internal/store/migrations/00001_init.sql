@@ -2,6 +2,7 @@
 -- Cursor-gated apply: every table carries first_version so reruns and
 -- backfills are idempotent by construction.
 
+-- +goose Up
 CREATE TABLE IF NOT EXISTS pipeline_progress (
     name         TEXT PRIMARY KEY,
     last_version BIGINT NOT NULL DEFAULT 0,
