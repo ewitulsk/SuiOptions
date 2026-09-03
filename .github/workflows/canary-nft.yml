@@ -1,0 +1,114 @@
+# NFT marketplace canary: mint → list on our venue → buy back, asserting
+# the indexer and API observe every step. Dispatch-only; spends only gas
+# plus a 1000-octa self-payment from the deployer wallet (the plan's
+# dedicated-ops-wallet buys per live venue remain a separate ops ritual).
+# Failing runs are the tx-failed-nft-canary signal (GitHub notification).
+name: canary-nft
+
+on:
+  workflow_dispatch:
+
+  pull_request:  # TEMPORARY: index workflow for dispatch; jobs skip unless dispatched
+
+jobs:
+  canary:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOYER: "0x1df6c735c4765960187911abcedc498deb7d2a3f2a347f2d69bbe685108d3dee"
+      VENUE: ${{ vars.NFT_VENUE_ADDRESS }}
+      SCHEDULE: ${{ vars.NFT_SCHEDULE_ADDRESS }}
+      ROUTER_PKG: ${{ vars.NFT_ROUTER_PACKAGE }}
+      ROUTER_CFG: ${{ vars.NFT_ROUTER_CONFIG }}
+      APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
+      FN: https://fullnode.mainnet.aptoslabs.com/v1
+      API: https://nft.sui-options.com
+    steps:
+      - name: Install Aptos CLI
+        run: |
+          curl -fsSL https://aptos.dev/scripts/install_cli.py -o install_cli.py
+          python3 install_cli.py --cli-version 9.5.1
+          echo "$HOME/.aptos/bin" >> "$GITHUB_PATH"
+      - name: Fund check
+        run: |
+          BAL=$(curl -s "$FN/accounts/${DEPLOYER}/balance/0x1::aptos_coin::AptosCoin")
+          echo "deployer balance: $BAL octas"
+          BAL="$BAL" python3 -c 'import os, sys; sys.exit(0 if int(os.environ["BAL"]) > 100000000 else 1)' \
+            || { echo "FUND ${DEPLOYER} BEFORE CANARY" >&2; exit 1; }
+      - name: Mint canary token
+        run: |
+          set -o pipefail
+          TOKEN="Canary-${{ github.run_id }}"
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          # shellcheck disable=SC2086
+          aptos move run \
+            --function-id 0x3::token::create_collection_script \
+            --args string:Canary string:"Canary collection" string:https://example.com u64:1000000 'bool:[false,false,false]' \
+            --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2 || echo "collection exists, continuing"
+          # shellcheck disable=SC2086
+          aptos move run \
+            --function-id 0x3::token::create_token_script \
+            --args string:Canary string:"$TOKEN" string:"Canary token" u64:1 u64:1 string:https://example.com \
+              address:$DEPLOYER u64:100 u64:1 'bool:[false,false,false,false,false]' 'string:[]' 'u8:[]' 'string:[]' \
+            --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2
+          # shellcheck disable=SC2086
+          aptos move run \
+            --function-id 0x3::token::mint_script \
+            --args address:$DEPLOYER string:Canary string:"$TOKEN" u64:0 \
+            --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2
+      - name: List on our venue
+        run: |
+          set -o pipefail
+          START=$(date +%s)
+          # shellcheck disable=SC2086
+          aptos move run \
+            --function-id "$VENUE::fa_listing::init_fixed_price_for_tokenv1" \
+            --args address:$DEPLOYER string:Canary string:"$TOKEN" u64:0 \
+              address:$SCHEDULE address:0xa u64:$START u64:1000 \
+            --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tee /tmp/list.txt
+          HASH=$(grep -oE '0x[0-9a-fA-F]{64}' /tmp/list.txt | head -1)
+          test -n "$HASH"
+          curl -s "$FN/transactions/by_hash/$HASH" > /tmp/list-tx.json
+          python3 -c "import json; tx = json.load(open('/tmp/list-tx.json')); assert tx['sender'] == '${DEPLOYER}' and tx['success'], tx; open('/tmp/list-version.txt','w').write(str(tx['version'])); ev = next(e['data'] for e in tx['events'] if e['type'].endswith('::events::ListingPlaced')); open('/tmp/listing.txt','w').write(ev['listing']); print('listing:', ev['listing'], 'version:', tx['version'])"
+          echo "LISTING=$(cat /tmp/listing.txt)" >> "$GITHUB_ENV"
+          echo "LIST_VERSION=$(cat /tmp/list-version.txt)" >> "$GITHUB_ENV"
+      - name: Wait for indexer, assert listed
+        run: |
+          for _attempt in $(seq 1 100); do
+            CURSOR=$(curl -s "$API/status" | python3 -c "import json,sys; print(json.load(sys.stdin)['indexer_cursor'])")
+            echo "attempt $_attempt: cursor=$CURSOR want>=$LIST_VERSION"
+            if [ "$CURSOR" -ge "$LIST_VERSION" ]; then break; fi
+            sleep 20
+          done
+          curl -s "$API/listings?seller=${DEPLOYER}&limit=50" > /tmp/listings.json
+          python3 -c "import json,os; rows = json.load(open('/tmp/listings.json')); assert any(r['token_name'] == os.environ['TOKEN'] for r in rows), rows; print('listed OK')"
+      - name: Buy back
+        run: |
+          set -o pipefail
+          # shellcheck disable=SC2086
+          aptos move run \
+            --function-id "$VENUE::fa_listing::purchase" \
+            --args address:$LISTING \
+            --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tee /tmp/buy.txt
+          HASH=$(grep -oE '0x[0-9a-fA-F]{64}' /tmp/buy.txt | head -1)
+          test -n "$HASH"
+          curl -s "$FN/transactions/by_hash/$HASH" > /tmp/buy-tx.json
+          python3 -c "import json; tx = json.load(open('/tmp/buy-tx.json')); assert tx['sender'] == '${DEPLOYER}' and tx['success'], tx; open('/tmp/buy-version.txt','w').write(str(tx['version'])); print('bought at version', tx['version'])"
+          echo "BUY_VERSION=$(cat /tmp/buy-version.txt)" >> "$GITHUB_ENV"
+      - name: Assert fill observed
+        run: |
+          for _attempt in $(seq 1 60); do
+            CURSOR=$(curl -s "$API/status" | python3 -c "import json,sys; print(json.load(sys.stdin)['indexer_cursor'])")
+            echo "attempt $_attempt: cursor=$CURSOR want>=$BUY_VERSION"
+            if [ "$CURSOR" -ge "$BUY_VERSION" ]; then break; fi
+            sleep 20
+          done
+          curl -s "$API/listings?seller=${DEPLOYER}&limit=50" > /tmp/listings2.json
+          python3 -c "import json,os; rows = json.load(open('/tmp/listings2.json')); assert all(r['token_name'] != os.environ['TOKEN'] for r in rows), rows; print('fill observed OK')"
+      - name: Router sim path (sold listing must 422, not 5xx)
+        run: |
+          CODE=$(curl -s -o /tmp/sweep.json -w "%{http_code}" -X POST "$API/tx/sweep" \
+            -H 'content-type: application/json' \
+            -d "{\"venues\":[1],\"listings\":[\"$LISTING\"],\"prices\":[\"1000\"],\"v1_creators\":[],\"v1_collections\":[],\"v1_names\":[],\"v1_property_versions\":[],\"sender\":\"$DEPLOYER\"}")
+          echo "sweep status: $CODE"; head -c 300 /tmp/sweep.json; echo
+          case "$CODE" in 400|422) echo CANARY_GREEN ;; *) echo "sim path broken" >&2; exit 1 ;; esac
