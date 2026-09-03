@@ -24,6 +24,14 @@ import (
 	"github.com/ewitulsk/SuiOptions/aptos/go-backend/internal/platform/obs"
 )
 
+type apiFileConfig struct {
+	FullnodeURL  string `toml:"fullnode_url"`
+	DatabaseURL  string `toml:"database_url"`
+	BindAddr     string `toml:"bind_addr"`
+	OurVenue     string `toml:"our_venue_address"`
+	StartVersion uint64 `toml:"start_version"`
+}
+
 type apiConfig struct {
 	FullnodeURL   string `toml:"fullnode_url"`
 	DatabaseURL   string `toml:"database_url"`
@@ -52,10 +60,10 @@ func main() {
 	if path == "" {
 		path = "config/nft.toml"
 	}
-	var base struct {
-		FullnodeURL string `toml:"fullnode_url"`
-		DatabaseURL string `toml:"database_url"`
-	}
+	// apiFileConfig mirrors the full rendered nft.toml shape. LoadTOML rejects
+	// unknown keys, so this must stay in sync with the file the deploy
+	// workflow renders (extra service fields come from the environment).
+	var base apiFileConfig
 	if err := config.LoadTOML(path, &base); err != nil {
 		log.Fatalf("api: config: %v", err)
 	}
@@ -272,14 +280,14 @@ func (s *server) handleTxBuy(w http.ResponseWriter, r *http.Request) {
 // POST /tx/sweep — tier-1 router payload, simulated before return.
 func (s *server) handleTxSweep(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Venues    []int    `json:"venues"`
-		Listings  []string `json:"listings"`
-		Prices    []string `json:"prices"`
-		V1C       []string `json:"v1_creators"`
-		V1Coll    []string `json:"v1_collections"`
-		V1Names   []string `json:"v1_names"`
-		V1PVs     []string `json:"v1_property_versions"`
-		Sender    string   `json:"sender"`
+		Venues   []int    `json:"venues"`
+		Listings []string `json:"listings"`
+		Prices   []string `json:"prices"`
+		V1C      []string `json:"v1_creators"`
+		V1Coll   []string `json:"v1_collections"`
+		V1Names  []string `json:"v1_names"`
+		V1PVs    []string `json:"v1_property_versions"`
+		Sender   string   `json:"sender"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
@@ -324,7 +332,7 @@ func (s *server) simulate(ctx context.Context, sender string, e payload.Entry) e
 	}
 	defer resp.Body.Close()
 	var out []struct {
-		Success bool `json:"success"`
+		Success  bool   `json:"success"`
 		VMStatus string `json:"vm_status"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
