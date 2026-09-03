@@ -59,8 +59,6 @@ jobs:
           TF_VAR_deploy_ssh_pubkey: ${{ env.TF_VAR_deploy_ssh_pubkey }}
         run: terraform apply -input=false -auto-approve nft.tfplan
       - name: Outputs
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
-          DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-        run: terraform output nft_public_ip && terraform output nft_domain
+        run: |
+          doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header
+          doctl compute domain records list sui-options.com --format Name,Type,Data --no-header | grep -E "^nft[[:space:]]+A[[:space:]]"
