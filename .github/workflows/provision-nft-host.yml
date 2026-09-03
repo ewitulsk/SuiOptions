@@ -53,7 +53,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.SPACES_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.SPACES_SECRET_ACCESS_KEY }}
           DIGITALOCEAN_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-          TF_VAR_deploy_ssh_pubkey: ${{ vars.DEPLOY_SSH_PUBKEY }}
+          TF_VAR_deploy_ssh_pubkey: ${{ env.TF_VAR_deploy_ssh_pubkey }}
         run: terraform apply -input=false -auto-approve nft.tfplan
       - name: Outputs
         env:
