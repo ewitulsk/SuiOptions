@@ -50,7 +50,7 @@ jobs:
           # shellcheck disable=SC2086
           aptos move run \
             --function-id 0x3::token::create_token_script \
-            --args string:CanarySweep string:CanarySweep2 string:"Canary token" u64:0 u64:1000000 string:https://example.com \
+            --args string:CanarySweep string:CanarySweep2 string:"Canary token" u64:1 u64:1000000 string:https://example.com \
               address:$DEPLOYER u64:100 u64:1 'bool:[false,false,false,false,false]' 'string:[]' 'u8:[]' 'string:[]' \
             --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2 || echo "tokendata exists, continuing"
           # shellcheck disable=SC2086
