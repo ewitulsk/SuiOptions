@@ -1,5 +1,5 @@
 [package]
-name = "BluemoveV2"
+name = "bluemove_marketplace_token_v2"
 version = "0.0.0"
 
 [addresses]

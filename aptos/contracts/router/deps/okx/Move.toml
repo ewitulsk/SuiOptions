@@ -1,5 +1,5 @@
 [package]
-name = "Okx"
+name = "okx-nft-marketplace"
 version = "0.0.0"
 
 [addresses]

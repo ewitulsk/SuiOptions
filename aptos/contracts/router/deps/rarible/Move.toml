@@ -1,5 +1,5 @@
 [package]
-name = "Rarible"
+name = "rarible-marketplace"
 version = "0.0.0"
 
 [addresses]
