@@ -24,8 +24,13 @@ import (
 // DefaultGRPCEndpoint is the Labs-hosted mainnet Transaction Stream Service.
 const DefaultGRPCEndpoint = "grpc.mainnet.aptoslabs.com:443"
 
-// apiKeyHeader carries the developer API key on stream requests.
-const apiKeyHeader = "x-aptos-api-key"
+// Stream auth mirrors the processor SDK: Bearer [REDACTED] plus a request-name
+// identifying this destination.
+const (
+	authHeader        = "authorization"
+	requestNameHeader = "x-aptos-request-name"
+	requestName       = "nft-indexer"
+)
 
 // GRPCClient streams filtered transactions and maps them to
 // venues.Transaction, the same shape the REST client produces — mappers
@@ -101,7 +106,8 @@ func (c *GRPCClient) eventFilter() *indexerv1.BooleanTransactionFilter {
 // apply for every response batch in order. It returns only on error or
 // context cancel; resume from the last applied version.
 func (c *GRPCClient) Stream(ctx context.Context, start uint64, apply func([]venues.Transaction) (uint64, error)) error {
-	ctx = metadata.AppendToOutgoingContext(ctx, apiKeyHeader, c.apiKey)
+	ctx = metadata.AppendToOutgoingContext(ctx,
+		authHeader, "Bearer "+c.apiKey, requestNameHeader, requestName)
 	req := &indexerv1.GetTransactionsRequest{
 		StartingVersion:   &start,
 		BatchSize:         &c.batch,
