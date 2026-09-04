@@ -6,7 +6,7 @@
 # processor + GEOMI_BACKFILL_KEY secret first; pause/delete the processor
 # after the validation gates pass. Never for steady state.
 # Registration probe: rescan marker.
-name: backfill-nft
+name: nft-backfill
 
 on:
   workflow_dispatch:
