@@ -1,0 +1,32 @@
+# Dump NFT service logs from the droplet. Dispatch-only diagnostics: no
+# deploys, no restarts, read-only `docker compose logs` over SSH.
+name: logs-nft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tail:
+        description: "Lines per service"
+        required: false
+        default: "60"
+
+  pull_request:  # TEMPORARY: index workflow for dispatch; jobs skip unless dispatched
+
+jobs:
+  logs:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Dump logs
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          HOST=$(doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header)
+          ssh -o StrictHostKeyChecking=no root@"$HOST" \
+            'cd /opt/nft && docker compose --env-file .env ps && docker compose --env-file .env logs --tail '"${{ inputs.tail }}"' nft-indexer nft-api'
