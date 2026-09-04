@@ -64,6 +64,9 @@ func KeyFromEnv() string {
 	return os.Getenv("FULLNODE_API_KEY")
 }
 
+// PageSize is the versions-per-fetch stride callers use to tile the chain.
+func (c *Client) PageSize() int { return c.limit }
+
 // LatestVersion returns the ledger tip.
 func (c *Client) LatestVersion(ctx context.Context) (uint64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/", nil)

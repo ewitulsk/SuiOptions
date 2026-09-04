@@ -71,11 +71,28 @@ func main() {
 	}
 	key := stream.KeyFromEnv()
 	client := stream.NewWithKey(cfg.FullnodeURL, key)
-	// Anonymous quota sustains ~50 tps against a ~185 tps chain: pace
-	// anonymous polls hard, keyed polls only lightly.
-	pace := 2 * time.Second
-	if key != "" {
-		pace = 200 * time.Millisecond
+	// One page in flight sustains ~210 tps against a ~190 tps chain —
+	// no catch-up margin. fetchAhead pages overlap network with apply.
+	const fetchAhead = 4
+	pageSize := uint64(client.PageSize())
+	type pageResult struct {
+		txs []venues.Transaction
+		err error
+	}
+	inflight := map[uint64]chan pageResult{}
+	launch := func(start uint64) {
+		if _, ok := inflight[start]; ok {
+			return
+		}
+		ch := make(chan pageResult, 1)
+		inflight[start] = ch
+		go func() {
+			txs, err := client.Fetch(ctx, start)
+			select {
+			case ch <- pageResult{txs, err}:
+			case <-ctx.Done():
+			}
+		}()
 	}
 
 	cursor, err := st.Cursor(ctx, "indexer")
@@ -91,22 +108,44 @@ func main() {
 	}
 	log.Printf("indexer: starting at version %d", cursor)
 
+	nextFetch := cursor
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		txs, err := client.Fetch(ctx, cursor)
-		if err != nil {
-			log.Printf("indexer: fetch: %v", err)
-			// Fetch errors are usually 429s: wait out the quota window
-			// instead of hammering it. Empty tip polls keep the short
-			// Backoff below.
-			time.Sleep(10 * time.Second)
+		// Keep the pipeline full; pages apply strictly in order below,
+		// so out-of-order arrivals are safe (history is immutable).
+		for len(inflight) < fetchAhead {
+			launch(nextFetch)
+			nextFetch += pageSize
+		}
+		res, ok := <-inflight[cursor]
+		if !ok {
+			// Abandoned during a tip reset; re-launch at the cursor.
+			nextFetch = cursor
 			continue
 		}
+		delete(inflight, cursor)
+		if res.err != nil {
+			log.Printf("indexer: fetch: %v", res.err)
+			// Fetch errors are usually 429s: wait out the quota window
+			// instead of hammering it, and collapse the pipeline so a
+			// retry resumes exactly at the cursor.
+			time.Sleep(10 * time.Second)
+			for start := range inflight {
+				delete(inflight, start)
+			}
+			nextFetch = cursor
+			continue
+		}
+		txs := res.txs
 		if len(txs) == 0 {
+			for start := range inflight {
+				delete(inflight, start)
+			}
+			nextFetch = cursor
 			client.Backoff(ctx)
 			continue
 		}
@@ -125,11 +164,19 @@ func main() {
 		if err := st.ApplyBatch(ctx, "indexer", acts, last); err != nil {
 			log.Printf("indexer: apply: %v", err)
 			time.Sleep(2 * time.Second)
+			launch(cursor)
 			continue
 		}
 		log.Printf("indexer: applied %d txs (%d activities), cursor=%d", len(txs), len(acts), last)
 		cursor = last + 1
-		// Pace successful polls (see pace above).
-		time.Sleep(pace)
+		if uint64(len(txs)) < pageSize {
+			// Short page: reached the tip. Collapse the pipeline —
+			// versions past last don't exist yet — and breathe.
+			for start := range inflight {
+				delete(inflight, start)
+			}
+			nextFetch = cursor
+			client.Backoff(ctx)
+		}
 	}
 }
