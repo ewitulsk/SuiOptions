@@ -8,8 +8,6 @@ name: canary-nft
 on:
   workflow_dispatch:
 
-  pull_request:  # TEMPORARY: index workflow for dispatch; jobs skip unless dispatched
-
 jobs:
   canary:
     if: github.event_name == 'workflow_dispatch'

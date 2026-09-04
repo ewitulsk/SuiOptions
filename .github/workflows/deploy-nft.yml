@@ -24,8 +24,6 @@ on:
         required: false
         default: ""
 
-  pull_request:  # TEMPORARY: index workflow for dispatch; jobs skip unless dispatched
-
 jobs:
   deploy:
     if: github.event_name == 'workflow_dispatch'

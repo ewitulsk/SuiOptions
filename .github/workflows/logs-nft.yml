@@ -10,8 +10,6 @@ on:
         required: false
         default: "60"
 
-  pull_request:  # TEMPORARY: index workflow for dispatch; jobs skip unless dispatched
-
 jobs:
   logs:
     if: github.event_name == 'workflow_dispatch'
