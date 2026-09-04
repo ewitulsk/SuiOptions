@@ -82,7 +82,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("indexer: cursor: %v", err)
 	}
-	if cursor == 0 && cfg.StartVersion != 0 {
+	// Fast-forward a stale cursor (e.g. accumulated while anonymous):
+	// anything before StartVersion is ancient history the REST window
+	// would take days to replay; backfill stays an archival-endpoint job.
+	if cfg.StartVersion != 0 && cursor < cfg.StartVersion {
+		log.Printf("indexer: fast-forwarding cursor %d -> %d", cursor, cfg.StartVersion)
 		cursor = cfg.StartVersion
 	}
 	log.Printf("indexer: starting at version %d", cursor)

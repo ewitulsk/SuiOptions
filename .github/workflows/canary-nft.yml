@@ -82,8 +82,9 @@ jobs:
             if [ "$CURSOR" -ge "$LIST_VERSION" ]; then break; fi
             sleep 20
           done
-          curl -s "$API/listings?seller=${DEPLOYER}&limit=50" > /tmp/listings.json
-          python3 -c "import json,os; rows = json.load(open('/tmp/listings.json')); assert any(r['listing_id'].lower() == os.environ['LISTING'].lower() for r in rows), rows; print('listed OK')"
+          CODE=$(curl -s -o /tmp/listings.json -w "%{http_code}" "$API/listings?seller=${DEPLOYER}&limit=50")
+          test "$CODE" = 200 || { echo "listings API: HTTP $CODE"; head -c 500 /tmp/listings.json; exit 1; }
+          python3 -c "import json,os; rows = json.load(open('/tmp/listings.json')); assert isinstance(rows, list), rows; assert any(r['listing_id'].lower() == os.environ['LISTING'].lower() for r in rows), rows; print('listed OK')"
       - name: Buy back
         run: |
           set -o pipefail
@@ -105,8 +106,9 @@ jobs:
             if [ "$CURSOR" -ge "$BUY_VERSION" ]; then break; fi
             sleep 20
           done
-          curl -s "$API/listings?seller=${DEPLOYER}&limit=50" > /tmp/listings2.json
-          python3 -c "import json,os; rows = json.load(open('/tmp/listings2.json')); assert all(r['listing_id'].lower() != os.environ['LISTING'].lower() for r in rows), rows; print('fill observed OK')"
+          CODE=$(curl -s -o /tmp/listings2.json -w "%{http_code}" "$API/listings?seller=${DEPLOYER}&limit=50")
+          test "$CODE" = 200 || { echo "listings API: HTTP $CODE"; head -c 500 /tmp/listings2.json; exit 1; }
+          python3 -c "import json,os; rows = json.load(open('/tmp/listings2.json')); assert isinstance(rows, list), rows; assert all(r['listing_id'].lower() != os.environ['LISTING'].lower() for r in rows), rows; print('fill observed OK')"
       - name: Router sim path (sold listing must 422, not 5xx)
         run: |
           CODE=$(curl -s -o /tmp/sweep.json -w "%{http_code}" -X POST "$API/tx/sweep" \

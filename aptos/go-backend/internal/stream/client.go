@@ -52,8 +52,8 @@ func New(base string) *Client {
 func NewWithKey(base, apiKey string) *Client {
 	return &Client{
 		base:    base,
-		http:    &http.Client{Timeout: 30 * time.Second},
-		limit:   100,
+		http:    &http.Client{Timeout: 60 * time.Second},
+		limit:   500,
 		backoff: 2 * time.Second,
 		apiKey:  apiKey,
 	}
