@@ -1,0 +1,206 @@
+# Deploy NFT backend services to the options-nft-host-do droplet.
+# Dispatch-only. Builds both images, pushes to DOCR, renders secrets +
+# compose on the host over SSH, pulls, migrates (in-binary) and health-checks.
+# Nothing runs locally: all deploys happen here.
+name: deploy-nft
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag (default: branch-sha)"
+        required: false
+        default: ""
+      venue_address:
+        description: "Our venue object address (default: NFT_VENUE_ADDRESS var)"
+        required: false
+        default: ""
+      router_package:
+        description: "Router package address (default: NFT_ROUTER_PACKAGE var)"
+        required: false
+        default: ""
+      router_config:
+        description: "RouterConfig object address (default: NFT_ROUTER_CONFIG var)"
+        required: false
+        default: ""
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Tag
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          [ -z "$TAG" ] && TAG="$(echo "${{ github.ref_name }}" | tr '/_' '--')-$(echo "${{ github.sha }}" | cut -c1-8)"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Install sops
+        run: |
+          curl -fsSL -o /tmp/sops \
+            "https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64"
+          chmod +x /tmp/sops && sudo mv /tmp/sops /usr/local/bin/sops
+      - name: DOCR login (runner)
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        run: |
+          doctl auth init -t "$DIGITALOCEAN_ACCESS_TOKEN" --context gh-nft >/dev/null 2>&1 || doctl auth init -t "$DIGITALOCEAN_ACCESS_TOKEN" >/dev/null
+          doctl registry login --context gh-nft 2>/dev/null || doctl registry login
+      - name: Build and push nft-indexer
+        run: |
+          docker buildx build --push \
+            -t "${{ vars.ECR_REGISTRY }}/options/nft-indexer:${{ env.TAG }}" \
+            --build-arg BIN=nft-indexer -f aptos/go-backend/Dockerfile aptos/go-backend
+      - name: Build and push nft-api
+        run: |
+          docker buildx build --push \
+            -t "${{ vars.ECR_REGISTRY }}/options/nft-api:${{ env.TAG }}" \
+            --build-arg BIN=nft-api -f aptos/go-backend/Dockerfile aptos/go-backend
+      - name: SSH deploy
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          FULLNODE_API_KEY: ${{ secrets.NFT_FULLNODE_API_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          HOST=$(doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header)
+          echo "target: $HOST"
+          ssh -o StrictHostKeyChecking=no root@"$HOST" 'mkdir -p /opt/nft /opt/nft/secrets /opt/options'
+          printf '%s' "$DO_TOKEN" | ssh -o StrictHostKeyChecking=no root@"$HOST" \
+            'cat > /opt/options/docr-token && chmod 600 /opt/options/docr-token'
+          ssh -o StrictHostKeyChecking=no root@"$HOST" \
+            'docker login registry.digitalocean.com --username "$(cat /opt/options/docr-token)" --password-stdin < /opt/options/docr-token'
+          scp -o StrictHostKeyChecking=no \
+            aptos/deployment/docker-compose.nft.yml root@"$HOST":/opt/nft/docker-compose.yml
+          # Render secrets from the SOPS store on the runner, write host files.
+          export SOPS_AGE_KEY
+          DB_PASSWORD=$(sops -d --extract '["nft/db-password"]' aptos/deployment/secrets.enc.yaml)
+          ADMIN_TOKEN=$(sops -d --extract '["nft/jwt-secret"]' aptos/deployment/secrets.enc.yaml | head -c 32)
+          OUR_VENUE="${{ inputs.venue_address }}"
+          [ -z "$OUR_VENUE" ] && OUR_VENUE="${{ vars.NFT_VENUE_ADDRESS }}"
+          ROUTER_PKG="${{ inputs.router_package }}"
+          [ -z "$ROUTER_PKG" ] && ROUTER_PKG="${{ vars.NFT_ROUTER_PACKAGE }}"
+          ROUTER_CFG="${{ inputs.router_config }}"
+          [ -z "$ROUTER_CFG" ] && ROUTER_CFG="${{ vars.NFT_ROUTER_CONFIG }}"
+          # Intentional client-side expansion: runner values into the host .env.
+          # shellcheck disable=SC2087
+          ssh -o StrictHostKeyChecking=no root@"$HOST" \
+            "cat > /opt/nft/.env" <<EOF
+          REGISTRY=${{ vars.ECR_REGISTRY }}
+          IMAGE_TAG=${{ env.TAG }}
+          DB_PASSWORD=$DB_PASSWORD
+          OUR_VENUE_ADDRESS=$OUR_VENUE
+          ROUTER_PACKAGE=$ROUTER_PKG
+          ROUTER_CONFIG=$ROUTER_CFG
+          ADMIN_TOKEN=$ADMIN_TOKEN
+          FULLNODE_API_KEY=$FULLNODE_API_KEY
+          EOF
+          # Quoted heredoc: ${...} stays literal for the service binary,
+          # which expands env placeholders itself at boot (safer for
+          # special chars in secrets than runner-side expansion).
+          ssh -o StrictHostKeyChecking=no root@"$HOST" 'cat > /opt/nft/nft.toml' <<'EOF'
+          fullnode_url = "https://fullnode.mainnet.aptoslabs.com/v1"
+          database_url = "postgres://nft:${DB_PASSWORD}@postgres:5432/nft?sslmode=disable"
+          bind_addr = "0.0.0.0:8090"
+          our_venue_address = "${OUR_VENUE_ADDRESS}"
+          start_version = 0
+          EOF
+          # Index from recent history: version 0 is long pruned on mainnet.
+          HEAD=$(curl -s https://fullnode.mainnet.aptoslabs.com/v1 | python3 -c "import json,sys; print(json.load(sys.stdin)['ledger_version'])")
+          START=$((HEAD - 200000)); [ "$START" -lt 0 ] && START=0
+          echo "start_version=$START (head $HEAD)"
+          ssh -o StrictHostKeyChecking=no root@"$HOST" \
+            "sed -i 's/^start_version.*/start_version = $START/' /opt/nft/nft.toml"
+          ssh -o StrictHostKeyChecking=no root@"$HOST" \
+            'cd /opt/nft && docker compose --env-file .env pull && docker compose --env-file .env up -d --remove-orphans && sleep 15 && docker compose --env-file .env ps && docker compose --env-file .env logs --tail 8 nft-indexer'
+      - name: Edge TLS (nginx + certbot for nft.sui-options.com)
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          HOST=$(doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header)
+          # Idempotent: rewriting the vhost must never drop the 443 block
+          # certbot adds, so render the full config when a cert exists.
+          ssh -o StrictHostKeyChecking=no root@"$HOST" 'set -e
+            mkdir -p /var/www/certbot
+            if [ -d /etc/letsencrypt/live/nft.sui-options.com ]; then
+              cat > /etc/nginx/sites-available/nft <<EOF443
+          server {
+              listen 80;
+              server_name nft.sui-options.com;
+              location /.well-known/acme-challenge/ {
+                  root /var/www/certbot;
+              }
+              location / {
+                  return 301 https://\$host\$request_uri;
+              }
+          }
+          server {
+              listen 443 ssl;
+              server_name nft.sui-options.com;
+              ssl_certificate /etc/letsencrypt/live/nft.sui-options.com/fullchain.pem;
+              ssl_certificate_key /etc/letsencrypt/live/nft.sui-options.com/privkey.pem;
+              location / {
+                  proxy_pass http://127.0.0.1:8091;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+          }
+          EOF443
+            else
+              cat > /etc/nginx/sites-available/nft <<EOF80
+          server {
+              listen 80;
+              server_name nft.sui-options.com;
+              location /.well-known/acme-challenge/ {
+                  root /var/www/certbot;
+              }
+              location / {
+                  proxy_pass http://127.0.0.1:8091;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+          }
+          EOF80
+            fi
+            ln -sf /etc/nginx/sites-available/nft /etc/nginx/sites-enabled/nft
+            nginx -t && systemctl reload nginx
+            if [ ! -d /etc/letsencrypt/live/nft.sui-options.com ]; then
+              certbot --nginx -d nft.sui-options.com --non-interactive \
+                --agree-tos --register-unsafely-without-email --redirect
+            fi
+            nginx -t && systemctl reload nginx'
+      - name: Health check
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          HOST=$(doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header)
+          for _attempt in $(seq 1 20); do
+            A=$(ssh -o StrictHostKeyChecking=no root@"$HOST" 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8090/health' || true)
+            B=$(ssh -o StrictHostKeyChecking=no root@"$HOST" 'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8091/health' || true)
+            echo "attempt $_attempt: indexer=$A api=$B"
+            if [ "$A" = "200" ] && [ "$B" = "200" ]; then
+              echo HEALTHY; exit 0
+            fi
+            sleep 10
+          done
+          ssh -o StrictHostKeyChecking=no root@"$HOST" 'cd /opt/nft && docker compose --env-file .env ps; docker compose --env-file .env logs --tail=30 nft-api nft-indexer postgres' || true
+          echo "services never healthy" >&2; exit 1

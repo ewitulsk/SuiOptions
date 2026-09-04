@@ -1,0 +1,111 @@
+# Deploy NFT contracts to Aptos mainnet. Dispatch-only, runs the Aptos CLI
+# in CI with the deployer key from secrets — never from a laptop.
+# Publishes marketplace + router as new objects, runs both init entries
+# (0% fees, APT allowlisted), discovers object addresses from the Born
+# events, and prints them for the service/frontend deploys.
+name: deploy-nft-contracts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Install Aptos CLI
+        run: |
+          curl -fsSL https://aptos.dev/scripts/install_cli.py -o install_cli.py
+          python3 install_cli.py --cli-version 9.5.1
+          echo "$HOME/.aptos/bin" >> "$GITHUB_PATH"
+      - name: Fund check
+        env:
+          DEPLOYER: "0x1df6c735c4765960187911abcedc498deb7d2a3f2a347f2d69bbe685108d3dee"
+        run: |
+          BAL=$(curl -s "https://fullnode.mainnet.aptoslabs.com/v1/accounts/${DEPLOYER}/balance/0x1::aptos_coin::AptosCoin")
+          echo "deployer balance: $BAL octas"
+          BAL="$BAL" python3 -c 'import os, sys; sys.exit(0 if int(os.environ["BAL"]) > 100000000 else 1)' \
+            || { echo "FUND ${DEPLOYER} BEFORE DEPLOYING" >&2; exit 1; }
+      - name: Deploy marketplace package
+        env:
+          APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
+        run: |
+          set -o pipefail
+          aptos move deploy-object \
+            --package-dir "aptos/contracts/marketplace" \
+            --address-name "marketplace" \
+            --private-key "$APTOS_KEY" \
+            --url https://fullnode.mainnet.aptoslabs.com/v1 \
+            --assume-yes 2>&1 | tee /tmp/venue-deploy.txt
+          grep -oE 'object address 0x[0-9a-fA-F]{64}' /tmp/venue-deploy.txt | grep -oE '0x[0-9a-fA-F]{64}' | head -1 > /tmp/venue.txt
+          test -s /tmp/venue.txt
+          echo "VENUE=$(cat /tmp/venue.txt)" >> "$GITHUB_ENV"
+      - name: Deploy router package
+        env:
+          APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
+        run: |
+          set -o pipefail
+          aptos move deploy-object \
+            --package-dir "aptos/contracts/router" \
+            --address-name "router" \
+            --private-key "$APTOS_KEY" \
+            --url https://fullnode.mainnet.aptoslabs.com/v1 \
+            --assume-yes 2>&1 | tee /tmp/router-deploy.txt
+          grep -oE 'object address 0x[0-9a-fA-F]{64}' /tmp/router-deploy.txt | grep -oE '0x[0-9a-fA-F]{64}' | head -1 > /tmp/router.txt
+          test -s /tmp/router.txt
+          echo "ROUTER=$(cat /tmp/router.txt)" >> "$GITHUB_ENV"
+      - name: Init marketplace and discover objects
+        env:
+          APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
+        run: |
+          DEPLOYER=0x1df6c735c4765960187911abcedc498deb7d2a3f2a347f2d69bbe685108d3dee
+          aptos move run \
+            --function-id "$VENUE::fee_schedule::init_entry" \
+            --args address:$DEPLOYER u64:0 u64:0 u64:100 u64:0 \
+            --private-key "$APTOS_KEY" --url https://fullnode.mainnet.aptoslabs.com/v1 \
+            --assume-yes 2>&1 | tee /tmp/venue-init.txt
+          HASH=$(grep -oE '0x[0-9a-fA-F]{64}' /tmp/venue-init.txt | head -1)
+          test -n "$HASH"
+          curl -s "https://fullnode.mainnet.aptoslabs.com/v1/transactions/by_hash/$HASH" > /tmp/venue-init-tx.json
+          python3 -c "import json; tx = json.load(open('/tmp/venue-init-tx.json')); assert tx['sender'] == '0x1df6c735c4765960187911abcedc498deb7d2a3f2a347f2d69bbe685108d3dee' and tx['success'], tx"
+          python3 -c "import json; tx = json.load(open('/tmp/venue-init-tx.json')); born = next(e['data'] for e in tx['events'] if e['type'].endswith('::fee_schedule::MarketplaceBorn')); open('/tmp/schedule.txt','w').write(born['fee_schedule']); open('/tmp/venuecap.txt','w').write(born['admin_cap']); print('schedule:', born['fee_schedule']); print('venue admin cap:', born['admin_cap'])"
+          echo "SCHEDULE=$(cat /tmp/schedule.txt)" >> "$GITHUB_ENV"
+          echo "VENUE_CAP=$(cat /tmp/venuecap.txt)" >> "$GITHUB_ENV"
+      - name: Allowlist APT quote
+        env:
+          APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
+        run: |
+          set -o pipefail
+          aptos move run \
+            --function-id "$VENUE::fee_schedule::allow_quote_token" \
+            --args address:$VENUE_CAP address:$SCHEDULE address:0xa u64:0 \
+            --private-key "$APTOS_KEY" --url https://fullnode.mainnet.aptoslabs.com/v1 \
+            --assume-yes
+      - name: Init router and discover config
+        env:
+          APTOS_KEY: ${{ secrets.APTOS_DEPLOYER_PRIVATE_KEY }}
+        run: |
+          DEPLOYER=0x1df6c735c4765960187911abcedc498deb7d2a3f2a347f2d69bbe685108d3dee
+          aptos move run \
+            --function-id "$ROUTER::router::init" \
+            --args address:$DEPLOYER u64:0 u64:0 hex:01020304050607 \
+            --private-key "$APTOS_KEY" --url https://fullnode.mainnet.aptoslabs.com/v1 \
+            --assume-yes 2>&1 | tee /tmp/router-init.txt
+          HASH=$(grep -oE '0x[0-9a-fA-F]{64}' /tmp/router-init.txt | head -1)
+          test -n "$HASH"
+          curl -s "https://fullnode.mainnet.aptoslabs.com/v1/transactions/by_hash/$HASH" > /tmp/router-init-tx.json
+          python3 -c "import json; tx = json.load(open('/tmp/router-init-tx.json')); assert tx['sender'] == '0x1df6c735c4765960187911abcedc498deb7d2a3f2a347f2d69bbe685108d3dee' and tx['success'], tx"
+          python3 -c "import json; tx = json.load(open('/tmp/router-init-tx.json')); born = next(e['data'] for e in tx['events'] if e['type'].endswith('::router::RouterBorn')); open('/tmp/routercfg.txt','w').write(born['config']); open('/tmp/routercap.txt','w').write(born['admin_cap']); print('router config:', born['config']); print('router admin cap:', born['admin_cap'])"
+          echo "ROUTER_CONFIG=$(cat /tmp/routercfg.txt)" >> "$GITHUB_ENV"
+          {
+            echo "## NFT contract addresses"
+            echo "venue: \`$VENUE\`"
+            echo "fee schedule: \`$SCHEDULE\`"
+            echo "venue admin cap: \`$VENUE_CAP\`"
+            echo "router: \`$ROUTER\`"
+            echo "router config: \`$ROUTER_CONFIG\`"
+            echo ""
+            echo "Pass these as inputs to deploy-nft / deploy-nft-frontend."
+          } >> "$GITHUB_STEP_SUMMARY"

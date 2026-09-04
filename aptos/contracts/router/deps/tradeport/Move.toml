@@ -1,0 +1,6 @@
+[package]
+name = "tradeport"
+version = "0.0.0"
+
+[addresses]
+tradeport_v2 = "0xe11c12ec495f3989c35e1c6a0af414451223305b579291fc8f3d9d0575a23c26"

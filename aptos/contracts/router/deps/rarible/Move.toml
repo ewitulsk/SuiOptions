@@ -1,0 +1,11 @@
+[package]
+name = "rarible-marketplace"
+version = "0.0.0"
+
+[addresses]
+rarible = "0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-framework.git", subdir = "aptos-framework", rev = "mainnet" }
+AptosToken = { git = "https://github.com/aptos-labs/aptos-framework.git", subdir = "aptos-token", rev = "mainnet" }
+AptosTokenObjects = { git = "https://github.com/aptos-labs/aptos-framework.git", subdir = "aptos-token-objects", rev = "mainnet" }

@@ -1,0 +1,18 @@
+[package]
+name = "Router"
+version = "1.0.0"
+
+[addresses]
+router = "_"
+
+[dev-addresses]
+router = "0xCAFE"
+
+[dependencies]
+AptosFramework = { git = "https://github.com/aptos-labs/aptos-framework.git", subdir = "aptos-framework", rev = "mainnet" }
+Marketplace = { local = "deps/marketplace" }
+rarible-marketplace = { local = "deps/rarible" }
+bluemove_marketplace_token_v2 = { local = "deps/bluemove_v2" }
+tradeport = { local = "deps/tradeport" }
+tradeport_v2 = { local = "deps/tradeport_v2" }
+okx-nft-marketplace = { local = "deps/okx" }

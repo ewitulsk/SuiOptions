@@ -1,0 +1,7 @@
+# NFT backend config. ${VAR} expands from the environment at boot; a missing
+# variable is a hard boot error, never an empty secret.
+fullnode_url = "https://fullnode.mainnet.aptoslabs.com/v1"
+database_url = "postgres://nft:${DB_PASSWORD}@127.0.0.1:5432/nft?sslmode=disable"
+bind_addr = "127.0.0.1:8090"
+our_venue_address = "${OUR_VENUE_ADDRESS}"
+start_version = 0

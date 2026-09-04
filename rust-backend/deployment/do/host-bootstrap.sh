@@ -55,6 +55,11 @@ if [ "${ROLE:-staging}" = "staging" ]; then
     chmod 700 "/opt/options/$env/secrets"
   done
   mkdir -p /opt/options/monitoring
+elif [ "${ROLE:-staging}" = "nft" ]; then
+  # ---- NFT marketplace host: same edge ingress, own layout -----------------
+  apt-get install -y nginx certbot python3-certbot-nginx
+  mkdir -p /opt/nft/secrets /opt/nft/data
+  chmod 700 /opt/nft/secrets
 else
   mkdir -p /opt/data-room /var/spool/data-room
 fi

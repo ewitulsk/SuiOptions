@@ -1,0 +1,6 @@
+[package]
+name = "okx-nft-marketplace"
+version = "0.0.0"
+
+[addresses]
+okx = "0x1e6009ce9d288f3d5031c06ca0b19a334214ead798a0cb38808485bd6d997a43"

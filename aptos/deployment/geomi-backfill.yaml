@@ -1,0 +1,5035 @@
+# Geomi no-code processor template: one-time HISTORICAL backfill for the
+# NFT aggregator. Import via dashboard: Processors > Import Processor.
+# Covers our venue + wapal + rarible + topaz-v2 (reference family, both Event
+# suffix variants) + tradeport v1/v2. Single transport table; our importer
+# (cmd/nft-backfill) replays rows through the production venue mappers.
+# Addresses generated from internal/venues/addrs.go + NFT_VENUE_ADDRESS.
+# After validation: pause/delete the processor. Never used for steady state.
+spec_identifier:
+  spec_creator: nft-backfill
+  spec_name: nft-backfill-processor
+  spec_version: 0.0.1
+common_config:
+  network: mainnet
+  # SCOPE ME in the dashboard per Geomi best practice: earliest venue
+  # deployment beats 0. Cost scales with scanned history.
+  starting_version: 0
+  starting_version_override: null
+custom_config:
+  transaction_metadata:
+    timestamp:
+      - table: venue_events_backfill
+        column: timestamp_us
+    version:
+      - table: venue_events_backfill
+        column: version
+    epoch: []
+    block_height: []
+  events:
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::ListingPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::ListingPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::ListingCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::ListingCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::ListingFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::ListingFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::TokenOfferPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::TokenOfferPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::CollectionOfferPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::CollectionOfferPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::TokenOfferCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::TokenOfferCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::CollectionOfferCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::CollectionOfferCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::TokenOfferFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::TokenOfferFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::CollectionOfferFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x5b388f4c8f4957aae4bf29196bb67c22498c149bb114f7b350f5727fba91df44::events::CollectionOfferFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::ListingPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::ListingPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::ListingCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::ListingCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::ListingFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::ListingFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::TokenOfferPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::TokenOfferPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::CollectionOfferPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::CollectionOfferPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::TokenOfferCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::TokenOfferCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::CollectionOfferCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::CollectionOfferCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::TokenOfferFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::TokenOfferFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::CollectionOfferFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x584b50b999c78ade62f8359c91b5165ff390338d45f8e55969a04e65d76258c9::events::CollectionOfferFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::ListingPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::ListingPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::ListingCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::ListingCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::ListingFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::ListingFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::TokenOfferPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::TokenOfferPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::CollectionOfferPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::CollectionOfferPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::TokenOfferCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::TokenOfferCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::CollectionOfferCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::CollectionOfferCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::TokenOfferFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::TokenOfferFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::CollectionOfferFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x465a0051e8535859d4794f0af24dbf35c5349bedadab26404b20b825035ee790::events::CollectionOfferFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::ListingPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::ListingPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::ListingCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::ListingCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::ListingFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::ListingFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::TokenOfferPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::TokenOfferPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::CollectionOfferPlacedEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::CollectionOfferPlaced:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::TokenOfferCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::TokenOfferCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::CollectionOfferCanceledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::CollectionOfferCanceled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::TokenOfferFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::TokenOfferFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::CollectionOfferFilledEvent:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0x6de37368e31dff4580b211295198159ee6f98b42ffa93c5683bb955ca1be67e0::events::CollectionOfferFilled:
+      event_fields:
+        $.listing:
+          - table: venue_events_backfill
+            column: listing
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.quote:
+          - table: venue_events_backfill
+            column: quote
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.purchaser:
+          - table: venue_events_backfill
+            column: purchaser
+        $.token_offer:
+          - table: venue_events_backfill
+            column: token_offer
+        $.collection_offer:
+          - table: venue_events_backfill
+            column: collection_offer
+        $.commission:
+          - table: venue_events_backfill
+            column: commission
+        $.royalties:
+          - table: venue_events_backfill
+            column: royalties
+        $.remaining_token_amount:
+          - table: venue_events_backfill
+            column: remaining_token_amount
+        $.token_metadata.creator_address:
+          - table: venue_events_backfill
+            column: tm_creator
+        $.token_metadata.collection_name:
+          - table: venue_events_backfill
+            column: tm_collection
+        $.token_metadata.token_name:
+          - table: venue_events_backfill
+            column: tm_token_name
+        $.token_metadata.property_version:
+          - table: venue_events_backfill
+            column: tm_property_version
+        $.token_metadata.token:
+          - table: venue_events_backfill
+            column: tm_token
+        $.collection_metadata.creator_address:
+          - table: venue_events_backfill
+            column: cm_creator
+        $.collection_metadata.collection_name:
+          - table: venue_events_backfill
+            column: cm_collection
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0xe11c12ec495f3989c35e1c6a0af414451223305b579291fc8f3d9d0575a23c26::listings::BuyEvent:
+      event_fields:
+        $.buyer:
+          - table: venue_events_backfill
+            column: buyer
+        $.owner:
+          - table: venue_events_backfill
+            column: owner
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.token_id.token_data_id.creator:
+          - table: venue_events_backfill
+            column: v1_creator
+        $.token_id.token_data_id.collection:
+          - table: venue_events_backfill
+            column: v1_collection
+        $.token_id.token_data_id.name:
+          - table: venue_events_backfill
+            column: v1_name
+        $.token_id.property_version:
+          - table: venue_events_backfill
+            column: v1_property_version
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0xe11c12ec495f3989c35e1c6a0af414451223305b579291fc8f3d9d0575a23c26::listings_v2::BuyEvent:
+      event_fields:
+        $.buyer:
+          - table: venue_events_backfill
+            column: buyer
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.price:
+          - table: venue_events_backfill
+            column: price
+        $.listing.inner:
+          - table: venue_events_backfill
+            column: listing_inner
+        $.token.inner:
+          - table: venue_events_backfill
+            column: token_inner
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0xe11c12ec495f3989c35e1c6a0af414451223305b579291fc8f3d9d0575a23c26::listings_v2::InsertListingEvent:
+      event_fields:
+        $.listing.inner:
+          - table: venue_events_backfill
+            column: listing_inner
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.price:
+          - table: venue_events_backfill
+            column: price
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+    0xe11c12ec495f3989c35e1c6a0af414451223305b579291fc8f3d9d0575a23c26::listings_v2::DeleteListingEvent:
+      event_fields:
+        $.listing.inner:
+          - table: venue_events_backfill
+            column: listing_inner
+        $.seller:
+          - table: venue_events_backfill
+            column: seller
+        $.price:
+          - table: venue_events_backfill
+            column: price
+      event_metadata:
+        sequence_number: []
+        creation_number: []
+        account_address: []
+        event_type:
+          - table: venue_events_backfill
+            column: event_type
+        event_index:
+          - table: venue_events_backfill
+            column: event_index
+      constant_values: []
+  payload: {}
+  db_schema:
+    venue_events_backfill:
+      version:
+        is_index: false
+        is_nullable: false
+        is_option: false
+        is_primary_key: true
+        is_vec: false
+        default_value: null
+        column_type:
+          type: transaction_metadata
+          column_type: version
+      event_index:
+        is_index: false
+        is_nullable: false
+        is_option: false
+        is_primary_key: true
+        is_vec: false
+        default_value: null
+        column_type:
+          type: event_metadata
+          column_type: event_index
+      event_type:
+        is_index: true
+        is_nullable: false
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: event_metadata
+          column_type: event_type
+      timestamp_us:
+        is_index: false
+        is_nullable: false
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: transaction_metadata
+          column_type: timestamp
+      listing:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      quote:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      seller:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      purchaser:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      buyer:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      owner:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      token_offer:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      collection_offer:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      tm_creator:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      tm_collection:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      tm_token_name:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      cm_creator:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      cm_collection:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      v1_creator:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      v1_collection:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      v1_name:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      listing_inner:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      token_inner:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address
+      price:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: u64
+      commission:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: u64
+      royalties:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: u64
+      remaining_token_amount:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: u64
+      v1_property_version:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: false
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: u64
+      tm_property_version:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: true
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: u64
+      tm_token:
+        is_index: false
+        is_nullable: true
+        is_option: false
+        is_primary_key: false
+        is_vec: true
+        default_value: null
+        column_type:
+          type: move_type
+          column_type: address

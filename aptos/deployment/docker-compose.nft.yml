@@ -1,0 +1,58 @@
+# NFT marketplace stack on the options-nft-host-do droplet.
+# Postgres + indexer + API. /opt/nft/nft.toml is rendered by deploy-nft.yml
+# from the TOML template plus SOPS secrets (0600, host-only). Images from
+# DOCR (options/nft-*).
+services:
+  postgres:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nft
+      POSTGRES_USER: nft
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - /opt/nft/data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nft -d nft"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nft-indexer:
+    image: ${REGISTRY}/options/nft-indexer:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CONFIG_PATH: /etc/nft/nft.toml
+      DB_PASSWORD: ${DB_PASSWORD}
+      OUR_VENUE_ADDRESS: ${OUR_VENUE_ADDRESS:-}
+      FULLNODE_API_KEY: ${FULLNODE_API_KEY:-}
+      BIND_ADDR: 0.0.0.0:8090
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - /opt/nft/nft.toml:/etc/nft/nft.toml:ro
+
+  nft-api:
+    image: ${REGISTRY}/options/nft-api:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CONFIG_PATH: /etc/nft/nft.toml
+      DB_PASSWORD: ${DB_PASSWORD}
+      API_BIND: 0.0.0.0:8091
+      ADMIN_BIND: 0.0.0.0:8092
+      OUR_VENUE_ADDRESS: ${OUR_VENUE_ADDRESS:-}
+      ROUTER_PACKAGE: ${ROUTER_PACKAGE:-}
+      ROUTER_CONFIG: ${ROUTER_CONFIG:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      FULLNODE_API_KEY: ${FULLNODE_API_KEY:-}
+    ports:
+      - "127.0.0.1:8091:8091"
+      - "127.0.0.1:8092:8092"
+    volumes:
+      - /opt/nft/nft.toml:/etc/nft/nft.toml:ro
