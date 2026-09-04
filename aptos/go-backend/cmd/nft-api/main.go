@@ -153,13 +153,13 @@ func (s *server) handleListings(w http.ResponseWriter, r *http.Request) {
 		conds = append(conds, cond+"=$"+strconv.Itoa(len(args)))
 	}
 	if v := q.Get("marketplace"); v != "" {
-		push("marketplace=", v)
+		push("marketplace", v)
 	}
 	if v := q.Get("collection"); v != "" {
-		push("collection=", v)
+		push("collection", v)
 	}
 	if v := q.Get("seller"); v != "" {
-		push("seller=", strings.ToLower(v))
+		push("seller", strings.ToLower(v))
 	}
 	limit := 50
 	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 && v <= 200 {
