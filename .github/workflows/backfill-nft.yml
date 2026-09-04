@@ -5,6 +5,7 @@
 # Applies are idempotent; reruns converge. The user creates the Geomi
 # processor + GEOMI_BACKFILL_KEY secret first; pause/delete the processor
 # after the validation gates pass. Never for steady state.
+# Registration probe: rescan marker.
 name: backfill-nft
 
 on:
