@@ -1,14 +1,27 @@
-# Dump NFT service logs from the droplet. Dispatch-only diagnostics: no
-# deploys, no restarts, read-only `docker compose logs` over SSH.
+# NFT ops: log dumps and the one-time historical backfill. Dispatch-only.
+# `logs` is read-only diagnostics. `backfill` runs only when
+# geomi_graphql_url is set: it builds cmd/nft-backfill, tunnels to the
+# droplet Postgres over SSH, and replays a Geomi processor (template:
+# aptos/deployment/geomi-backfill.yaml) through the production mappers.
+# (Backfill lives here because GitHub was not indexing new workflow files
+# on this branch; edits to this registered file take effect on dispatch.)
 name: logs-nft
 
 on:
   workflow_dispatch:
     inputs:
       tail:
-        description: "Lines per service"
+        description: "Lines per service (logs job)"
         required: false
         default: "60"
+      geomi_graphql_url:
+        description: "Processor GraphQL URL to backfill from (empty skips the backfill job)"
+        required: false
+        default: ""
+      stop_version:
+        description: "Backfill: import versions below this (default: live indexer cursor)"
+        required: false
+        default: ""
 
 jobs:
   logs:
@@ -28,3 +41,46 @@ jobs:
           HOST=$(doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header)
           ssh -o StrictHostKeyChecking=no root@"$HOST" \
             'cd /opt/nft && docker compose --env-file .env ps && docker compose --env-file .env logs --tail '"${{ inputs.tail }}"' nft-indexer nft-api'
+
+  backfill:
+    if: github.event_name == 'workflow_dispatch' && inputs.geomi_graphql_url != ''
+    runs-on: ubuntu-latest
+    env:
+      OUR_VENUE: ${{ vars.NFT_VENUE_ADDRESS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: aptos/go-backend/go.mod
+      - name: Build importer
+        run: cd aptos/go-backend && go build -o /tmp/nft-backfill ./cmd/nft-backfill
+      - uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: Install sops
+        run: |
+          curl -fsSL -o /tmp/sops \
+            "https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64"
+          chmod +x /tmp/sops && sudo mv /tmp/sops /usr/local/bin/sops
+      - name: Run backfill through SSH tunnel
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+          GEOMI_API_KEY: ${{ secrets.GEOMI_BACKFILL_KEY }}
+          GEOMI_GRAPHQL_URL: ${{ inputs.geomi_graphql_url }}
+          STOP_VERSION: ${{ inputs.stop_version }}
+        run: |
+          set -e
+          test -n "$GEOMI_API_KEY" || { echo "add the GEOMI_BACKFILL_KEY secret first" >&2; exit 1; }
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          HOST=$(doctl compute droplet get options-nft-host-do --format PublicIPv4 --no-header)
+          export SOPS_AGE_KEY
+          DB_PASSWORD=$(sops -d --extract '["nft/db-password"]' aptos/deployment/secrets.enc.yaml)
+          ssh -f -N -L 5433:localhost:5432 -o StrictHostKeyChecking=no root@"$HOST"
+          DATABASE_URL="postgres://nft:${DB_PASSWORD}@localhost:5433/nft?sslmode=disable" \
+          OUR_VENUE_ADDRESS="$OUR_VENUE" \
+            /tmp/nft-backfill
