@@ -69,7 +69,7 @@ func main() {
 		reference.New("topaz-v2", venues.AddrTopazV2),
 		tradeport.New(venues.AddrTradeport),
 	}
-	client := stream.New(cfg.FullnodeURL)
+	client := stream.NewWithKey(cfg.FullnodeURL, stream.KeyFromEnv())
 
 	cursor, err := st.Cursor(ctx, "indexer")
 	if err != nil {

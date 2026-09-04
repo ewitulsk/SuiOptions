@@ -22,6 +22,7 @@ import (
 	"github.com/ewitulsk/SuiOptions/aptos/go-backend/internal/platform/config"
 	"github.com/ewitulsk/SuiOptions/aptos/go-backend/internal/platform/cors"
 	"github.com/ewitulsk/SuiOptions/aptos/go-backend/internal/platform/obs"
+	"github.com/ewitulsk/SuiOptions/aptos/go-backend/internal/stream"
 )
 
 type apiFileConfig struct {
@@ -326,6 +327,9 @@ func (s *server) simulate(ctx context.Context, sender string, e payload.Entry) e
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if key := stream.KeyFromEnv(); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 	resp, err := s.http.Do(req)
 	if err != nil {
 		return err

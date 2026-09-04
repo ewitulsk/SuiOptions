@@ -69,6 +69,7 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
           DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          FULLNODE_API_KEY: ${{ secrets.NFT_FULLNODE_API_KEY }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
@@ -103,6 +104,7 @@ jobs:
           ROUTER_PACKAGE=$ROUTER_PKG
           ROUTER_CONFIG=$ROUTER_CFG
           ADMIN_TOKEN=$ADMIN_TOKEN
+          FULLNODE_API_KEY=$FULLNODE_API_KEY
           EOF
           # Quoted heredoc: ${...} stays literal for the service binary,
           # which expands env placeholders itself at boot (safer for

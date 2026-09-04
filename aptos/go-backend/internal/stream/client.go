@@ -11,28 +11,57 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
 	"github.com/ewitulsk/SuiOptions/aptos/go-backend/internal/venues"
 )
 
+// ApplyKey attaches the API key to a fullnode request (no-op when empty).
+func (c *Client) ApplyKey(req *http.Request) {
+	if c.apiKey == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	q := req.URL.Query()
+	q.Set("api_key", c.apiKey)
+	req.URL.RawQuery = q.Encode()
+}
+
 // Client polls `<base>/transactions?start=<version>&limit=N`.
 type Client struct {
-	base   string
-	http   *http.Client
-	limit  int
+	base    string
+	http    *http.Client
+	limit   int
 	backoff time.Duration
+	// apiKey, when non-empty, is sent as both a Bearer token and an
+	// `api_key` query parameter: anonymous mainnet quota (~40k compute
+	// units/5min) sustains ~50 tps against a ~185 tps chain, so without a
+	// key the indexer falls behind forever. Either form authenticates the
+	// common providers (Aptos Labs, Geomi); unknown ones ignore it.
+	apiKey string
 }
 
 // New returns a Client for a fullnode base URL (live or archival).
 func New(base string) *Client {
+	return NewWithKey(base, "")
+}
+
+// NewWithKey is New plus a fullnode API key ("" = anonymous).
+func NewWithKey(base, apiKey string) *Client {
 	return &Client{
 		base:    base,
 		http:    &http.Client{Timeout: 30 * time.Second},
 		limit:   100,
 		backoff: 2 * time.Second,
+		apiKey:  apiKey,
 	}
+}
+
+// KeyFromEnv returns FULLNODE_API_KEY ("" when unset).
+func KeyFromEnv() string {
+	return os.Getenv("FULLNODE_API_KEY")
 }
 
 // LatestVersion returns the ledger tip.
@@ -41,6 +70,7 @@ func (c *Client) LatestVersion(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	c.ApplyKey(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return 0, err
@@ -63,6 +93,7 @@ func (c *Client) Fetch(ctx context.Context, start uint64) ([]venues.Transaction,
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	c.ApplyKey(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
