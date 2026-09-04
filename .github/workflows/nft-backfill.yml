@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       geomi_graphql_url:
-        description: "Processor GraphQL URL (https://api.mainnet.aptoslabs.com/nocode/v1/api/.../v1/graphql)"
+        description: "Processor GraphQL URL (nocode api for your processor id)"
         required: true
       stop_version:
         description: "Import versions below this (default: live indexer cursor)"
