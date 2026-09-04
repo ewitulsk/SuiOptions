@@ -69,7 +69,14 @@ func main() {
 		reference.New("topaz-v2", venues.AddrTopazV2),
 		tradeport.New(venues.AddrTradeport),
 	}
-	client := stream.NewWithKey(cfg.FullnodeURL, stream.KeyFromEnv())
+	key := stream.KeyFromEnv()
+	client := stream.NewWithKey(cfg.FullnodeURL, key)
+	// Anonymous quota sustains ~50 tps against a ~185 tps chain: pace
+	// anonymous polls hard, keyed polls only lightly.
+	pace := 2 * time.Second
+	if key != "" {
+		pace = 200 * time.Millisecond
+	}
 
 	cursor, err := st.Cursor(ctx, "indexer")
 	if err != nil {
@@ -118,10 +125,7 @@ func main() {
 		}
 		log.Printf("indexer: applied %d txs (%d activities), cursor=%d", len(txs), len(acts), last)
 		cursor = last + 1
-		// Pace successful polls: the anonymous fullnode quota (~40k compute
-		// units/5min) cannot sustain a tight fetch loop during backfill.
-		// A 100-tx page costs well over 150 units, so ~0.5 rps keeps us
-		// under the sustained rate; errors (usually 429s) wait longer.
-		time.Sleep(2 * time.Second)
+		// Pace successful polls (see pace above).
+		time.Sleep(pace)
 	}
 }
