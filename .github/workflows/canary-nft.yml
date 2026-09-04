@@ -36,11 +36,13 @@ jobs:
           BAL="$BAL" python3 -c 'import os, sys; sys.exit(0 if int(os.environ["BAL"]) > 100000000 else 1)' \
             || { echo "FUND ${DEPLOYER} BEFORE CANARY" >&2; exit 1; }
       - name: Mint canary token
+        env:
+          # Token name unique per run (GITHUB_ENV only propagates to later
+          # steps, so this step uses the shell variable directly).
+          TOKEN: CanarySweep${{ github.run_number }}
         run: |
           set -o pipefail
-          # Fixed collection/tokendata with room for every run; property
-          # version == run number keeps each canary's token unique.
-          echo "TOKEN=CanarySweep${{ github.run_number }}" >> "$GITHUB_ENV"
+          echo "TOKEN=$TOKEN" >> "$GITHUB_ENV"
           echo "PV=0" >> "$GITHUB_ENV"
           # shellcheck disable=SC2086
           aptos move run \
@@ -50,13 +52,13 @@ jobs:
           # shellcheck disable=SC2086
           aptos move run \
             --function-id 0x3::token::create_token_script \
-            --args string:CanarySweep string:CanarySweep2 string:"Canary token" u64:1 u64:1000000 string:https://example.com \
+            --args string:CanarySweep string:$TOKEN string:"Canary token" u64:1 u64:1000000 string:https://example.com \
               address:$DEPLOYER u64:100 u64:1 'bool:[false,false,false,false,false]' 'string:[]' 'u8:[]' 'string:[]' \
             --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2 || echo "tokendata exists, continuing"
           # shellcheck disable=SC2086
           aptos move run \
             --function-id 0x3::token::mint_script \
-            --args address:$DEPLOYER string:CanarySweep string:CanarySweep2 u64:1 \
+            --args address:$DEPLOYER string:CanarySweep string:$TOKEN u64:1 \
             --private-key "$APTOS_KEY" --url "$FN" --assume-yes 2>&1 | tail -2
       - name: List on our venue
         run: |
