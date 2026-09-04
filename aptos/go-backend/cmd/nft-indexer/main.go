@@ -71,10 +71,9 @@ func main() {
 	}
 	key := stream.KeyFromEnv()
 	client := stream.NewWithKey(cfg.FullnodeURL, key)
-	// One page in flight sustains ~210 tps against a ~190 tps chain —
-	// no catch-up margin. Two overlapping pages double that; four
-	// trips keyed 429s and collapses below single-flight.
-	const fetchAhead = 2
+	// Pipelined fetch trips keyed 429s and collapses below
+	// single-flight: stay sequential until the quota shape is known.
+	const fetchAhead = 1
 	pageSize := uint64(client.PageSize())
 	type pageResult struct {
 		txs []venues.Transaction

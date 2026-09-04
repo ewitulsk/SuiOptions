@@ -123,7 +123,7 @@ jobs:
           ssh -o StrictHostKeyChecking=no root@"$HOST" \
             "sed -i 's/^start_version.*/start_version = $START/' /opt/nft/nft.toml"
           ssh -o StrictHostKeyChecking=no root@"$HOST" \
-            'cd /opt/nft && docker compose --env-file .env pull && docker compose --env-file .env up -d --remove-orphans && sleep 15 && docker compose --env-file .env ps'
+            'cd /opt/nft && docker compose --env-file .env pull && docker compose --env-file .env up -d --remove-orphans && sleep 15 && docker compose --env-file .env ps && docker compose --env-file .env logs --tail 8 nft-indexer'
       - name: Edge TLS (nginx + certbot for nft.sui-options.com)
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
