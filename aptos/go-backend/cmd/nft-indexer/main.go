@@ -28,6 +28,10 @@ type indexerConfig struct {
 	BindAddr     string `toml:"bind_addr"`
 	OurVenue     string `toml:"our_venue_address"`
 	StartVersion uint64 `toml:"start_version"`
+	// StreamMode is "grpc" (Transaction Stream Service, default) or
+	// "rest" (fullnode REST polling fallback).
+	StreamMode   string `toml:"stream_mode"`
+	GRPCEndpoint string `toml:"grpc_endpoint"`
 }
 
 func main() {
@@ -95,18 +99,49 @@ func main() {
 		}()
 	}
 
-	cursor, err := st.Cursor(ctx, "indexer")
-	if err != nil {
-		log.Fatalf("indexer: cursor: %v", err)
+	loadCursor := func() uint64 {
+		cursor, err := st.Cursor(ctx, "indexer")
+		if err != nil {
+			log.Fatalf("indexer: cursor: %v", err)
+		}
+		// Fast-forward a stale cursor (e.g. accumulated while anonymous):
+		// anything before StartVersion is ancient history the REST window
+		// would take days to replay; backfill stays an archival-endpoint job.
+		if cfg.StartVersion != 0 && cursor < cfg.StartVersion {
+			log.Printf("indexer: fast-forwarding cursor %d -> %d", cursor, cfg.StartVersion)
+			cursor = cfg.StartVersion
+		}
+		return cursor
 	}
-	// Fast-forward a stale cursor (e.g. accumulated while anonymous):
-	// anything before StartVersion is ancient history the REST window
-	// would take days to replay; backfill stays an archival-endpoint job.
-	if cfg.StartVersion != 0 && cursor < cfg.StartVersion {
-		log.Printf("indexer: fast-forwarding cursor %d -> %d", cursor, cfg.StartVersion)
-		cursor = cfg.StartVersion
+	// applyTxs maps one ordered batch and advances the cursor to its last
+	// version. Batches are idempotent, so replays converge.
+	applyTxs := func(txs []venues.Transaction) (uint64, error) {
+		var acts []venues.Activity
+		for _, tx := range txs {
+			for _, m := range mappers {
+				mapped, err := m.Map(tx)
+				if err != nil {
+					log.Printf("indexer: mapper %s: %v", m.Marketplace(), err)
+					continue
+				}
+				acts = append(acts, mapped...)
+			}
+		}
+		last := txs[len(txs)-1].Version
+		if err := st.ApplyBatch(ctx, "indexer", acts, last); err != nil {
+			return 0, err
+		}
+		log.Printf("indexer: applied %d txs (%d activities), cursor=%d", len(txs), len(acts), last)
+		return last, nil
 	}
-	log.Printf("indexer: starting at version %d", cursor)
+
+	if cfg.StreamMode == "" || cfg.StreamMode == "grpc" {
+		runGRPC(ctx, cfg, mappers, st, loadCursor, applyTxs)
+		return
+	}
+
+	cursor := loadCursor()
+	log.Printf("indexer: starting REST poll at version %d", cursor)
 
 	nextFetch := cursor
 	for {
@@ -149,25 +184,13 @@ func main() {
 			client.Backoff(ctx)
 			continue
 		}
-		var acts []venues.Activity
-		for _, tx := range txs {
-			for _, m := range mappers {
-				mapped, err := m.Map(tx)
-				if err != nil {
-					log.Printf("indexer: mapper %s: %v", m.Marketplace(), err)
-					continue
-				}
-				acts = append(acts, mapped...)
-			}
-		}
-		last := txs[len(txs)-1].Version
-		if err := st.ApplyBatch(ctx, "indexer", acts, last); err != nil {
+		last, err := applyTxs(txs)
+		if err != nil {
 			log.Printf("indexer: apply: %v", err)
 			time.Sleep(2 * time.Second)
 			launch(cursor)
 			continue
 		}
-		log.Printf("indexer: applied %d txs (%d activities), cursor=%d", len(txs), len(acts), last)
 		cursor = last + 1
 		if uint64(len(txs)) < pageSize {
 			// Short page: reached the tip. Collapse the pipeline —
