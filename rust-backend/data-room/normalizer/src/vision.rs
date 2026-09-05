@@ -1,7 +1,8 @@
 //! Binance vision zips (bronze) → silver trades, partitioned per UTC day
 //! of `ts_event` (spec §6.6). Only `kind=trades` normalizes; aggTrades
-//! stays archive-only. Processed files get a `.done` state marker so the
-//! daily timer only touches new arrivals; deleting markers forces replay.
+//! stays archive-only. Processed files get a `.done` state marker, scoped
+//! by market, so the daily timer only touches new arrivals; deleting
+//! markers forces replay.
 //!
 //! Memory: rows stream through a one-day buffer — dumps are time-ordered,
 //! so each UTC day is serialized to (zstd) parquet bytes as soon as the
@@ -14,8 +15,20 @@ use tracing::info;
 
 use crate::{handle_rejects, list_keys, put_bytes, Store};
 
-fn done_key(zip_name: &str) -> String {
-    format!("silver/v1/_state/vision/{zip_name}.done")
+/// State-marker key for one processed dump, scoped by MARKET.
+///
+/// Binance publishes identically-named files in spot and um-futures
+/// (`SUIUSDT-trades-2023-05-03.zip` exists in both), and bronze is
+/// namespaced `market={market}` — so a flat `{zip}.done` let whichever
+/// market normalized first suppress the other. SUIUSDT is the symbol that
+/// hit it: present in both unit lists, its perp silver stopped at the
+/// dumps the spot pass had not already claimed (SO-466).
+///
+/// Legacy flat markers are deliberately NOT read: they cannot be
+/// attributed to a market after the fact. Migrate them by writing the
+/// scoped key for the market that legitimately produced the silver.
+fn done_key(market: &str, zip_name: &str) -> String {
+    format!("silver/v1/_state/vision/market={market}/{zip_name}.done")
 }
 
 /// Instrument mapping for a vision market label.
@@ -42,7 +55,8 @@ fn market_ids(market: &str, symbol: &str) -> anyhow::Result<(String, String)> {
 /// (monthly before the dailies of the same month), so overlapping
 /// coverage resolves deterministically. Returns zips processed.
 pub async fn normalize_pending(store: &Store, market: &str, symbol: &str) -> anyhow::Result<usize> {
-    let done = list_keys(store, "silver/v1/_state/vision/").await?;
+    let state_prefix = format!("silver/v1/_state/vision/market={market}/");
+    let done = list_keys(store, &state_prefix).await?;
     let done: std::collections::HashSet<&str> =
         done.iter().filter_map(|k| k.rsplit('/').next()).collect();
 
@@ -66,7 +80,7 @@ pub async fn normalize_pending(store: &Store, market: &str, symbol: &str) -> any
                 "bookTicker" => normalize_book_ticker_zip(store, key, market, symbol).await?,
                 _ => unreachable!(),
             }
-            put_bytes(store, &done_key(name), Vec::new()).await?;
+            put_bytes(store, &done_key(market, name), Vec::new()).await?;
             processed += 1;
         }
     }
@@ -337,4 +351,40 @@ pub async fn normalize_zip(
         total_rows + rejects.len(),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SO-466: the same dump name exists in both markets, so the marker
+    /// must be scoped or one market silently suppresses the other.
+    #[test]
+    fn done_markers_are_scoped_per_market() {
+        let zip = "SUIUSDT-trades-2023-05-03.zip";
+        let spot = done_key("spot", zip);
+        let perp = done_key("um-futures", zip);
+        assert_ne!(spot, perp, "spot and um-futures must not share a marker");
+        assert_eq!(
+            spot,
+            "silver/v1/_state/vision/market=spot/SUIUSDT-trades-2023-05-03.zip.done"
+        );
+        assert_eq!(
+            perp,
+            "silver/v1/_state/vision/market=um-futures/SUIUSDT-trades-2023-05-03.zip.done"
+        );
+        // Each key lives under the prefix `normalize_pending` lists for
+        // its market, and under no other market's prefix.
+        for (market, key) in [("spot", &spot), ("um-futures", &perp)] {
+            let mine = format!("silver/v1/_state/vision/market={market}/");
+            assert!(key.starts_with(&mine));
+            for other in ["spot", "um-futures"] {
+                if other != market {
+                    assert!(!key.starts_with(&format!("silver/v1/_state/vision/market={other}/")));
+                }
+            }
+        }
+        // The legacy flat key is not produced any more.
+        assert_ne!(spot, format!("silver/v1/_state/vision/{zip}.done"));
+    }
 }
